@@ -5601,6 +5601,40 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     return (char *)dev;
 }
 
+/* Detect whether the active GPU is discrete (separate VRAM) or integrated
+ * (unified memory, e.g. Strix Halo APU).  On discrete GPUs, raw host pointers
+ * are accessible from kernels but traverse PCIe on every read; the
+ * cudaHostRegister mapping path is preferred.  On integrated GPUs, host memory
+ * is directly accessible and the raw pointer path is fine.
+ *
+ * DS4_ROCM_REGISTERED_WEIGHTS overrides auto-detection:
+ *   "1" = always treat as discrete (force registered path)
+ *   "0" = always treat as integrated (force raw host pointer path)
+ *
+ * When the attribute query fails (unsupported ROCm version, etc.) the function
+ * defaults to discrete, which is the safer choice: the registered path works on
+ * all GPUs, while the raw pointer path silently degrades performance on
+ * discrete cards. */
+static int cuda_device_is_discrete(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+
+    const char *env = getenv("DS4_ROCM_REGISTERED_WEIGHTS");
+    if (env && *env) {
+        cached = (strcmp(env, "0") == 0) ? 0 : 1;
+        return cached;
+    }
+
+    int integrated = 0;
+    if (cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, 0) == cudaSuccess) {
+        cached = integrated ? 0 : 1;
+    } else {
+        (void)cudaGetLastError();
+        cached = 1;
+    }
+    return cached;
+}
+
 static const char *cuda_model_range_ptr_from_fd(
         const void *model_map,
         uint64_t offset,
@@ -5618,6 +5652,7 @@ static const char *cuda_model_range_ptr_from_fd(
                     (double)bytes / 1048576.0);
             return NULL;
         }
+        if (cuda_device_is_discrete()) return NULL;
         return cuda_model_ptr(model_map, offset);
     }
 
@@ -5636,6 +5671,7 @@ static const char *cuda_model_range_ptr_from_fd(
                     (double)bytes / 1048576.0);
             return NULL;
         }
+        if (cuda_device_is_discrete()) return NULL;
         return cuda_model_ptr(model_map, offset);
     }
     cudaError_t err = cudaSuccess;
