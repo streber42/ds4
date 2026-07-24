@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ds4_rocm_xdev.h"
 #include "ds4_gpu_mgpu.h"
 #include "ds4_gpu.h"
 #include "ds4_gpu_args.h"
@@ -23,6 +24,14 @@ extern "C" int ds4_gpu_init_multi(const ds4_gpu_config *cfg) {
     }
     g_gpu[0].device_id = cfg->device_indices[0];
     if (hipSetDevice(g_gpu[0].device_id) != hipSuccess) return 0;
+    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+    if (mesh) {
+        for (int i = 0; i < DS4_MAX_GPUS && i < DS4_ROCM_XDEV_MAX_DEVICES; i++) {
+            for (int j = 0; j < DS4_MAX_GPUS && j < DS4_ROCM_XDEV_MAX_DEVICES; j++) {
+                g_gpu_peer_ok[i][j] = mesh->peer_ok[i][j];
+            }
+        }
+    }
     return ds4_gpu_init();
 }
 
@@ -81,7 +90,13 @@ extern "C" int ds4_gpu_tensor_copy_async(ds4_gpu_tensor *dst,
 extern "C" int ds4_gpu_tensor_copy_xdev(ds4_gpu_tensor *dst,
                                           const ds4_gpu_tensor *src,
                                           uint64_t bytes) {
-    return ds4_gpu_tensor_copy(dst, 0, src, 0, bytes);
+    if (!dst || !src) return 0;
+    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+    int dst_dev = ds4_gpu_tensor_device(dst);
+    int src_dev = ds4_gpu_tensor_device(src);
+    if (dst_dev < 0) dst_dev = 0;
+    if (src_dev < 0) src_dev = 0;
+    return ds4_rocm_xdev_copy(mesh, dst_dev, dst->ptr, src_dev, src->ptr, (size_t)bytes, 0);
 }
 
 extern "C" int ds4_gpu_tensor_copy_xdev_default(ds4_gpu_tensor *dst,

@@ -1,6 +1,6 @@
 # Cross-device transfer module + standalone tests
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -23,16 +23,16 @@ should rarely change shape.
 
 ## Acceptance criteria
 
-- [ ] Module exposes exactly the three operations (establish mesh, copy, accumulate)
-- [ ] No peer-transfer API calls exist anywhere outside this module
-- [ ] Peer capability is detected per device pair, not assumed
-- [ ] Peer access is enabled in both directions where the pair supports it
-- [ ] Byte-exact copy correctness verified across every ordered device pair
-- [ ] Accumulate produces numerically correct sums against a CPU reference
-- [ ] Host-staging fallback engages when direct peer access is unavailable, and remains correct
-- [ ] Tests run standalone on plain device buffers without loading the model
-- [ ] A bandwidth floor is asserted so a future regression to a slow path is caught
-- [ ] Tests are runnable via the project's normal test entry point
+- [x] Module exposes exactly the three operations (establish mesh, copy, accumulate)
+- [x] No peer-transfer API calls exist anywhere outside this module
+- [x] Peer capability is detected per device pair, not assumed
+- [x] Peer access is enabled in both directions where the pair supports it
+- [x] Byte-exact copy correctness verified across every ordered device pair
+- [x] Accumulate produces numerically correct sums against a CPU reference
+- [x] Host-staging fallback engages when direct peer access is unavailable, and remains correct
+- [x] Tests run standalone on plain device buffers without loading the model
+- [x] A bandwidth floor is asserted so a future regression to a slow path is caught
+- [x] Tests are runnable via the project's normal test entry point
 
 ## Blocked by
 
