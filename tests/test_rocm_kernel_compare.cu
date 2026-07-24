@@ -578,6 +578,81 @@ static kcmp_result kcmp_run_tp_attention_prefill_raw_heads_range(void) {
     return r;
 }
 
+/* ds4_gpu_moe_handoff_pack_tensor: the sole kernel in the MoE-Handoff
+ * subsystem (issue 08, auxiliary TP hooks). It does no arithmetic -- just
+ * gathers ffn_norm/selected/weights into one contiguous buffer -- so a
+ * byte-offset or width mistake is the only possible failure mode, and an
+ * exact byte-for-byte comparison against a host-packed reference catches it
+ * directly (no floating-point tolerance needed). */
+static kcmp_result kcmp_run_moe_handoff_pack(void) {
+    const uint32_t n_embd = 384u;
+    const uint32_t n_expert = 6u;
+    const uint64_t packed_bytes = (uint64_t)n_embd * sizeof(float) +
+                                  (uint64_t)n_expert * sizeof(int32_t) +
+                                  (uint64_t)n_expert * sizeof(float);
+
+    float *ffn_norm = (float *)malloc(n_embd * sizeof(float));
+    int32_t *selected = (int32_t *)malloc(n_expert * sizeof(int32_t));
+    float *weights = (float *)malloc(n_expert * sizeof(float));
+    unsigned char *ref = (unsigned char *)malloc(packed_bytes);
+    unsigned char *got = (unsigned char *)malloc(packed_bytes);
+    if (!ffn_norm || !selected || !weights || !ref || !got) {
+        free(ffn_norm); free(selected); free(weights); free(ref); free(got);
+        return kcmp_fail("out of memory");
+    }
+    kcmp_fill_f32(ffn_norm, n_embd, 0x9a0c0001u, -3.0f, 3.0f);
+    kcmp_fill_f32(weights, n_expert, 0x9a0c0002u, 0.0f, 1.0f);
+    {
+        uint32_t s = 0x9a0c0003u;
+        for (uint32_t i = 0; i < n_expert; i++) {
+            selected[i] = (int32_t)(kcmp_lcg_next(&s) % 256u);
+        }
+    }
+
+    memcpy(ref, ffn_norm, n_embd * sizeof(float));
+    memcpy(ref + n_embd * sizeof(float), selected, n_expert * sizeof(int32_t));
+    memcpy(ref + n_embd * sizeof(float) + n_expert * sizeof(int32_t),
+           weights, n_expert * sizeof(float));
+
+    ds4_gpu_tensor *norm_t = ds4_gpu_tensor_alloc(n_embd * sizeof(float));
+    ds4_gpu_tensor *sel_t = ds4_gpu_tensor_alloc(n_expert * sizeof(int32_t));
+    ds4_gpu_tensor *w_t = ds4_gpu_tensor_alloc(n_expert * sizeof(float));
+    ds4_gpu_tensor *packed_t = ds4_gpu_tensor_alloc(packed_bytes);
+    kcmp_result r;
+    memset(&r, 0, sizeof(r));
+    if (!norm_t || !sel_t || !w_t || !packed_t) {
+        r = kcmp_fail("tensor alloc failed");
+    } else if (!ds4_gpu_tensor_write(norm_t, 0, ffn_norm, n_embd * sizeof(float)) ||
+               !ds4_gpu_tensor_write(sel_t, 0, selected, n_expert * sizeof(int32_t)) ||
+               !ds4_gpu_tensor_write(w_t, 0, weights, n_expert * sizeof(float))) {
+        r = kcmp_fail("tensor write failed");
+    } else if (!ds4_gpu_moe_handoff_pack_tensor(packed_t, norm_t, sel_t, w_t, n_embd, n_expert)) {
+        r = kcmp_fail("ds4_gpu_moe_handoff_pack_tensor launch failed");
+    } else if (!ds4_gpu_tensor_read(packed_t, 0, got, packed_bytes)) {
+        r = kcmp_fail("tensor read failed");
+    } else {
+        r.ok = 1;
+        r.n = packed_bytes;
+        r.divergent_at = packed_bytes;
+        if (memcmp(ref, got, packed_bytes) != 0) {
+            uint64_t i = 0;
+            while (i < packed_bytes && ref[i] == got[i]) i++;
+            r.divergent_at = i;
+            r.ref_at_divergence = (float)ref[i];
+            r.got_at_divergence = (float)got[i];
+            r.max_abs_err = 1.0f;
+        }
+        r.pass = (r.divergent_at == packed_bytes);
+    }
+
+    if (norm_t) ds4_gpu_tensor_free(norm_t);
+    if (sel_t) ds4_gpu_tensor_free(sel_t);
+    if (w_t) ds4_gpu_tensor_free(w_t);
+    if (packed_t) ds4_gpu_tensor_free(packed_t);
+    free(ffn_norm); free(selected); free(weights); free(ref); free(got);
+    return r;
+}
+
 static const kcmp_case KCMP_CASES[] = {
     { "rms_norm_plain",
       "ds4_gpu_rms_norm_plain_tensor vs double-precision RMSNorm reference (n=4096)",
@@ -594,6 +669,9 @@ static const kcmp_case KCMP_CASES[] = {
     { "tp_attention_prefill_raw_heads_range",
       "ds4_gpu_attention_prefill_raw_heads_range_tensor TP prefill row split vs double-precision softmax-attention ref (n_kv=6, q_row0=2, n_q=4, n_head=2, head_dim=8)",
       kcmp_run_tp_attention_prefill_raw_heads_range },
+    { "moe_handoff_pack",
+      "ds4_gpu_moe_handoff_pack_tensor vs host-packed byte-exact reference (n_embd=384, n_expert=6)",
+      kcmp_run_moe_handoff_pack },
 };
 #define KCMP_N_CASES (sizeof(KCMP_CASES) / sizeof(KCMP_CASES[0]))
 

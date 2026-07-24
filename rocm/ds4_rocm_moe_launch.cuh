@@ -2644,3 +2644,45 @@ extern "C" int ds4_gpu_routed_moe_batch_owned_tensor(
                              clamp, x, layer_index, n_tokens,
                              /*force_resident=*/true);
 }
+
+/* MoE handoff pack (issue 08, auxiliary TP hooks): the sole "MoE Handoff"
+ * category entry point. Reached only when DS4_CUDA_TP_MOE_PACK=1 is set
+ * (default off; ds4.c's metal_graph_cuda_tp_moe_pack_handoff_requested) --
+ * the default TP MoE path instead issues three separate ds4_gpu_tensor_copy_
+ * xdev calls for ffn_norm/selected/weights. Packing them first trades that
+ * for one cross-device copy plus this local gather. A direct, careful
+ * line-for-line port of CUDA's ds4_gpu_moe_handoff_pack_tensor (ds4_cuda.cu)
+ * -- no sharding/ownership decision here, just byte-offset packing, so
+ * numeric-equivalence evidence is an exact byte-for-byte match against a
+ * host-packed reference (tests/test_rocm_kernel_compare.cu,
+ * moe_handoff_pack case) rather than a floating-point tolerance. */
+extern "C" int ds4_gpu_moe_handoff_pack_tensor(
+        ds4_gpu_tensor       *packed,
+        const ds4_gpu_tensor *ffn_norm,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t              n_embd,
+        uint32_t              n_expert) {
+    if (!packed || !ffn_norm || !selected || !weights ||
+        n_embd == 0 || n_expert == 0) {
+        return 0;
+    }
+    const uint64_t bytes = (uint64_t)n_embd * sizeof(float) +
+                           (uint64_t)n_expert * sizeof(int32_t) +
+                           (uint64_t)n_expert * sizeof(float);
+    if (packed->bytes < bytes ||
+        ffn_norm->bytes < (uint64_t)n_embd * sizeof(float) ||
+        selected->bytes < (uint64_t)n_expert * sizeof(int32_t) ||
+        weights->bytes < (uint64_t)n_expert * sizeof(float)) {
+        return 0;
+    }
+    const uint32_t n = n_embd > n_expert ? n_embd : n_expert;
+    moe_handoff_pack_kernel<<<(n + 255u) / 256u, 256>>>(
+            (unsigned char *)packed->ptr,
+            (const float *)ffn_norm->ptr,
+            (const int32_t *)selected->ptr,
+            (const float *)weights->ptr,
+            n_embd,
+            n_expert);
+    return cuda_ok(cudaGetLastError(), "moe handoff pack launch");
+}

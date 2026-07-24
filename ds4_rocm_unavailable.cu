@@ -19,6 +19,14 @@
 /* ds4_gpu_add_xdev_tensor is implemented in ds4_rocm_compat.cu using the
  * cross-device module (ds4_rocm_xdev.h) -- it is transport, not per-model
  * kernel math, so it is not gated behind bring-up mode. */
+/* Only called from metal_graph_encode_attention_session_batch (ds4.c), the
+ * multi-session continuous-batching decode path -- session batching for
+ * ROCm is out of scope for this PRD (see PRD.md Out of Scope). The
+ * single-stream TP decode path (issue 05) applies RoPE via the already-real,
+ * non-TP-specific ds4_gpu_rope_tail_tensor instead. Same category as the
+ * other "_rows_"-suffixed session-batch-only hooks
+ * (ds4_gpu_kv_fp8_store_raw_decode_rows_tensor, ds4_gpu_rope_tail_decode_
+ * rows_tensor below). Deliberately refused, not deferred. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_attention_decode_rows_rope_tensor)
 /* DSpark-only (single-node speculative-decode verification, noncausal
  * softmax over draft-window rows); silently ignored by the distributed
@@ -47,6 +55,12 @@ ROCM_UNAVAILABLE_INT_OK(ds4_gpu_attention_output_q4_K_batch_tensor)
  * runs for every multi-tier session) and has a real implementation in
  * ds4_rocm.cu next to the other TP entry points. */
 ROCM_UNAVAILABLE_INT(ds4_gpu_device_cache_support_tensors)
+/* DSpark-only (the decode-time Markov-bias-plus-argmax fast path over draft
+ * logits, ds4.c: guarded by g->dspark_draft_tokens). DSpark speculative
+ * decoding in distributed/TP mode is out of scope for this PRD (see
+ * PRD.md Out of Scope; the distributed coordinator already silently ignores
+ * DSpark per the PRD problem statement), so this is unreached by any TP
+ * session regardless of rank count. Deliberately refused, not deferred. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_dspark_markov_argmax_tensor)
 /* ds4_gpu_indexer_top1_value_tensor and ds4_gpu_matmul_q8_0_top1_tensor are
  * the decode-only greedy-sampling shortcut that skips materializing full
@@ -56,6 +70,12 @@ ROCM_UNAVAILABLE_INT_OK(ds4_gpu_dspark_markov_argmax_tensor)
  * requested defaults false). Off by default and orthogonal to prefill;
  * deferred to issue 08 (auxiliary TP hooks). */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_indexer_top1_value_tensor)
+/* Only called from metal_graph_encode_qkv_session_batch (ds4.c), the
+ * multi-session continuous-batching decode path -- session batching for
+ * ROCm is out of scope for this PRD (see PRD.md Out of Scope). The
+ * single-stream decode/prefill path this port targets stores KV via the
+ * already-real, non-TP-specific ds4_gpu_kv_fp8_store_raw_tensor instead.
+ * Deliberately refused, not deferred. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_kv_fp8_store_raw_decode_rows_tensor)
 /* fuse_tp_attn_out_hc / DS4_CUDA_TP_ATTN_OUT_HC_FUSE default off (ds4.c) --
  * an optional decode-path fusion of the TP attention-output projection with
@@ -66,18 +86,31 @@ ROCM_UNAVAILABLE_INT_OK(ds4_gpu_matmul_q8_0_top1_tensor)
  * head fallback (ds4.c), itself only reached when out_a/out_b aren't both
  * Q8_0 -- dead for DeepSeek-V4-Flash's Q8_0 attn_output/output weights. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_matmul_quant_kslice_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_moe_handoff_pack_tensor)
+/* ds4_gpu_moe_handoff_pack_tensor has a real implementation in
+ * rocm/ds4_rocm_moe_launch.cuh (issue 08: auxiliary TP hooks) -- reached
+ * when DS4_CUDA_TP_MOE_PACK=1 (default off) selects the packed-handoff MoE
+ * mode instead of the default three-copy handoff. */
 /* ds4_gpu_register_model_map_no_copy has a real implementation in
  * ds4_rocm.cu (delegates to the already-real ds4_gpu_set_model_map) --
  * engine_install_per_device_caches calls it unconditionally for every
  * multi-tier session, TP included. ds4_gpu_register_support_map is
  * DSpark-only (see device_cache_support_tensors above) and stays a stub. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_register_support_map)
+/* Only called from metal_graph_encode_qkv_session_batch (ds4.c), the
+ * multi-session continuous-batching decode path -- out of scope for this
+ * PRD (see PRD.md Out of Scope). The single-stream decode/prefill path
+ * applies RoPE via the already-real, non-TP-specific ds4_gpu_rope_tail_tensor
+ * instead. Deliberately refused, not deferred. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_rope_tail_decode_rows_tensor)
-/* ds4_gpu_routed_moe_batch_owned_tensor has a real implementation in
- * ds4_rocm_moe_launch.cuh (issue 07: TP prefill-path kernels) -- reached
- * unconditionally for the prefill/batch routed-MoE TP path
- * (metal_graph_encode_mixed_routed_rows, ds4.c, cuda_tp_owned_batch_moe). */
+/* ds4_gpu_routed_moe_batch_owned_tensor (formerly stubbed here) has a real
+ * implementation in ds4_rocm_moe_launch.cuh (issue 07: TP prefill-path
+ * kernels) -- reached unconditionally for the prefill/batch routed-MoE TP
+ * path (metal_graph_encode_mixed_routed_rows, ds4.c, cuda_tp_owned_batch_moe). */
+/* Gated on g->cuda_tp_ep_pack_exact (ds4.c:21385), which
+ * metal_graph_cuda_tp_ep_pack_exact_requested() forces false on ROCm builds
+ * -- the packed-4-slot layout is a CUDA-only perf optimization over the
+ * plain 6-slot owned combine (see ds4_gpu_routed_moe_owned_slots_combine_
+ * tensor, already real, issue 05). Confirmed unreachable under ROCm. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_routed_moe_owned_packed_combine_tensor)
 /* Both are decode-only (metal_graph_encode_decode_layer_phase, ds4.c).
  * _owned_ needs cuda_tp_ep_fused_hc_reduce, which ds4.c ties to

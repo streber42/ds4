@@ -1,10 +1,13 @@
 {
   "feature": "rocm-tensor-parallel",
-  "version": "1.0",
+  "version": "2.0",
   "summary": {
     "total_entry_points": 37,
-    "implemented": 1,
-    "stubbed": 36
+    "implemented": 15,
+    "stubbed": 22,
+    "stubbed_deliberately_refused": 7,
+    "stubbed_proven_unreachable": 15,
+    "stubbed_open": 0
   },
   "entry_points": [
     {
@@ -12,19 +15,23 @@
       "category": "Cross-Device Accumulate",
       "status": "implemented",
       "signature": "int ds4_gpu_add_xdev_tensor(...)",
-      "target_slice": "04-tp-plumbing-no-crash.md (implemented here via ds4_rocm_xdev.h; transport, not kernel math)"
+      "target_slice": "04-tp-plumbing-no-crash.md (implemented in ds4_rocm_compat.cu via ds4_rocm_xdev.h; transport, not kernel math)"
     },
     {
       "name": "ds4_gpu_attention_decode_rows_rope_tensor",
       "category": "Attention",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Only called from metal_graph_encode_attention_session_batch (ds4.c) -- continuous/session batching is out of scope for this PRD. Single-stream TP decode applies RoPE via the already-real, non-TP-specific ds4_gpu_rope_tail_tensor instead.",
       "signature": "int ds4_gpu_attention_decode_rows_rope_tensor(...)",
-      "target_slice": "05-first-correct-token.md"
+      "target_slice": "05-first-correct-token.md (reachability documented under issue 08)"
     },
     {
       "name": "ds4_gpu_attention_noncausal_raw_batch_heads_tensor",
       "category": "Attention",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "DSpark-only (noncausal softmax over draft-window rows). DSpark speculative decoding in distributed/TP mode is out of scope for this PRD; silently ignored by the distributed coordinator per the PRD problem statement.",
       "signature": "int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(...)",
       "target_slice": "07-tp-prefill-path.md"
     },
@@ -32,6 +39,8 @@
       "name": "ds4_gpu_attention_output_low_q4_K_slice_tensor",
       "category": "Attention",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Only called when layer->attn_output_a->type == DS4_TENSOR_Q4_K. DeepSeek-V4-Flash's attn_output_a is Q8_0, so this branch is dead for the model this port targets.",
       "signature": "int ds4_gpu_attention_output_low_q4_K_slice_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -39,6 +48,8 @@
       "name": "ds4_gpu_attention_output_low_q8_rows_exact_tensor",
       "category": "Attention",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Session-batch only (metal_graph_encode_attn_post_session_batch, count>=2 concurrent decode items) -- continuous/session batching is out of scope for this PRD.",
       "signature": "int ds4_gpu_attention_output_low_q8_rows_exact_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -46,41 +57,46 @@
       "name": "ds4_gpu_attention_output_q4_K_batch_tensor",
       "category": "Attention",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Same Q4_K attention-output-low branch as ds4_gpu_attention_output_low_q4_K_slice_tensor's batch variant -- dead for DeepSeek-V4-Flash's Q8_0 attn_output_a.",
       "signature": "int ds4_gpu_attention_output_q4_K_batch_tensor(...)",
       "target_slice": "07-tp-prefill-path.md"
     },
     {
       "name": "ds4_gpu_attention_output_q8_tp_tensor",
       "category": "Attention",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_attention_output_q8_tp_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
     {
       "name": "ds4_gpu_attention_prefill_raw_heads_range_tensor",
       "category": "Attention",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_attention_prefill_raw_heads_range_tensor(...)",
-      "target_slice": "07-tp-prefill-path.md"
+      "target_slice": "07-tp-prefill-path.md (first prefill kernel in subsystem; scaffold case tp_attention_prefill_raw_heads_range, max_abs_err=2.98e-8)"
     },
     {
       "name": "ds4_gpu_attention_prefill_static_mixed_heads_range_tensor",
       "category": "Attention",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_attention_prefill_static_mixed_heads_range_tensor(...)",
-      "target_slice": "07-tp-prefill-path.md"
+      "target_slice": "07-tp-prefill-path.md (gated on end-to-end logits per PRD testing strategy, not the first kernel in its subsystem)"
     },
     {
       "name": "ds4_gpu_device_cache_support_tensors",
       "category": "Device Cache & Registration",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "Errno-style '0 = success' contract; DSpark-only (engine_install_dspark_support_cache returns early when e->dspark is unset). Unreached by a plain TP session; DSpark in distributed mode is out of scope.",
       "signature": "int ds4_gpu_device_cache_support_tensors(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
     {
       "name": "ds4_gpu_device_cache_tensors",
       "category": "Device Cache & Registration",
-      "status": "stubbed",
+      "status": "implemented",
+      "reason": "engine_install_per_device_caches runs for every multi-tier session (pipeline and TP alike). Always-succeed no-op is correctness-safe: every weight read falls back to a host-mapped/uncached read when no device range was cached, so this is a performance optimization not yet ported, not a correctness gap.",
       "signature": "int ds4_gpu_device_cache_tensors(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
@@ -88,13 +104,15 @@
       "name": "ds4_gpu_dspark_markov_argmax_tensor",
       "category": "DSpark",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "DSpark decode-time Markov-bias-plus-argmax fast path. DSpark speculative decoding in distributed/TP mode is out of scope for this PRD, so unreached by any TP session regardless of rank count.",
       "signature": "int ds4_gpu_dspark_markov_argmax_tensor(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
     {
       "name": "ds4_gpu_hc_expand_add_tensor",
       "category": "Attention",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_hc_expand_add_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -102,6 +120,8 @@
       "name": "ds4_gpu_indexer_top1_value_tensor",
       "category": "Indexer & RoPE",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "Decode-only greedy-sampling shortcut (metal_graph_encode_output_head_split_top1) reached only when DS4_CUDA_GREEDY_SPLIT_TOP1 is explicitly set (default off) and no logits/top2 are needed. Off-by-default performance path, orthogonal to correctness of the default path.",
       "signature": "int ds4_gpu_indexer_top1_value_tensor(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
@@ -109,6 +129,8 @@
       "name": "ds4_gpu_kv_fp8_store_raw_decode_rows_tensor",
       "category": "KV Store",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Only called from metal_graph_encode_qkv_session_batch (ds4.c) -- session batching is out of scope for this PRD. Single-stream decode stores KV via the already-real, non-TP-specific ds4_gpu_kv_fp8_store_raw_tensor instead.",
       "signature": "int ds4_gpu_kv_fp8_store_raw_decode_rows_tensor(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
@@ -116,27 +138,32 @@
       "name": "ds4_gpu_matmul_q8_0_kslice_hc_expand_add_tensor",
       "category": "Matmul",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "fuse_tp_attn_out_hc / DS4_CUDA_TP_ATTN_OUT_HC_FUSE defaults off -- an optional decode-path fusion of the TP attention-output projection with the HC expand, not required for correctness.",
       "signature": "int ds4_gpu_matmul_q8_0_kslice_hc_expand_add_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
     {
       "name": "ds4_gpu_matmul_q8_0_kslice_rows_tensor",
       "category": "Matmul",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_matmul_q8_0_kslice_rows_tensor(...)",
-      "target_slice": "07-tp-prefill-path.md"
+      "target_slice": "07-tp-prefill-path.md (scaffold case tp_matmul_q8_0_kslice_rows, max_abs_err=3.5e-3)"
     },
     {
       "name": "ds4_gpu_matmul_q8_0_kslice_tensor",
       "category": "Matmul",
-      "status": "stubbed",
+      "status": "implemented",
+      "reason": "Single-row (n_tokens==1) special case of the already-real ds4_gpu_matmul_q8_0_kslice_rows_tensor. Not reached from ds4.c directly (only caller is the dead matmul_quant_kslice_tensor fallback) but ported as a zero-risk two-line delegation, mirroring CUDA's own implementation, rather than left stubbed.",
       "signature": "int ds4_gpu_matmul_q8_0_kslice_tensor(...)",
-      "target_slice": "05-first-correct-token.md"
+      "target_slice": "08-auxiliary-tp-hooks.md (ported this slice; originally target-tagged 05)"
     },
     {
       "name": "ds4_gpu_matmul_q8_0_top1_tensor",
       "category": "Matmul",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "Paired with ds4_gpu_indexer_top1_value_tensor as the decode-only greedy-sampling shortcut; off by default (DS4_CUDA_GREEDY_SPLIT_TOP1).",
       "signature": "int ds4_gpu_matmul_q8_0_top1_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -144,20 +171,24 @@
       "name": "ds4_gpu_matmul_quant_kslice_tensor",
       "category": "Matmul",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Only called from metal_graph_matmul_dense_quant_kslice's non-Q8_0 output-head fallback, itself only reached when out_a/out_b aren't both Q8_0 -- dead for DeepSeek-V4-Flash's Q8_0 attn_output/output weights.",
       "signature": "int ds4_gpu_matmul_quant_kslice_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
     {
       "name": "ds4_gpu_moe_handoff_pack_tensor",
       "category": "MoE Handoff",
-      "status": "stubbed",
+      "status": "implemented",
+      "reason": "Ported this slice: pure gather kernel (ffn_norm/selected/weights -> one contiguous buffer), no ownership/sharding decision. Reached when DS4_CUDA_TP_MOE_PACK=1 (default off) selects the packed-handoff MoE mode. Numeric-equivalence evidence: scaffold case moe_handoff_pack, exact byte-for-byte match (max_abs_err=0) against a host-packed reference on real hardware.",
       "signature": "int ds4_gpu_moe_handoff_pack_tensor(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
     {
       "name": "ds4_gpu_register_model_map_no_copy",
       "category": "Device Cache & Registration",
-      "status": "stubbed",
+      "status": "implemented",
+      "reason": "Delegates to the already-real ds4_gpu_set_model_map, which is already mmap-backed (no eager device copy). engine_install_per_device_caches calls it unconditionally for every multi-tier session, TP included.",
       "signature": "int ds4_gpu_register_model_map_no_copy(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
@@ -165,6 +196,8 @@
       "name": "ds4_gpu_register_support_map",
       "category": "Device Cache & Registration",
       "status": "stubbed",
+      "resolution": "deliberately_refused",
+      "reason": "DSpark-only (see ds4_gpu_device_cache_support_tensors). Unreached by a plain TP session.",
       "signature": "int ds4_gpu_register_support_map(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
@@ -172,20 +205,22 @@
       "name": "ds4_gpu_rope_tail_decode_rows_tensor",
       "category": "Indexer & RoPE",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Only called from metal_graph_encode_qkv_session_batch (ds4.c) -- session batching is out of scope for this PRD. Single-stream decode applies RoPE via the already-real, non-TP-specific ds4_gpu_rope_tail_tensor instead.",
       "signature": "int ds4_gpu_rope_tail_decode_rows_tensor(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
     },
     {
       "name": "ds4_gpu_routed_moe_batch_owned_tensor",
       "category": "Routed MoE",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_routed_moe_batch_owned_tensor(...)",
       "target_slice": "07-tp-prefill-path.md"
     },
     {
       "name": "ds4_gpu_routed_moe_one_owned_tensor",
       "category": "Routed MoE",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_routed_moe_one_owned_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -193,20 +228,22 @@
       "name": "ds4_gpu_routed_moe_owned_packed_combine_tensor",
       "category": "Routed MoE",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Gated on g->cuda_tp_ep_pack_exact, which metal_graph_cuda_tp_ep_pack_exact_requested() forces false on ROCm builds -- the packed-4-slot layout is a CUDA-only perf optimization over the already-real plain 6-slot owned combine (ds4_gpu_routed_moe_owned_slots_combine_tensor).",
       "signature": "int ds4_gpu_routed_moe_owned_packed_combine_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
     {
       "name": "ds4_gpu_routed_moe_owned_slots_combine_rows_tensor",
       "category": "Routed MoE",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_routed_moe_owned_slots_combine_rows_tensor(...)",
       "target_slice": "07-tp-prefill-path.md"
     },
     {
       "name": "ds4_gpu_routed_moe_owned_slots_combine_tensor",
       "category": "Routed MoE",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_routed_moe_owned_slots_combine_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -214,6 +251,8 @@
       "name": "ds4_gpu_shared_down_hc_expand_add_q8_0_tensor",
       "category": "Shared Expert",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Decode-only; needs fuse_shared_down_hc, which requires g->tp_world < 2 -- unreachable under any TP session.",
       "signature": "int ds4_gpu_shared_down_hc_expand_add_q8_0_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -221,13 +260,15 @@
       "name": "ds4_gpu_shared_down_hc_expand_owned_q8_0_tensor",
       "category": "Shared Expert",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Decode-only; needs cuda_tp_ep_fused_hc_reduce, which ds4.c ties to cuda_tp_ep_pack_exact -- forced false for ROCm. Confirmed unreachable.",
       "signature": "int ds4_gpu_shared_down_hc_expand_owned_q8_0_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
     {
       "name": "ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor",
       "category": "Shared Expert",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor(...)",
       "target_slice": "05-first-correct-token.md"
     },
@@ -235,36 +276,46 @@
       "name": "ds4_gpu_tp_batch_gate_encode",
       "category": "TP Gate Synchronisation",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "All ds4.c call sites for the five TP Gate Synchronisation entries are gated by g->tp_world == 2, set only inside ds4_engine_tp_bind, which hard-refuses off-Metal. These belong to the Metal two-machine --tensor-parallel --role gate protocol (ds4_tp.c), a different mechanism from --cuda-tensor-parallel's single-process design. Structurally unreachable dead code under ROCm; documented per issue 04's explicit finding and handoff to issue 08.",
       "signature": "int ds4_gpu_tp_batch_gate_encode(...)",
-      "target_slice": "04-tp-plumbing-no-crash.md"
+      "target_slice": "04-tp-plumbing-no-crash.md (reachability documented under issue 08 per issue 04's explicit handoff)"
     },
     {
       "name": "ds4_gpu_tp_big_gate_encode",
       "category": "TP Gate Synchronisation",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Same Metal two-machine gate protocol as ds4_gpu_tp_batch_gate_encode -- structurally unreachable under ROCm's --cuda-tensor-parallel.",
       "signature": "int ds4_gpu_tp_big_gate_encode(...)",
-      "target_slice": "04-tp-plumbing-no-crash.md"
+      "target_slice": "04-tp-plumbing-no-crash.md (reachability documented under issue 08 per issue 04's explicit handoff)"
     },
     {
       "name": "ds4_gpu_tp_big_gate_kick",
       "category": "TP Gate Synchronisation",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Same Metal two-machine gate protocol; returns a sequence number (data, not boolean), so the plain 0-returning stub is its neutral value. Unreachable under ROCm's --cuda-tensor-parallel.",
       "signature": "uint64_t ds4_gpu_tp_big_gate_kick(...)",
-      "target_slice": "04-tp-plumbing-no-crash.md"
+      "target_slice": "04-tp-plumbing-no-crash.md (reachability documented under issue 08 per issue 04's explicit handoff)"
     },
     {
       "name": "ds4_gpu_tp_big_gate_wait",
       "category": "TP Gate Synchronisation",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Same Metal two-machine gate protocol as ds4_gpu_tp_batch_gate_encode -- structurally unreachable under ROCm's --cuda-tensor-parallel.",
       "signature": "int ds4_gpu_tp_big_gate_wait(...)",
-      "target_slice": "04-tp-plumbing-no-crash.md"
+      "target_slice": "04-tp-plumbing-no-crash.md (reachability documented under issue 08 per issue 04's explicit handoff)"
     },
     {
       "name": "ds4_gpu_tp_gate_encode",
       "category": "TP Gate Synchronisation",
       "status": "stubbed",
+      "resolution": "proven_unreachable",
+      "reason": "Same Metal two-machine gate protocol as ds4_gpu_tp_batch_gate_encode -- structurally unreachable under ROCm's --cuda-tensor-parallel. The real ROCm cross-device work happens through ds4_gpu_tensor_copy_xdev / ds4_gpu_add_xdev_tensor and the cuda_tp_attn/cuda_tp_moe/cuda_tp_ep/cuda_tp_shared branches in ds4.c.",
       "signature": "int ds4_gpu_tp_gate_encode(...)",
-      "target_slice": "04-tp-plumbing-no-crash.md"
+      "target_slice": "04-tp-plumbing-no-crash.md (reachability documented under issue 08 per issue 04's explicit handoff)"
     }
   ]
 }

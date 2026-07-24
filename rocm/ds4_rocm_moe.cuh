@@ -4686,3 +4686,28 @@ __global__ static void moe_owned_slots_combine_kernel(
     float peer = slotv[3] + slotv[4] + slotv[5];
     out[col] = home + peer;
 }
+
+/* MoE handoff pack (issue 08, auxiliary TP hooks): gathers ffn_norm,
+ * selected, and weights into one contiguous [norm|selected|weights] buffer
+ * so DS4_CUDA_TP_MOE_PACK=1 can hand the router state to the partner rank
+ * with a single cross-device copy instead of three. Pure gather, no
+ * arithmetic -- ported line-for-line from CUDA's moe_handoff_pack_kernel
+ * (ds4_cuda.cu). */
+__global__ static void moe_handoff_pack_kernel(
+        unsigned char *packed,
+        const float *ffn_norm,
+        const int32_t *selected,
+        const float *weights,
+        uint32_t n_embd,
+        uint32_t n_expert) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    float *packed_norm = (float *)packed;
+    int32_t *packed_selected = (int32_t *)(packed + (uint64_t)n_embd * sizeof(float));
+    float *packed_weights = (float *)(packed + (uint64_t)n_embd * sizeof(float) +
+                                      (uint64_t)n_expert * sizeof(int32_t));
+    if (i < n_embd) packed_norm[i] = ffn_norm[i];
+    if (i < n_expert) {
+        packed_selected[i] = selected[i];
+        packed_weights[i] = weights[i];
+    }
+}

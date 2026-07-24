@@ -168,6 +168,21 @@ extern "C" int ds4_gpu_device_cache_tensors(int device_id, const ds4_tensor_rang
  * .scratch/rocm-tensor-parallel/PRD.md). These entry points fail loudly and
  * name themselves by default via ds4_rocm_tp_stub(); DS4_ROCM_TP_BRINGUP=1
  * is the sole opt-in escape hatch for plumbing bring-up. */
+/* ds4_gpu_tp_gate_encode / _batch_gate_encode / _big_gate_encode below (plus
+ * ds4_gpu_tp_big_gate_kick / _big_gate_wait in ds4_rocm_unavailable.cu) are
+ * the "TP Gate Synchronisation" category (issue 08, auxiliary TP hooks --
+ * per issue 04's trace, their listed "Issue 04" target was a naming-pattern
+ * guess that didn't hold up). All nine ds4.c call sites for these five are
+ * gated by g->tp_world == 2, set only inside ds4_engine_tp_bind, which hard-
+ * refuses off-Metal ("tensor parallelism requires the Metal backend",
+ * ds4.c). They belong to the Metal two-machine --tensor-parallel --role gate
+ * protocol (ds4_tp.c), a different mechanism from --cuda-tensor-parallel's
+ * single-process multi-GPU design. So under ROCm's --cuda-tensor-parallel
+ * these five are structurally unreachable dead code -- the real ROCm
+ * cross-device work happens through the already-real
+ * ds4_gpu_tensor_copy_xdev / ds4_gpu_add_xdev_tensor primitives and the
+ * cuda_tp_attn/cuda_tp_moe/cuda_tp_ep/cuda_tp_shared branches in ds4.c.
+ * Deliberately left as no-op placeholders, not deferred. */
 extern "C" int ds4_gpu_tp_gate_encode(uint32_t layer, uint32_t gate) {
     (void)layer; (void)gate;
     return ds4_rocm_tp_stub_ok("ds4_gpu_tp_gate_encode");
@@ -210,15 +225,31 @@ extern "C" int ds4_gpu_tp_batch_gate_encode(uint32_t layer, uint32_t rows) {
     return ds4_rocm_tp_stub_ok("ds4_gpu_tp_batch_gate_encode");
 }
 
+/* Single-row (n_tokens == 1) special case of ds4_gpu_matmul_q8_0_kslice_
+ * rows_tensor (already real, issue 05/07): slices x to its owned K range and
+ * delegates. Not reached from ds4.c directly -- its only caller is
+ * ds4_gpu_matmul_quant_kslice_tensor's non-Q8_0 output-head fallback, itself
+ * dead for this model (see that stub's comment in ds4_rocm_unavailable.cu)
+ * -- but a two-line delegation to an already-proven kernel is zero
+ * incremental risk, so it is ported for real rather than left stubbed.
+ * Ported line-for-line from CUDA's ds4_gpu_matmul_q8_0_kslice_tensor
+ * (ds4_cuda.cu). */
 extern "C" int ds4_gpu_matmul_q8_0_kslice_tensor(
         ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
         uint64_t weight_offset, uint64_t full_in_dim, uint64_t k_off,
         uint64_t k_cnt, uint64_t out_dim, const ds4_gpu_tensor *x,
         uint64_t x_elem_off) {
-    (void)out; (void)model_map; (void)model_size; (void)weight_offset;
-    (void)full_in_dim; (void)k_off; (void)k_cnt; (void)out_dim; (void)x;
-    (void)x_elem_off;
-    return ds4_rocm_tp_stub_ok("ds4_gpu_matmul_q8_0_kslice_tensor");
+    if (!x || x_elem_off > x->bytes / sizeof(float) ||
+        k_cnt > x->bytes / sizeof(float) - x_elem_off) {
+        return 0;
+    }
+    ds4_gpu_tensor x_slice = *x;
+    x_slice.ptr = (char *)x->ptr + x_elem_off * sizeof(float);
+    x_slice.bytes = k_cnt * sizeof(float);
+    x_slice.owner = 0;
+    return ds4_gpu_matmul_q8_0_kslice_rows_tensor(
+            out, model_map, model_size, weight_offset,
+            full_in_dim, out_dim, k_off, k_cnt, &x_slice, 1u);
 }
 
 /* Group-sliced attention-output pair for 2-rank TP decode (n_tokens == 1
