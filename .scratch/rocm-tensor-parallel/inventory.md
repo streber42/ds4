@@ -1,6 +1,6 @@
 # ROCm Tensor Parallel Entry Point Inventory
 
-Status: `in-progress` (0 / 37 implemented)
+Status: `in-progress` (1 / 37 implemented)
 
 This inventory enumerates all 37 GPU entry points for the ROCm tensor-parallelism port.
 It serves as the machine-checkable and human-readable progress tracker and the guard against quietly forgetting any required stub.
@@ -11,7 +11,7 @@ Machine-checkable representation: [inventory.json](file:///home/murphy/src/ds4-r
 
 | # | Entry Point Name | Category | Status | Target Slice |
 |---|------------------|----------|--------|--------------|
-| 1 | `ds4_gpu_add_xdev_tensor` | Cross-Device Accumulate | ❌ Stubbed | Issue 01 / Issue 08 |
+| 1 | `ds4_gpu_add_xdev_tensor` | Cross-Device Accumulate | ✅ Implemented | Issue 04 |
 | 2 | `ds4_gpu_attention_decode_rows_rope_tensor` | Attention | ❌ Stubbed | Issue 05 |
 | 3 | `ds4_gpu_attention_noncausal_raw_batch_heads_tensor` | Attention | ❌ Stubbed | Issue 07 |
 | 4 | `ds4_gpu_attention_output_low_q4_K_slice_tensor` | Attention | ❌ Stubbed | Issue 05 |

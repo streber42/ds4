@@ -3,16 +3,16 @@
   "version": "1.0",
   "summary": {
     "total_entry_points": 37,
-    "implemented": 0,
-    "stubbed": 37
+    "implemented": 1,
+    "stubbed": 36
   },
   "entry_points": [
     {
       "name": "ds4_gpu_add_xdev_tensor",
       "category": "Cross-Device Accumulate",
-      "status": "stubbed",
+      "status": "implemented",
       "signature": "int ds4_gpu_add_xdev_tensor(...)",
-      "target_slice": "01-cross-device-transfer-module.md / 08-auxiliary-tp-hooks.md"
+      "target_slice": "04-tp-plumbing-no-crash.md (implemented here via ds4_rocm_xdev.h; transport, not kernel math)"
     },
     {
       "name": "ds4_gpu_attention_decode_rows_rope_tensor",

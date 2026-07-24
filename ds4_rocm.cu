@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "ds4_gpu.h"
+#include "ds4_gpu_mgpu.h"
 #include "ds4_rocm_tp_bringup.h"
 
 #ifndef M_PI
@@ -57,11 +58,16 @@ enum {
     DS4_ROCM_ATTENTION_RAW_SCORE_CAP = 256u
 };
 
+#ifndef DS4_GPU_TENSOR_DEFINED
+#define DS4_GPU_TENSOR_DEFINED
 struct ds4_gpu_tensor {
     void *ptr;
     uint64_t bytes;
     int owner;
+    int device_id;
 };
+typedef struct ds4_gpu_tensor ds4_gpu_tensor;
+#endif
 
 typedef struct {
     uint8_t scales[CUDA_QK_K / 16];

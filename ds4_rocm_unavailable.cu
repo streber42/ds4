@@ -11,7 +11,9 @@
 
 #define ROCM_UNAVAILABLE_INT(name) extern "C" int name(...) { return ds4_rocm_tp_stub(#name); }
 
-ROCM_UNAVAILABLE_INT(ds4_gpu_add_xdev_tensor)
+/* ds4_gpu_add_xdev_tensor is implemented in ds4_rocm_compat.cu using the
+ * cross-device module (ds4_rocm_xdev.h) -- it is transport, not per-model
+ * kernel math, so it is not gated behind bring-up mode. */
 ROCM_UNAVAILABLE_INT(ds4_gpu_attention_decode_rows_rope_tensor)
 ROCM_UNAVAILABLE_INT(ds4_gpu_attention_noncausal_raw_batch_heads_tensor)
 ROCM_UNAVAILABLE_INT(ds4_gpu_attention_output_low_q4_K_slice_tensor)

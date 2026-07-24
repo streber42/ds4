@@ -5862,7 +5862,7 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
 
 
 extern "C" int ds4_gpu_init(void) {
-    int dev = 0;
+    int dev = g_gpu[0].device_id;
     if (!cuda_ok(cudaSetDevice(dev), "set device")) return 0;
     cudaDeviceProp prop;
     if (cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
