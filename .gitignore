@@ -36,4 +36,6 @@ __pycache__/
 /.worktrees/
 .*.swp
 
+build.log
+smoke.log
 .DS_Store
