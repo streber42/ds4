@@ -1,0 +1,263 @@
+{
+  "feature": "rocm-tensor-parallel",
+  "version": "1.0",
+  "summary": {
+    "total_entry_points": 36,
+    "implemented": 0,
+    "stubbed": 36
+  },
+  "entry_points": [
+    {
+      "name": "ds4_gpu_add_xdev_tensor",
+      "category": "Cross-Device Accumulate",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_add_xdev_tensor(...)",
+      "target_slice": "01-cross-device-transfer-module.md / 08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_attention_decode_rows_rope_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_decode_rows_rope_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_attention_noncausal_raw_batch_heads_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_attention_output_low_q4_K_slice_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_output_low_q4_K_slice_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_attention_output_low_q8_rows_exact_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_output_low_q8_rows_exact_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_attention_output_q4_K_batch_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_output_q4_K_batch_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_attention_output_q8_tp_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_output_q8_tp_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_attention_prefill_raw_heads_range_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_prefill_raw_heads_range_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_attention_prefill_static_mixed_heads_range_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_attention_prefill_static_mixed_heads_range_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_device_cache_support_tensors",
+      "category": "Device Cache & Registration",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_device_cache_support_tensors(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_device_cache_tensors",
+      "category": "Device Cache & Registration",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_device_cache_tensors(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_dspark_markov_argmax_tensor",
+      "category": "DSpark",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_dspark_markov_argmax_tensor(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_indexer_top1_value_tensor",
+      "category": "Indexer & RoPE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_indexer_top1_value_tensor(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_kv_fp8_store_raw_decode_rows_tensor",
+      "category": "KV Store",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_kv_fp8_store_raw_decode_rows_tensor(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_matmul_q8_0_kslice_hc_expand_add_tensor",
+      "category": "Matmul",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_matmul_q8_0_kslice_hc_expand_add_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_matmul_q8_0_kslice_rows_tensor",
+      "category": "Matmul",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_matmul_q8_0_kslice_rows_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_matmul_q8_0_kslice_tensor",
+      "category": "Matmul",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_matmul_q8_0_kslice_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_matmul_q8_0_top1_tensor",
+      "category": "Matmul",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_matmul_q8_0_top1_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_matmul_quant_kslice_tensor",
+      "category": "Matmul",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_matmul_quant_kslice_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_moe_handoff_pack_tensor",
+      "category": "MoE Handoff",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_moe_handoff_pack_tensor(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_register_model_map_no_copy",
+      "category": "Device Cache & Registration",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_register_model_map_no_copy(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_register_support_map",
+      "category": "Device Cache & Registration",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_register_support_map(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_rope_tail_decode_rows_tensor",
+      "category": "Indexer & RoPE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_rope_tail_decode_rows_tensor(...)",
+      "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_routed_moe_batch_owned_tensor",
+      "category": "Routed MoE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_routed_moe_batch_owned_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_routed_moe_one_owned_tensor",
+      "category": "Routed MoE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_routed_moe_one_owned_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_routed_moe_owned_packed_combine_tensor",
+      "category": "Routed MoE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_routed_moe_owned_packed_combine_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_routed_moe_owned_slots_combine_rows_tensor",
+      "category": "Routed MoE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_routed_moe_owned_slots_combine_rows_tensor(...)",
+      "target_slice": "07-tp-prefill-path.md"
+    },
+    {
+      "name": "ds4_gpu_routed_moe_owned_slots_combine_tensor",
+      "category": "Routed MoE",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_routed_moe_owned_slots_combine_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_shared_down_hc_expand_add_q8_0_tensor",
+      "category": "Shared Expert",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_shared_down_hc_expand_add_q8_0_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_shared_down_hc_expand_owned_q8_0_tensor",
+      "category": "Shared Expert",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_shared_down_hc_expand_owned_q8_0_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor",
+      "category": "Shared Expert",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
+    },
+    {
+      "name": "ds4_gpu_tp_batch_gate_encode",
+      "category": "TP Gate Synchronisation",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_tp_batch_gate_encode(...)",
+      "target_slice": "04-tp-plumbing-no-crash.md"
+    },
+    {
+      "name": "ds4_gpu_tp_big_gate_encode",
+      "category": "TP Gate Synchronisation",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_tp_big_gate_encode(...)",
+      "target_slice": "04-tp-plumbing-no-crash.md"
+    },
+    {
+      "name": "ds4_gpu_tp_big_gate_kick",
+      "category": "TP Gate Synchronisation",
+      "status": "stubbed",
+      "signature": "uint64_t ds4_gpu_tp_big_gate_kick(...)",
+      "target_slice": "04-tp-plumbing-no-crash.md"
+    },
+    {
+      "name": "ds4_gpu_tp_big_gate_wait",
+      "category": "TP Gate Synchronisation",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_tp_big_gate_wait(...)",
+      "target_slice": "04-tp-plumbing-no-crash.md"
+    },
+    {
+      "name": "ds4_gpu_tp_gate_encode",
+      "category": "TP Gate Synchronisation",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_tp_gate_encode(...)",
+      "target_slice": "04-tp-plumbing-no-crash.md"
+    }
+  ]
+}
