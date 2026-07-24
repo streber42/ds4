@@ -144,6 +144,165 @@ __global__ static void attention_prefill_mixed_kernel(
     }
 }
 
+/* Rectangular counterpart of attention_prefill_raw_kernel: q/heads hold
+ * only the n_q query rows at absolute chunk positions [q_row0, q_row0+n_q),
+ * while raw_kv keeps every row of the chunk so the causal window for each
+ * query is computed from its true absolute position (qpos = q_row0 + qi)
+ * rather than its local row index. Used by the TP prefill row split, where
+ * both ranks compute the full KV but each only owns half the query rows;
+ * the square kernel above is the q_row0 = 0, n_q == n_kv special case.
+ * Same softmax-with-sinks math as attention_prefill_raw_kernel, just
+ * reading q/writing heads at the local row index qi and windowing at the
+ * absolute position qpos -- ported from the causal-masking formula in
+ * Metal's ds4_gpu_fill_raw_prefill_mask (ds4_metal.m): causal is k <= qpos,
+ * windowed is qpos - k < window. */
+__global__ static void attention_prefill_raw_range_kernel(
+        float *heads,
+        const float *sinks,
+        const float *q,
+        const float *raw_kv,
+        uint32_t q_row0,
+        uint32_t n_q,
+        uint32_t window,
+        uint32_t n_head,
+        uint32_t head_dim) {
+    uint32_t qi = blockIdx.x;
+    uint32_t h = blockIdx.y;
+    if (qi >= n_q || h >= n_head) return;
+    uint32_t qpos = q_row0 + qi;
+    uint32_t raw_count = (window != 0u && qpos + 1u > window) ? window : qpos + 1u;
+    uint32_t raw_start = qpos + 1u - raw_count;
+    const float *qh = q + ((uint64_t)qi * n_head + h) * head_dim;
+    __shared__ float scores[256];
+    __shared__ float partial[128];
+    __shared__ float max_s;
+    __shared__ float denom;
+    float scale = rsqrtf((float)head_dim);
+    float local_max = sinks[h];
+    __syncthreads();
+    for (uint32_t r = threadIdx.x; r < raw_count; r += blockDim.x) {
+        const float *kv = raw_kv + (uint64_t)(raw_start + r) * head_dim;
+        float dot = 0.0f;
+        for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kv[d];
+        scores[r] = dot * scale;
+        local_max = fmaxf(local_max, scores[r]);
+    }
+    partial[threadIdx.x] = local_max;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] = fmaxf(partial[threadIdx.x], partial[threadIdx.x + stride]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) max_s = partial[0];
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float den = expf(sinks[h] - max_s);
+        for (uint32_t r = 0; r < raw_count; r++) {
+            scores[r] = expf(scores[r] - max_s);
+            den += scores[r];
+        }
+        denom = den;
+    }
+    __syncthreads();
+    float *oh = heads + ((uint64_t)qi * n_head + h) * head_dim;
+    for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (uint32_t r = 0; r < raw_count; r++) {
+            acc += raw_kv[(uint64_t)(raw_start + r) * head_dim + d] * scores[r];
+        }
+        oh[d] = acc / denom;
+    }
+}
+
+/* Rectangular counterpart of attention_prefill_mixed_kernel, same q_row0/
+ * qpos generalization as attention_prefill_raw_range_kernel above: raw_kv
+ * holds the chunk's n_tokens raw rows and comp_kv all n_comp compressed
+ * keys (both replicated on every rank), q/heads hold only this rank's n_q
+ * query rows, and raw_count/visible_comp are computed from the absolute
+ * qpos so the causal window and compressed-key visibility match the
+ * square kernel exactly at q_row0 = 0. */
+__global__ static void attention_prefill_mixed_range_kernel(
+        float *heads,
+        const float *sinks,
+        const float *q,
+        const float *raw_kv,
+        const float *comp_kv,
+        const float *comp_mask,
+        uint32_t use_comp_mask,
+        uint32_t q_row0,
+        uint32_t n_q,
+        uint32_t n_comp,
+        uint32_t window,
+        uint32_t ratio,
+        uint32_t n_head,
+        uint32_t head_dim) {
+    uint32_t qi = blockIdx.x;
+    uint32_t h = blockIdx.y;
+    if (qi >= n_q || h >= n_head) return;
+    uint32_t qpos = q_row0 + qi;
+    const float *qh = q + ((uint64_t)qi * n_head + h) * head_dim;
+    uint32_t raw_start = (window != 0 && qpos + 1u > window) ? qpos + 1u - window : 0u;
+    uint32_t raw_count = qpos + 1u - raw_start;
+    uint32_t visible_comp = (qpos + 1u) / ratio;
+    if (visible_comp > n_comp) visible_comp = n_comp;
+    __shared__ float scores[DS4_ROCM_ATTENTION_PREFILL_MIXED_SCORE_CAP];
+    __shared__ float partial[256];
+    __shared__ float max_s;
+    __shared__ float denom;
+    float scale = rsqrtf((float)head_dim);
+    float local_max = sinks[h];
+    uint32_t n_score = raw_count + visible_comp;
+    if (n_score > DS4_ROCM_ATTENTION_PREFILL_MIXED_SCORE_CAP) return;
+
+    for (uint32_t r = threadIdx.x; r < raw_count; r += blockDim.x) {
+        const float *kvrow = raw_kv + (uint64_t)(raw_start + r) * head_dim;
+        float dot = 0.0f;
+        for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
+        scores[r] = dot * scale;
+        local_max = fmaxf(local_max, scores[r]);
+    }
+    for (uint32_t c = threadIdx.x; c < visible_comp; c += blockDim.x) {
+        float add = use_comp_mask ? comp_mask[(uint64_t)qpos * n_comp + c] : 0.0f;
+        float s = -INFINITY;
+        if (add > -1.0e20f) {
+            const float *kvrow = comp_kv + (uint64_t)c * head_dim;
+            float dot = 0.0f;
+            for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
+            s = dot * scale + add;
+        }
+        scores[raw_count + c] = s;
+        local_max = fmaxf(local_max, s);
+    }
+    partial[threadIdx.x] = local_max;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] = fmaxf(partial[threadIdx.x], partial[threadIdx.x + stride]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) max_s = partial[0];
+    __syncthreads();
+    float den_local = 0.0f;
+    for (uint32_t i = threadIdx.x; i < n_score; i += blockDim.x) {
+        scores[i] = expf(scores[i] - max_s);
+        den_local += scores[i];
+    }
+    partial[threadIdx.x] = den_local;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) denom = partial[0] + expf(sinks[h] - max_s);
+    __syncthreads();
+    float *oh = heads + ((uint64_t)qi * n_head + h) * head_dim;
+    for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (uint32_t r = 0; r < raw_count; r++) acc += raw_kv[(uint64_t)(raw_start + r) * head_dim + d] * scores[r];
+        for (uint32_t c = 0; c < visible_comp; c++) acc += comp_kv[(uint64_t)c * head_dim + d] * scores[raw_count + c];
+        oh[d] = acc / denom;
+    }
+}
+
 __global__ static void attention_prefill_raw_softmax_kernel(
         float *scores,
         const float *sinks,

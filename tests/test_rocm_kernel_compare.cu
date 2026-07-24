@@ -475,6 +475,109 @@ static kcmp_result kcmp_run_tp_hc_expand_add(void) {
     return r;
 }
 
+/* ds4_gpu_attention_prefill_raw_heads_range_tensor: the first prefill
+ * kernel ported for the attention subsystem (issue 07, TP prefill-path
+ * kernels). Exercises the rectangular row-split case directly -- q_row0 > 0
+ * and n_q < n_kv, i.e. this rank owns only the back half of a chunk whose
+ * raw KV was computed in full by both ranks -- so a causal/windowing
+ * off-by-one against the absolute chunk position (not the local row index)
+ * would show up here, which is exactly the risk class the parent issue
+ * calls out for TP prefill row-splitting. */
+static kcmp_result kcmp_run_tp_attention_prefill_raw_heads_range(void) {
+    const uint32_t n_head = 2u;
+    const uint32_t head_dim = 8u;
+    const uint32_t n_kv = 6u;   /* full chunk raw KV, computed by both ranks */
+    const uint32_t q_row0 = 2u; /* this rank owns rows [2, 6) of the chunk */
+    const uint32_t n_q = 4u;
+    const uint32_t window = 0u; /* unbounded: full causal history */
+    /* Reduction over at most 6 raw rows x 8 dims in float32 vs a
+     * double-precision CPU reference -- reassociation noise is negligible
+     * at this size, so a tight tolerance still catches a real masking or
+     * indexing bug. */
+    const float tol = 1e-5f;
+
+    float *q_h = (float *)malloc((uint64_t)n_q * n_head * head_dim * sizeof(float));
+    float *kv_h = (float *)malloc((uint64_t)n_kv * head_dim * sizeof(float));
+    float *sinks_h = (float *)malloc((uint64_t)n_head * sizeof(float));
+    float *ref = (float *)malloc((uint64_t)n_q * n_head * head_dim * sizeof(float));
+    float *got = (float *)malloc((uint64_t)n_q * n_head * head_dim * sizeof(float));
+    if (!q_h || !kv_h || !sinks_h || !ref || !got) {
+        free(q_h); free(kv_h); free(sinks_h); free(ref); free(got);
+        return kcmp_fail("out of memory");
+    }
+    kcmp_fill_f32(q_h, (uint64_t)n_q * n_head * head_dim, 0x51de0001u, -1.0f, 1.0f);
+    kcmp_fill_f32(kv_h, (uint64_t)n_kv * head_dim, 0x51de0002u, -1.0f, 1.0f);
+    kcmp_fill_f32(sinks_h, n_head, 0x51de0003u, -1.0f, 1.0f);
+
+    const double scale = 1.0 / sqrt((double)head_dim);
+    for (uint32_t qi = 0; qi < n_q; qi++) {
+        const uint32_t qpos = q_row0 + qi;
+        const uint32_t raw_count = qpos + 1u; /* window == 0 */
+        const uint32_t raw_start = 0u;
+        for (uint32_t h = 0; h < n_head; h++) {
+            const float *qh = q_h + ((uint64_t)qi * n_head + h) * head_dim;
+            double scores[6];
+            double mx = (double)sinks_h[h];
+            for (uint32_t r = 0; r < raw_count; r++) {
+                const float *kv = kv_h + (uint64_t)(raw_start + r) * head_dim;
+                double dot = 0.0;
+                for (uint32_t d = 0; d < head_dim; d++) dot += (double)qh[d] * (double)kv[d];
+                scores[r] = dot * scale;
+                if (scores[r] > mx) mx = scores[r];
+            }
+            double den = exp((double)sinks_h[h] - mx);
+            for (uint32_t r = 0; r < raw_count; r++) {
+                scores[r] = exp(scores[r] - mx);
+                den += scores[r];
+            }
+            float *oh = ref + ((uint64_t)qi * n_head + h) * head_dim;
+            for (uint32_t d = 0; d < head_dim; d++) {
+                double acc = 0.0;
+                for (uint32_t r = 0; r < raw_count; r++) {
+                    acc += (double)kv_h[(uint64_t)(raw_start + r) * head_dim + d] * scores[r];
+                }
+                oh[d] = (float)(acc / den);
+            }
+        }
+    }
+
+    ds4_gpu_tensor *q_t = ds4_gpu_tensor_alloc((uint64_t)n_q * n_head * head_dim * sizeof(float));
+    ds4_gpu_tensor *kv_t = ds4_gpu_tensor_alloc((uint64_t)n_kv * head_dim * sizeof(float));
+    ds4_gpu_tensor *heads_t = ds4_gpu_tensor_alloc((uint64_t)n_q * n_head * head_dim * sizeof(float));
+    void *sinks_device = NULL;
+    kcmp_result r;
+    if (!q_t || !kv_t || !heads_t) {
+        r = kcmp_fail("tensor alloc failed");
+    } else if (!ds4_gpu_tensor_write(q_t, 0, q_h, (uint64_t)n_q * n_head * head_dim * sizeof(float)) ||
+               !ds4_gpu_tensor_write(kv_t, 0, kv_h, (uint64_t)n_kv * head_dim * sizeof(float))) {
+        r = kcmp_fail("tensor write failed");
+    } else if (hipMalloc(&sinks_device, (uint64_t)n_head * sizeof(float)) != hipSuccess) {
+        r = kcmp_fail("sinks allocation failed");
+    } else if (!ds4_gpu_set_model_map(sinks_device, (uint64_t)n_head * sizeof(float))) {
+        r = kcmp_fail("set_model_map failed");
+    } else if (hipMemcpy(sinks_device, sinks_h, (uint64_t)n_head * sizeof(float),
+                          hipMemcpyHostToDevice) != hipSuccess) {
+        r = kcmp_fail("sinks copy failed");
+    } else if (!ds4_gpu_attention_prefill_raw_heads_range_tensor(
+            heads_t, sinks_device, (uint64_t)n_head * sizeof(float),
+            0, /* sinks_offset */
+            q_t, kv_t,
+            q_row0, n_q, n_kv, window, n_head, head_dim)) {
+        r = kcmp_fail("ds4_gpu_attention_prefill_raw_heads_range_tensor launch failed");
+    } else if (!ds4_gpu_tensor_read(heads_t, 0, got, (uint64_t)n_q * n_head * head_dim * sizeof(float))) {
+        r = kcmp_fail("tensor read failed");
+    } else {
+        r = kcmp_compare_f32(ref, got, (uint64_t)n_q * n_head * head_dim, tol);
+    }
+
+    if (q_t) ds4_gpu_tensor_free(q_t);
+    if (kv_t) ds4_gpu_tensor_free(kv_t);
+    if (heads_t) ds4_gpu_tensor_free(heads_t);
+    if (sinks_device) hipFree(sinks_device);
+    free(q_h); free(kv_h); free(sinks_h); free(ref); free(got);
+    return r;
+}
+
 static const kcmp_case KCMP_CASES[] = {
     { "rms_norm_plain",
       "ds4_gpu_rms_norm_plain_tensor vs double-precision RMSNorm reference (n=4096)",
@@ -488,6 +591,9 @@ static const kcmp_case KCMP_CASES[] = {
     { "tp_hc_expand_add",
       "ds4_gpu_add_tensor (TP HC-expand-add accumulation primitive) vs elementwise float addition (n=8192)",
       kcmp_run_tp_hc_expand_add },
+    { "tp_attention_prefill_raw_heads_range",
+      "ds4_gpu_attention_prefill_raw_heads_range_tensor TP prefill row split vs double-precision softmax-attention ref (n_kv=6, q_row0=2, n_q=4, n_head=2, head_dim=8)",
+      kcmp_run_tp_attention_prefill_raw_heads_range },
 };
 #define KCMP_N_CASES (sizeof(KCMP_CASES) / sizeof(KCMP_CASES[0]))
 

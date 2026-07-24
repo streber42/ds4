@@ -4511,6 +4511,33 @@ __device__ __forceinline__ static bool moe_owned_local_expert(
     return true;
 }
 
+/* Prefill/batch owned-expert filter: rewrites each token's selected-expert
+ * id to this rank's local index when owned, or marks the pair invalid (-1,
+ * weight 0) when the other rank owns it. Run once before delegating to the
+ * existing, already-proven routed_moe_launch (ds4_rocm_moe_launch.cuh, the
+ * same launcher the non-TP batch path already relies on), so pairs this
+ * rank doesn't own are skipped by routed_moe_launch's ordinary "token
+ * didn't pick that many experts" handling rather than needing new owned
+ * batch kernels. Reuses moe_owned_local_expert so the decode and batch/
+ * prefill TP paths agree on ownership. Ported from CUDA's
+ * moe_filter_owned_pairs_kernel (ds4_cuda.cu). */
+__global__ static void moe_filter_owned_pairs_kernel(
+        int32_t *selected,
+        float *weights,
+        uint64_t pair_count,
+        uint32_t expert_base,
+        uint32_t expert_count) {
+    const uint64_t pair = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (pair >= pair_count) return;
+    uint32_t local_expert = 0;
+    if (moe_owned_local_expert(selected[pair], expert_base, expert_count, &local_expert)) {
+        selected[pair] = (int32_t)local_expert;
+    } else {
+        selected[pair] = -1;
+        weights[pair] = 0.0f;
+    }
+}
+
 /* Owned-range counterpart of moe_gate_up_mid_f32_kernel (IQ2_XXS gate/up):
  * identical math, gated so a pair whose selected expert this rank doesn't
  * own is left untouched -- ds4_gpu_routed_moe_owned_slots_combine_tensor
