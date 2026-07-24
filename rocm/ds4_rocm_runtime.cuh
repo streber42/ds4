@@ -23,6 +23,27 @@ static int g_cublas_ready;
 static int g_quality_mode;
 static int g_glm_model;
 
+/* cuBLAS/hipBLASLt handles are tied to whichever device is current at
+ * cublasCreate()/hipblasLtCreate() time -- using a handle after switching
+ * to a different device is undefined (observed on this box as "invalid
+ * device ordinal" the first time a two-GPU ROCm run reached a matmul on a
+ * second tier; see issue 04 Comments). g_cublas/g_hipblaslt above remain
+ * the single "currently active" handle every kernel call site already
+ * reads, so no call site needs to change; ds4_rocm_activate_tier_blas
+ * lazily creates one handle per tier and swaps it into those globals
+ * whenever ds4_gpu_set_current_device (ds4_rocm_compat.cu) switches tiers. */
+#define DS4_ROCM_MAX_BLAS_TIERS 16
+static cublasHandle_t g_cublas_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
+static int g_cublas_ready_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
+#ifdef __HIP_PLATFORM_AMD__
+static hipblasLtHandle_t g_hipblaslt_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
+static int g_hipblaslt_ready_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
+#endif
+static int g_blas_active_tier = -1;
+/* Defined below, once cublas_ok/hipblaslt_ok exist; forward-declared here
+ * since the per-tier state it manages lives next to g_cublas/g_hipblaslt. */
+extern "C" void ds4_rocm_activate_tier_blas(int tier);
+
 enum {
     DS4_ROCM_N_EXPERT = 256u,
     DS4_ROCM_MAX_N_EXPERT = 384u,
@@ -5860,6 +5881,32 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
     return 0;
 }
 
+/* See the comment by g_cublas_by_tier's declaration above. */
+extern "C" void ds4_rocm_activate_tier_blas(int tier) {
+    if (tier < 0 || tier >= DS4_ROCM_MAX_BLAS_TIERS || tier == g_blas_active_tier) return;
+    if (!g_cublas_ready_by_tier[tier]) {
+        if (cublas_ok(cublasCreate(&g_cublas_by_tier[tier]), "create tier handle")) {
+            const cublasMath_t math_mode =
+                (g_quality_mode || getenv("DS4_CUDA_NO_TF32") != NULL)
+                    ? CUBLAS_DEFAULT_MATH
+                    : CUBLAS_TF32_TENSOR_OP_MATH;
+            (void)cublasSetMathMode(g_cublas_by_tier[tier], math_mode);
+            g_cublas_ready_by_tier[tier] = 1;
+        }
+    }
+    g_cublas = g_cublas_by_tier[tier];
+    g_cublas_ready = g_cublas_ready_by_tier[tier];
+#ifdef __HIP_PLATFORM_AMD__
+    if (!g_hipblaslt_ready_by_tier[tier]) {
+        if (hipblaslt_ok(hipblasLtCreate(&g_hipblaslt_by_tier[tier]), "create tier handle")) {
+            g_hipblaslt_ready_by_tier[tier] = 1;
+        }
+    }
+    g_hipblaslt = g_hipblaslt_by_tier[tier];
+    g_hipblaslt_ready = g_hipblaslt_ready_by_tier[tier];
+#endif
+    g_blas_active_tier = tier;
+}
 
 extern "C" int ds4_gpu_init(void) {
     int dev = g_gpu[0].device_id;
@@ -5869,19 +5916,13 @@ extern "C" int ds4_gpu_init(void) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "backend initialized on %s (sm_%d%d)\n",
                 prop.name, prop.major, prop.minor);
     }
-    if (!g_cublas_ready) {
-        if (!cublas_ok(cublasCreate(&g_cublas), "create handle")) return 0;
-        const cublasMath_t math_mode = g_quality_mode ? CUBLAS_DEFAULT_MATH : CUBLAS_TF32_TENSOR_OP_MATH;
-        (void)cublasSetMathMode(g_cublas, math_mode);
-        g_cublas_ready = 1;
-    }
-#ifdef __HIP_PLATFORM_AMD__
-    if (!g_hipblaslt_ready) {
-        if (hipblaslt_ok(hipblasLtCreate(&g_hipblaslt), "create handle")) {
-            g_hipblaslt_ready = 1;
-        }
-    }
-#endif
+    /* Populate and select tier 0's handles through the same per-tier path
+     * every later ds4_gpu_set_current_device(tier) switch uses (see
+     * ds4_rocm_activate_tier_blas above), instead of creating a handle that
+     * the tier machinery doesn't know about. */
+    g_blas_active_tier = -1;
+    ds4_rocm_activate_tier_blas(0);
+    if (!g_cublas_ready) return 0;
     return 1;
 }
 

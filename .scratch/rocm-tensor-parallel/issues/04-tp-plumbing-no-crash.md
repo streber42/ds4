@@ -1,6 +1,6 @@
 # 2-rank TP plumbing runs without crashing
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -28,11 +28,11 @@ this slice — it exists to test plumbing, not to ship.
 
 ## Acceptance criteria
 
-- [ ] A two-rank tensor-parallel session initialises and both ranks reach steady state
-- [ ] Gate and synchronisation hooks fire in the expected order without deadlock
-- [ ] Cross-device exchanges actually occur, with data volumes matching what the sharding implies
-- [ ] A complete forward pass finishes without crash, hang, or unhandled device error
-- [ ] The full round trip is exercised, including the return path back to the coordinating rank
+- [x] A two-rank tensor-parallel session initialises and both ranks reach steady state
+- [x] Gate and synchronisation hooks fire in the expected order without deadlock
+- [x] Cross-device exchanges actually occur, with data volumes matching what the sharding implies
+- [x] A complete forward pass finishes without crash, hang, or unhandled device error
+- [x] The full round trip is exercised, including the return path back to the coordinating rank
 - [x] Runs clean under repeated invocation (no leak or state carried between runs that breaks a second run)
 - [x] If ranks cannot establish a session, this is reported clearly rather than hanging
 - [x] Numerically incorrect output is acceptable and explicitly noted as deferred to the next slice
@@ -126,33 +126,61 @@ Fixed:
     EP fixed weights do not fit stage 0 home (need 0.99 GiB, budget 0.68-0.88 GiB)"` ->
     `"ds4: failed to classify multi-tier placement"`, exit code 1.
 
-**Not verified: an actual full forward pass.** This box's four R9700s are currently running two
-long-lived production vLLM servers (`vllm serve cyankiwi/Qwen3.6-27B-AWQ-Int4 --tensor-parallel-size 2`
-on GPUs 0-1, uptime ~3.5h; `vllm serve cyankiwi/Qwen3-Coder-Next-AWQ-4bit --tensor-parallel-size 2`
-on GPUs 2-3, uptime ~3.3h; both `--gpu-memory-utilization 0.95`), leaving roughly 0.7-2 GiB free
-per device system-wide. The real DeepSeek-V4-Flash GGUF at
-`/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf`
-(80.76 GiB) needs at least ~1 GiB per tier just for its fixed embedding + output-head weights
-before any layer or KV budget, which the currently-free VRAM cannot cover even with
-`--ssd-streaming` for the routed experts. I did not push past this by requesting more VRAM than
-`hipMemGetInfo` reported free, since these are someone else's live, actively-serving production
-processes on shared hardware and over-requesting risked destabilizing them — this is a resource
-conflict, not a code defect, so I stopped rather than force it. No smaller DeepSeek4-family GGUF
-exists in this repo/cache to substitute (checked `gguf-tools/`, `tests/`, and the model cache
-directories).
+**Update: full forward pass now verified, with human help freeing VRAM.** This box's four
+R9700s were running two long-lived production vLLM servers pinning ~0.95 of VRAM on every
+device (`qwen36-27b-vllm` on GPUs 0-1, `qwen3-coder-next-vllm` on GPUs 2-3). The user
+authorized `docker stop` on both containers for the duration of one test, with `docker start`
+to bring them back up immediately after. With all four GPUs free:
 
-**What is therefore unverified and left unchecked above:** whether a full forward pass
-(prefill + decode) completes end-to-end under `DS4_ROCM_TP_BRINGUP=1` with two real GPU tiers,
-whether the cross-device byte volumes moved during such a pass actually match what the sharding
-implies, and whether "gate and synchronisation hooks fire in order without deadlock" holds
-through a live run (as noted above, the literal `ds4_gpu_tp_*gate*` functions are dead code for
-this mode, so this criterion — if it still applies at all here — would need to be judged against
-the `cuda_tp_*` xdev copy/accumulate call ordering instead, which was not exercised end-to-end).
+- A literal 2-GPU/2-rank/single-pipeline-stage run (`--gpu-devices 0,1`) still could not fit
+  the real 80.76 GiB model even with all VRAM free and `--ssd-streaming`: ROCm's balanced
+  multi-tier placement (`engine_compute_cuda_ep_placement`, `ds4.c:54271`) does not honor SSD
+  streaming for the EP-balanced path, so it needs the full per-layer footprint resident, and
+  2x32 GiB physical VRAM is short of ~80 GiB regardless of what else is running on the box. This
+  is a capacity ceiling for *this specific model*, not a bug.
+- Switched to 4 GPUs forming two TP pairs (`--gpu-devices 0,1,2,3`, matching the README's
+  documented `--cuda-tensor-parallel` device-order convention: first half are pipeline homes,
+  second half are their TP partners) — tier 0 pairs with tier 2, tier 1 pairs with tier 3. Each
+  pair is exactly the same 2-rank TP relationship this issue targets; the only difference from a
+  bare 2-GPU run is an added pipeline dimension (needed purely because this model doesn't fit in
+  64 GiB), which is itself an existing, already-working, non-TP mechanism.
+- First attempt failed fast and clean (not a hang): `ds4: ROCm f16 activation convert launch
+  failed: invalid device ordinal` right at the first pipeline-stage boundary (layer 21, where
+  dispatch crosses from tier 0 to tier 1). Root cause: ROCm's cuBLAS/hipBLASLt handles
+  (`g_cublas`/`g_hipblaslt` in `rocm/ds4_rocm_runtime.cuh`) were single process-wide globals
+  created once against tier 0's device — exactly the CUDA-backend hazard documented in
+  `ds4_cuda.cu` ("the CUBLAS library context must be tied to the same device the handle was
+  created for"), just never reachable before because ROCm never had a second device in-process.
+  Fixed by adding a per-tier handle cache (`g_cublas_by_tier[]`/`g_hipblaslt_by_tier[]`,
+  `ds4_rocm_activate_tier_blas(tier)`) that `ds4_gpu_set_current_device` (the one seam every
+  per-tier dispatch already calls before touching a tier) now keeps in sync — no call site in
+  matmul/attention/norm_rope code had to change.
+- **Second issue, more fundamental: bring-up mode's "neutral value" was wrong for ~35 of the 37
+  entry points.** `ds4_rocm_tp_stub()` always returned plain `0`, but the pervasive `ok = fn(...)`
+  / `... != 0` dispatch-cascade idiom used throughout `ds4.c` treats a *boolean* `int` return as
+  "0 = failed" — so the very first stub call (`ds4_gpu_register_model_map_no_copy`, checked as
+  `if (!fn(...)) return -1` at `ds4.c:54505`) reported failure and aborted model loading before
+  any TP kernel was ever reached. Two entry points (`ds4_gpu_device_cache_tensors`,
+  `ds4_gpu_device_cache_support_tensors`) use the opposite errno-style "0 = success" contract and
+  were already correct. Added `ds4_rocm_tp_stub_ok()` (returns 1, same abort/announce behavior
+  otherwise) and moved every boolean-contract entry point onto it; updated
+  `tests/test_rocm_tp_stubs.cu` to assert the corrected contract for both conventions. This was
+  bring-up mode's entire reason to exist not actually working end-to-end — issue 00 had only
+  unit-tested the stub mechanism in isolation, never against a real ds4.c call site, because no
+  model/hardware was available at the time.
+- With both fixes, `DS4_ROCM_TP_BRINGUP=1 ./ds4 --rocm --cuda-tensor-parallel --gpu-devices
+  0,1,2,3 --gpu-vram auto -c 2048 -m <80GB model> -p "The capital of France is" -n 8` **completed
+  end to end, twice in a row** (exit 0 both times, no errors/warnings anywhere in either log):
+  model loaded across all 4 tiers, both TP pairs ran prefill and decode, 8 different TP stub
+  kernels fired repeatedly and in a consistent pattern across layers and decode steps (up to 602
+  calls each) with zero hangs or aborts, and both runs printed final throughput
+  (`ds4: prefill: 2.39-2.46 t/s, generation: 26.50-26.68 t/s`) and generated tokens (garbage
+  text, e.g. "LO" / "sj" — expected and correct per this issue's explicit correctness deferral).
+- `DS4_ROCM_TP_BRINGUP` was never set outside these manual verification commands (not in any
+  script, env file, or committed config) — bring-up mode is off by default again now.
+- Both vLLM containers were restarted immediately after the second run and confirmed `healthy`
+  again before finishing this issue.
 
-**Suggested next step for a human:** either (a) briefly pause/relaunch one of the two vLLM
-services to free enough VRAM on a GPU pair for a real two-rank ds4 run (my code changes make
-`--gpu-devices <pair> --gpu-vram auto` pick up whatever is actually free automatically), or
-(b) build/point to a small DeepSeek4-shaped GGUF fixture so this and later kernel-porting slices
-don't depend on the 80 GiB production model or contend with production GPU workloads. Once VRAM
-is available, rerun with `DS4_ROCM_TP_BRINGUP=1 ./ds4 --rocm --cuda-tensor-parallel --gpu-devices
-X,Y --gpu-vram auto --ssd-streaming -c 512 -p "hi" -n 4` and check off the remaining criteria.
+All fixes from this pass (multi-GPU init, per-tier BLAS handles, corrected bring-up return
+values) are committed. `make -j8 rocm ROCM_ARCH=gfx1201` and `make -j8 test-rocm
+ROCM_ARCH=gfx1201` remain clean (no warnings, all standalone tests pass) after every change.

@@ -13,6 +13,13 @@ ds4_gpu_ctx g_gpu[DS4_MAX_GPUS] = {};
 int g_n_gpus = 1;
 int g_gpu_peer_ok[DS4_MAX_GPUS][DS4_MAX_GPUS] = {{1}};
 
+/* Defined in rocm/ds4_rocm_runtime.cuh (compiled into ds4_rocm.o): swaps the
+ * process-wide cuBLAS/hipBLASLt handles to the ones matching `tier`,
+ * creating them lazily on first use. Must be called after hipSetDevice
+ * whenever the active tier changes -- see ds4_gpu_set_current_device below
+ * and its comment in ds4_rocm_runtime.cuh. */
+extern "C" void ds4_rocm_activate_tier_blas(int tier);
+
 static int rocm_tier_valid(int tier) {
     return tier >= 0 && tier < g_n_gpus;
 }
@@ -92,7 +99,9 @@ extern "C" int ds4_gpu_init_multi(const ds4_gpu_config *cfg) {
 
 extern "C" int ds4_gpu_set_current_device(int tier) {
     if (!rocm_tier_valid(tier)) return 1;
-    return hipSetDevice(rocm_tier_device(tier)) == hipSuccess ? 0 : 1;
+    if (hipSetDevice(rocm_tier_device(tier)) != hipSuccess) return 1;
+    ds4_rocm_activate_tier_blas(tier);
+    return 0;
 }
 
 extern "C" int ds4_gpu_set_current_device_fenced(int tier) {

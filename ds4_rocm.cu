@@ -145,7 +145,7 @@ typedef struct {
  * is the sole opt-in escape hatch for plumbing bring-up. */
 extern "C" int ds4_gpu_tp_gate_encode(uint32_t layer, uint32_t gate) {
     (void)layer; (void)gate;
-    return ds4_rocm_tp_stub("ds4_gpu_tp_gate_encode");
+    return ds4_rocm_tp_stub_ok("ds4_gpu_tp_gate_encode");
 }
 
 extern "C" void ds4_gpu_tp_set_batch_exchange(ds4_gpu_tp_batch_exchange_fn fn) {
@@ -177,12 +177,12 @@ extern "C" int ds4_gpu_tp_big_gate_encode(uint32_t layer, uint32_t rows,
                                           ds4_gpu_tensor *in_t,
                                           uint64_t bytes) {
     (void)layer; (void)rows; (void)out_t; (void)in_t; (void)bytes;
-    return ds4_rocm_tp_stub("ds4_gpu_tp_big_gate_encode");
+    return ds4_rocm_tp_stub_ok("ds4_gpu_tp_big_gate_encode");
 }
 
 extern "C" int ds4_gpu_tp_batch_gate_encode(uint32_t layer, uint32_t rows) {
     (void)layer; (void)rows;
-    return ds4_rocm_tp_stub("ds4_gpu_tp_batch_gate_encode");
+    return ds4_rocm_tp_stub_ok("ds4_gpu_tp_batch_gate_encode");
 }
 
 extern "C" int ds4_gpu_matmul_q8_0_kslice_tensor(
@@ -193,7 +193,7 @@ extern "C" int ds4_gpu_matmul_q8_0_kslice_tensor(
     (void)out; (void)model_map; (void)model_size; (void)weight_offset;
     (void)full_in_dim; (void)k_off; (void)k_cnt; (void)out_dim; (void)x;
     (void)x_elem_off;
-    return ds4_rocm_tp_stub("ds4_gpu_matmul_q8_0_kslice_tensor");
+    return ds4_rocm_tp_stub_ok("ds4_gpu_matmul_q8_0_kslice_tensor");
 }
 
 extern "C" int ds4_gpu_attention_output_q8_tp_tensor(
@@ -206,7 +206,7 @@ extern "C" int ds4_gpu_attention_output_q8_tp_tensor(
     (void)out_a_offset; (void)out_b_offset; (void)group_dim; (void)rank;
     (void)n_groups_total; (void)group0; (void)group_cnt; (void)out_dim;
     (void)heads;
-    return ds4_rocm_tp_stub("ds4_gpu_attention_output_q8_tp_tensor");
+    return ds4_rocm_tp_stub_ok("ds4_gpu_attention_output_q8_tp_tensor");
 }
 
 extern "C" int ds4_gpu_hc_expand_add_tensor(
@@ -216,5 +216,5 @@ extern "C" int ds4_gpu_hc_expand_add_tensor(
         uint32_t n_embd, uint32_t n_hc) {
     (void)out_hc; (void)block_out; (void)block_add; (void)residual_hc;
     (void)post; (void)comb; (void)n_embd; (void)n_hc;
-    return ds4_rocm_tp_stub("ds4_gpu_hc_expand_add_tensor");
+    return ds4_rocm_tp_stub_ok("ds4_gpu_hc_expand_add_tensor");
 }

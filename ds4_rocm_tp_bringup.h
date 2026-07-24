@@ -24,7 +24,14 @@ static inline int ds4_rocm_tp_bringup_active(void) {
 
 /* Returns the neutral value (0) only when bring-up mode is active; aborts
  * the process otherwise. `name` should be the stub's own function name so
- * the error pinpoints exactly which entry point was reached. */
+ * the error pinpoints exactly which entry point was reached.
+ *
+ * Use this only for entry points with an errno-style "0 = success" return
+ * contract (ds4_gpu_device_cache_tensors, ds4_gpu_device_cache_support_tensors
+ * -- checked at the call site as `if (rc != 0) fail`). For those, 0 already
+ * is the correct neutral value: skipping the real cache install and
+ * reporting success is safe because the graph falls back to reading from
+ * the model map directly. */
 static inline int ds4_rocm_tp_stub(const char *name) {
     if (!ds4_rocm_tp_bringup_active()) {
         fprintf(stderr,
@@ -41,4 +48,35 @@ static inline int ds4_rocm_tp_stub(const char *name) {
         "(no-op) value. Output is NOT correct. Bring-up mode only. ####\n",
         name);
     return 0;
+}
+
+/* Same abort-by-default / announce-and-bypass behavior as ds4_rocm_tp_stub,
+ * but returns 1 in bring-up mode instead of 0.
+ *
+ * Almost every one of the 37 ROCm TP entry points has a BOOLEAN "0 = failed,
+ * nonzero = succeeded" contract at its ds4.c call site (the pervasive
+ * `ok = fn(...)` / `... != 0` dispatch-cascade idiom used throughout this
+ * codebase). For those, a bring-up "neutral" return of plain 0 is not
+ * neutral at all: it reads as failure and the very first stub call aborts
+ * the entire forward pass before any later kernel -- TP or not -- ever
+ * runs, defeating the whole point of bring-up mode (observing a full round
+ * trip). Discovered by actually running a two-rank forward pass under
+ * bring-up (see issue 04); use this variant for every boolean-contract
+ * entry point. */
+static inline int ds4_rocm_tp_stub_ok(const char *name) {
+    if (!ds4_rocm_tp_bringup_active()) {
+        fprintf(stderr,
+            "ds4: FATAL: ROCm tensor-parallel entry point '%s' is not implemented.\n"
+            "ds4:        Tensor-parallel inference cannot proceed past this kernel.\n"
+            "ds4:        Set DS4_ROCM_TP_BRINGUP=1 to bypass with a neutral return\n"
+            "ds4:        for plumbing bring-up only -- output will NOT be correct.\n",
+            name);
+        fflush(stderr);
+        abort();
+    }
+    fprintf(stderr,
+        "ds4: #### DS4_ROCM_TP_BRINGUP=1 ACTIVE -- '%s' returning a NEUTRAL "
+        "(no-op, reports success) value. Output is NOT correct. Bring-up mode only. ####\n",
+        name);
+    return 1;
 }
