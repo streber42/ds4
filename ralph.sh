@@ -90,9 +90,10 @@ run_single_issue() {
   if [[ -n "$MODEL" ]]; then
     claude_cmd+=(--model "$MODEL")
   fi
-  # Use --prompt-interactive so Claude Code runs a full tool-using session (writes files,
-  # builds, commits) rather than --print which just echoes a response and exits.
-  claude_cmd+=(-i "$prompt")
+  # Run a full tool-using session (writes files, builds, commits) rather than
+  # --print which just echoes a response and exits. Prompt is passed as the final
+  # positional argument — Claude Code accepts [options] [prompt].
+  claude_cmd+=("$prompt")
 
   set +e
   "${claude_cmd[@]}"
@@ -137,9 +138,10 @@ run_parallel_worktree() {
     if [[ -n "$MODEL" ]]; then
       claude_cmd+=(--model "$MODEL")
     fi
-    # Use --prompt-interactive so Claude Code runs a full tool-using session (writes
-    # files, builds, commits) rather than --print which just prints and exits.
-    claude_cmd+=(-i "$prompt")
+    # Run a full tool-using session (writes files, builds, commits) rather than
+    # --print which just echoes a response and exits. Prompt is passed as the final
+    # positional argument — Claude Code accepts [options] [prompt].
+    claude_cmd+=("$prompt")
     "${claude_cmd[@]}" >"$log_file" 2>&1
   ) &
   local pid=$!
