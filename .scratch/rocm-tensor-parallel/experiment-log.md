@@ -1,5 +1,17 @@
 # ROCm tensor-parallel: experiment log
 
+## 2026-07-24 — confirmed VRAM fit is a hard constraint, not contention (issue 07)
+
+Re-attempted the isolated 2-rank run after stopping the production `vllm
+serve` process and confirming all 4 GPUs idle via `rocm-smi` (0 processes,
+~58MB used each). Same placement failure as the first attempt below —
+`ds4: CUDA EP cannot fit balanced stage 0 in pair budgets ... GiB`. This
+rules out contention as the cause: the 87GB model genuinely cannot fit in
+a 2-GPU pair's ~68GB budget regardless of what else is (or isn't) running
+on the box. Re-scoped issue 07 to validate against a small synthetic
+DeepSeek-shaped GGUF fixture instead of the production model — see that
+issue's Comments for the full decision.
+
 ## 2026-07-24 — 2-rank TP throughput attempt (issue 06)
 
 **Goal:** measure real generation throughput and per-GPU utilization for 2-rank

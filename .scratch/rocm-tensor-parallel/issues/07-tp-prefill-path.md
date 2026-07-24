@@ -1,6 +1,6 @@
 # TP prefill-path kernels
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -20,12 +20,18 @@ applies, since chunk boundaries are a classic source of off-by-one and ownership
 
 ## Acceptance criteria
 
-- [ ] Multi-token prompts produce logits matching the reference within harness tolerance
+- [ ] A small, real, loadable DeepSeek-architecture-shaped GGUF fixture exists (few layers and
+      routed experts, weights need not be quality-trained) that fits fully resident in a 2-GPU
+      TP session's VRAM budget — see the 2026-07-24 re-scope comment below for why this
+      replaces the production model for this issue's validation
+- [ ] Multi-token prompts produce logits matching the reference within harness tolerance, using
+      that fixture (production-model validation is issue 11's job once four-GPU pairing exists,
+      not required here)
 - [ ] Correctness holds for a prompt long enough to span more than one internal prefill chunk
 - [x] The first prefill kernel ported in each subsystem has kernel-level numeric-equivalence evidence via the scaffold
 - [ ] Remaining prefill kernels are gated on end-to-end logits, with the scaffold used to localize any failure
-- [ ] Previously passing decode-path correctness does not regress
-- [ ] Prefill throughput is recorded alongside generation throughput
+- [ ] Previously passing decode-path correctness does not regress, re-validated against the same fixture
+- [ ] Prefill throughput is recorded alongside generation throughput (fixture-scale number; noted explicitly as not representative of production-model throughput, which is issue 11's measurement)
 - [x] Ownership for batched paths comes from the sharding policy module, not re-derived locally
 
 ## Blocked by
@@ -158,3 +164,40 @@ actually hold the full model and produce a real number, then re-run this
 issue's end-to-end criteria against that. Either way, the kernel-level work
 this issue asked for is complete and unit-verified; only the hardware-gated
 acceptance criteria remain.
+
+**2026-07-24 — re-scoped after confirming the vllm service being freed didn't
+help: this was never a contention problem.** Re-ran with all 4 GPUs
+confirmed idle (`rocm-smi`, no processes). Same placement failure as issue
+06 — the VRAM constraint is a hard capacity limit (87GB model vs. 68GB
+across a 2-GPU pair), independent of what else is running.
+
+This exposed a real dependency deadlock: 07 requires end-to-end multi-token
+validation to close; that validation is only possible once issue 11's
+four-GPU pairing exists; issue 11 is blocked behind issue 10, which is
+blocked behind this issue. Nothing can legitimately close in this order on
+this hardware with only the production model available.
+
+**Decision: build and use a small synthetic fixture instead of waiting on
+issue 11.** The harness's `--logits` mode needs two *real* runnable engine
+instances (it compares two independent inference runs, per its own doc
+comment in `test_engine_correctness_harness.c` — it is not a hardcoded
+oracle) — but there is no requirement that fixture be the production
+model. No smaller official DeepSeek-V4-Flash quant exists (checked
+`download_model.sh`: the smallest is q2-imatrix at ~81GB, i.e. what's
+already in use); the existing "synthetic model" helpers in
+`tests/test_engine_mgpu_placement.c` and `test_gpu_model_cache.c` only
+fake tensor *metadata* for placement/cache-behavior tests, not real
+weights that could produce genuine logits — so a new small, real,
+loadable DeepSeek-shaped GGUF fixture needs to be built (natural home:
+alongside the existing tooling in `gguf-tools/`). It doesn't need to be
+trained or produce coherent text — it needs the same tensor shapes/names
+DeepSeek-V4's architecture expects (routed experts, shared expert,
+attention config) at a scale (few layers, few experts, small hidden dim)
+that comfortably fits 2-GPU VRAM, so the harness can validate that TP
+sharding math matches pipeline math on a real forward pass. This fixture
+is also reusable by issues 10 and 11 for the same reason production-model
+validation is currently blocked for all three.
+
+Status reset to `ready-for-agent`; acceptance criteria above updated to
+require the fixture explicitly and scope this issue's validation to it,
+deferring production-model numbers to issue 11.
