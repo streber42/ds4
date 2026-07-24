@@ -130,6 +130,149 @@ extern "C" int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
                                                      clamp);
 }
 
+/* Two-rank TP load-balancing: whichever rank has fewer of the 6 selected
+ * routed experts locally this decode step computes the *entire* shared-mid
+ * SwiGLU intermediate while the busier rank is still crunching routed
+ * experts; the other rank contributes nothing this call (all its rows
+ * stay unwritten -- the caller only ever reads the winning rank's mid).
+ * Ties go to home_rank so the home tier never makes an unnecessary peer
+ * store. Ported verbatim (same tie-break) from the CUDA TP path
+ * (ds4_cuda.cu shared_mid_q8_0_preq_warp8_exact_kernel) since which rank
+ * wins must exactly match the reference for logits to line up. */
+__global__ static void shared_mid_q8_0_preq_warp8_exact_kernel(
+        float *mid,
+        const unsigned char *gate_w,
+        const unsigned char *up_w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t blocks,
+        float clamp,
+        const int32_t *selected,
+        uint32_t expert_split,
+        bool home_rank,
+        int use_dp4a) {
+    const uint64_t row = (uint64_t)blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+    if (selected) {
+        uint32_t home_count = 0u;
+        uint32_t peer_count = 0u;
+        #pragma unroll
+        for (uint32_t i = 0; i < 6u; i++) {
+            const int32_t expert = selected[i];
+            if (expert >= 0 && (uint32_t)expert < expert_split) {
+                home_count++;
+            } else if (expert >= 0 && (uint32_t)expert < 2u * expert_split) {
+                peer_count++;
+            }
+        }
+        const bool assigned = home_rank
+            ? home_count <= peer_count : peer_count < home_count;
+        if (!assigned) return;
+    }
+    const unsigned char *gate_row = gate_w + row * blocks * 34u;
+    const unsigned char *up_row = up_w + row * blocks * 34u;
+    float gate = 0.0f;
+    float up = 0.0f;
+    for (uint64_t b = lane; b < blocks; b += 32u) {
+        const uint64_t i0 = b * 32u;
+        const uint64_t bn = in_dim - i0 < 32u ? in_dim - i0 : 32u;
+        const int8_t *xqb = xq + b * 32u;
+        const float xs = xscale[b];
+        const unsigned char *gb = gate_row + b * 34u;
+        const unsigned char *ub = up_row + b * 34u;
+        gate += __half2float(*(const __half *)gb) * xs *
+                (float)dot_i8_block((const int8_t *)(gb + 2u), xqb, bn, use_dp4a);
+        up += __half2float(*(const __half *)ub) * xs *
+              (float)dot_i8_block((const int8_t *)(ub + 2u), xqb, bn, use_dp4a);
+    }
+    gate = warp_sum_f32(gate);
+    up = warp_sum_f32(up);
+    if (lane == 0u) {
+        if (clamp > 1.0e-6f) {
+            gate = fminf(gate, clamp);
+            up = fminf(fmaxf(up, -clamp), clamp);
+        }
+        const float silu = gate / (1.0f + expf(-gate));
+        mid[row] = silu * up * 1.0f;
+    }
+}
+
+extern "C" int ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor(
+        ds4_gpu_tensor       *mid,
+        const void             *model_map,
+        uint64_t                model_size,
+        uint64_t                gate_offset,
+        uint64_t                up_offset,
+        uint64_t                in_dim,
+        uint64_t                out_dim,
+        const ds4_gpu_tensor *x,
+        float                   clamp,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *prequant,
+        uint32_t                expert_split,
+        bool                    home_rank) {
+    if (!mid || !x || !model_map || in_dim == 0u || out_dim == 0u ||
+        x->bytes < in_dim * sizeof(float) ||
+        mid->bytes < out_dim * sizeof(float) ||
+        (selected && (selected->bytes < 6u * sizeof(int32_t) ||
+                      expert_split == 0u))) {
+        return 0;
+    }
+    const uint64_t blocks = (in_dim + 31u) / 32u;
+    if (gate_offset > model_size || up_offset > model_size ||
+        out_dim > UINT64_MAX / (blocks * 34u)) {
+        return 0;
+    }
+    const uint64_t weight_bytes = out_dim * blocks * 34u;
+    if (weight_bytes > model_size - gate_offset ||
+        weight_bytes > model_size - up_offset) {
+        return 0;
+    }
+    const char *gate_w = cuda_model_range_ptr(model_map, gate_offset, weight_bytes, "shared_mid_gate_exact");
+    const char *up_w = cuda_model_range_ptr(model_map, up_offset, weight_bytes, "shared_mid_up_exact");
+    if (!gate_w || !up_w) return 0;
+
+    const uint64_t xq_bytes = blocks * 32u;
+    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+    const uint64_t tmp_bytes = scale_offset + blocks * sizeof(float);
+    int8_t *xq;
+    float *xscale;
+    if (prequant) {
+        if (prequant->bytes < tmp_bytes) return 0;
+        xq = (int8_t *)prequant->ptr;
+        xscale = (float *)((char *)prequant->ptr + scale_offset);
+    } else {
+        void *tmp = cuda_tmp_alloc(tmp_bytes, "shared mid q8 exact prequant");
+        if (!tmp) return 0;
+        xq = (int8_t *)tmp;
+        xscale = (float *)((char *)tmp + scale_offset);
+        quantize_q8_0_f32_kernel<<<(unsigned)blocks, 32>>>(
+                xq, xscale, (const float *)x->ptr, in_dim, blocks);
+        if (!cuda_ok(cudaGetLastError(), "shared mid q8 exact quantize launch")) {
+            return 0;
+        }
+    }
+    const int use_dp4a = 1;
+    shared_mid_q8_0_preq_warp8_exact_kernel<<<((unsigned)out_dim + 7u) / 8u, 256>>>(
+            (float *)mid->ptr,
+            (const unsigned char *)gate_w,
+            (const unsigned char *)up_w,
+            xq,
+            xscale,
+            in_dim,
+            out_dim,
+            blocks,
+            clamp,
+            selected ? (const int32_t *)selected->ptr : NULL,
+            expert_split,
+            home_rank,
+            use_dp4a);
+    return cuda_ok(cudaGetLastError(), "shared mid q8 exact launch");
+}
+
 extern "C" int ds4_gpu_shared_gate_up_swiglu_q8_0_model_view_tensor(
         ds4_gpu_tensor       *gate,
         ds4_gpu_tensor       *up,

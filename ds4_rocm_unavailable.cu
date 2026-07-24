@@ -26,30 +26,33 @@ ROCM_UNAVAILABLE_INT_OK(ds4_gpu_attention_output_low_q8_rows_exact_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_attention_output_q4_K_batch_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_attention_prefill_raw_heads_range_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_attention_prefill_static_mixed_heads_range_tensor)
-/* device_cache_(support_)tensors use an errno-style "0 = success" contract
+/* device_cache_support_tensors uses an errno-style "0 = success" contract
  * (ds4.c checks `if (rc != 0) fail`) -- 0 already is the correct neutral
- * value here, so these two keep the plain stub. */
+ * value here. It is DSpark-only (engine_install_dspark_support_cache
+ * returns early when e->dspark is unset, ds4.c) so it is unreached by a
+ * plain 2-rank TP decode session and keeps the plain stub. Its sibling
+ * ds4_gpu_device_cache_tensors IS reached (engine_install_per_device_caches
+ * runs for every multi-tier session) and has a real implementation in
+ * ds4_rocm.cu next to the other TP entry points. */
 ROCM_UNAVAILABLE_INT(ds4_gpu_device_cache_support_tensors)
-ROCM_UNAVAILABLE_INT(ds4_gpu_device_cache_tensors)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_dspark_markov_argmax_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_indexer_top1_value_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_kv_fp8_store_raw_decode_rows_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_matmul_q8_0_kslice_hc_expand_add_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_matmul_q8_0_kslice_rows_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_matmul_q8_0_top1_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_matmul_quant_kslice_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_moe_handoff_pack_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_register_model_map_no_copy)
+/* ds4_gpu_register_model_map_no_copy has a real implementation in
+ * ds4_rocm.cu (delegates to the already-real ds4_gpu_set_model_map) --
+ * engine_install_per_device_caches calls it unconditionally for every
+ * multi-tier session, TP included. ds4_gpu_register_support_map is
+ * DSpark-only (see device_cache_support_tensors above) and stays a stub. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_register_support_map)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_rope_tail_decode_rows_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_routed_moe_batch_owned_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_routed_moe_one_owned_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_routed_moe_owned_packed_combine_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_routed_moe_owned_slots_combine_rows_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_routed_moe_owned_slots_combine_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_shared_down_hc_expand_add_q8_0_tensor)
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_shared_down_hc_expand_owned_q8_0_tensor)
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor)
 
 /* ds4_gpu_tp_big_gate_kick returns a sequence number (data, not a boolean
  * flag), so the plain 0-returning stub is left as its neutral value.

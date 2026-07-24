@@ -10,8 +10,8 @@ DRY_RUN=false
 SINGLE_STEP=false
 EFFORT="high"
 MODEL=""
-CLAUDE_CMD="$HOME/.local/bin/local_claude.sh"
-SKIP_PERMISSIONS="--dangerously-skip-permissions"
+CLAUDE_MODE="local"
+SKIP_PERMISSIONS="--permission-mode=auto"
 
 # Enable multi-core parallel make compilations by default
 export MAKEFLAGS="${MAKEFLAGS:--j8}"
@@ -29,6 +29,8 @@ usage() {
   echo "  -d, --dry-run             Print next ready issues & prompts without running Claude Code"
   echo "  -e, --effort <effort>     Set Claude Code effort (low|medium|high, default: high)"
   echo "  -m, --model <model>       Set Claude Code model"
+  echo "  --claude-mode <mode>      Which Claude binary to run: local|normal (default: local)"
+  echo "  --normal-claude           Shorthand for --claude-mode normal (runs 'claude' instead of local_claude.sh)"
   echo "  -h, --help                Show this help message"
   exit 0
 }
@@ -43,10 +45,18 @@ while [[ $# -gt 0 ]]; do
     -d|--dry-run) DRY_RUN=true; shift ;;
     -e,--effort) EFFORT="$2"; shift 2 ;;
     -m,--model) MODEL="$2"; shift 2 ;;
+    --claude-mode) CLAUDE_MODE="$2"; shift 2 ;;
+    --normal-claude) CLAUDE_MODE="normal"; shift ;;
     -h,--help) usage ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
+
+case "$CLAUDE_MODE" in
+  local) CLAUDE_CMD="$HOME/.local/bin/local_claude.sh" ;;
+  normal) CLAUDE_CMD="claude" ;;
+  *) echo "Unknown --claude-mode: $CLAUDE_MODE (expected local|normal)"; exit 1 ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE="$SCRIPT_DIR/scripts/ralph_engine.py"
@@ -57,6 +67,7 @@ mkdir -p "$WT_BASE"
 echo "============================================================"
 echo " Starting Ralph Loop for feature: $FEATURE"
 echo " Concurrency limit: $CONCURRENCY worker(s)"
+echo " Claude mode: $CLAUDE_MODE ($CLAUDE_CMD)"
 echo "============================================================"
 
 iteration=0

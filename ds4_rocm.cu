@@ -139,6 +139,31 @@ typedef struct {
 
 #include "rocm/ds4_rocm_current_api_compat.cuh"
 
+/* engine_install_per_device_caches (ds4.c) calls this unconditionally for
+ * every multi-tier session -- pipeline layer-split and TP alike -- as a
+ * prerequisite before it builds per-device weight caches. It only needs
+ * g_model_host_base pointed at the model mmap, which is exactly what the
+ * already-real ds4_gpu_set_model_map does; "no copy" just means we must not
+ * let that call eagerly stage a full-model device copy, which
+ * ds4_gpu_set_model_map already doesn't do. */
+extern "C" int ds4_gpu_register_model_map_no_copy(const void *model_map, uint64_t model_size) {
+    return ds4_gpu_set_model_map(model_map, model_size);
+}
+
+/* Real per-device selective weight caching (the VRAM/perf optimization
+ * engine_install_per_device_caches is building toward) is not ported yet.
+ * Always-succeed no-op is correctness-safe rather than a bring-up-only
+ * bypass: every weight read goes through cuda_model_range_ptr, which
+ * already falls back to a host-mapped/uncached read when no device range
+ * was cached for it (see ds4_rocm_tp_bringup.h's comment on this same
+ * safety property for the other errno-contract entry point,
+ * ds4_gpu_device_cache_support_tensors). Slower, not wrong -- performance
+ * is out of scope for issue 05. */
+extern "C" int ds4_gpu_device_cache_tensors(int device_id, const ds4_tensor_range *ranges, int n_ranges) {
+    (void)device_id; (void)ranges; (void)n_ranges;
+    return 0;
+}
+
 /* Tensor-parallel GPU compute is not yet ported to ROCm (see
  * .scratch/rocm-tensor-parallel/PRD.md). These entry points fail loudly and
  * name themselves by default via ds4_rocm_tp_stub(); DS4_ROCM_TP_BRINGUP=1
@@ -196,25 +221,64 @@ extern "C" int ds4_gpu_matmul_q8_0_kslice_tensor(
     return ds4_rocm_tp_stub_ok("ds4_gpu_matmul_q8_0_kslice_tensor");
 }
 
+/* Group-sliced attention-output pair for 2-rank TP decode (n_tokens == 1
+ * only): the low-rank A projection for this rank's owned head groups
+ * [group0, group0+group_cnt), followed by the matching k-slice of the B
+ * expand projection. Ported from the CUDA TP path (ds4_cuda.cu, same
+ * function name) -- both halves reduce to already-real ROCm kernels, since
+ * offsetting the A-weight pointer and heads view by group0 makes the owned
+ * slice look like a complete (non-sliced) low-rank projection to
+ * ds4_gpu_attention_output_low_q8_tensor. */
 extern "C" int ds4_gpu_attention_output_q8_tp_tensor(
         ds4_gpu_tensor *out, ds4_gpu_tensor *low, const void *model_map,
         uint64_t model_size, uint64_t out_a_offset, uint64_t out_b_offset,
         uint64_t group_dim, uint64_t rank, uint32_t n_groups_total,
         uint32_t group0, uint32_t group_cnt, uint64_t out_dim,
         const ds4_gpu_tensor *heads) {
-    (void)out; (void)low; (void)model_map; (void)model_size;
-    (void)out_a_offset; (void)out_b_offset; (void)group_dim; (void)rank;
-    (void)n_groups_total; (void)group0; (void)group_cnt; (void)out_dim;
-    (void)heads;
-    return ds4_rocm_tp_stub_ok("ds4_gpu_attention_output_q8_tp_tensor");
+    if (!out || !low || !heads || !model_map ||
+        group_dim == 0 || rank == 0 || n_groups_total == 0 ||
+        group_cnt == 0 || group0 > n_groups_total ||
+        group_cnt > n_groups_total - group0 || out_dim == 0) {
+        return 0;
+    }
+    const uint64_t blocks_a = (group_dim + 31u) / 32u;
+    const uint64_t row_a_bytes = blocks_a * 34u;
+    const uint64_t low_dim_total = (uint64_t)n_groups_total * rank;
+    const uint64_t k_off = (uint64_t)group0 * rank;
+    const uint64_t k_cnt = (uint64_t)group_cnt * rank;
+    if ((k_off % 32u) != 0 || (k_cnt % 32u) != 0) return 0;
+    if (heads->bytes < (uint64_t)(group0 + group_cnt) * group_dim * sizeof(float) ||
+        low->bytes < k_cnt * sizeof(float) ||
+        out->bytes < out_dim * sizeof(float)) {
+        return 0;
+    }
+
+    ds4_gpu_tensor heads_slice = *heads;
+    heads_slice.ptr = (char *)heads->ptr + (uint64_t)group0 * group_dim * sizeof(float);
+    heads_slice.bytes = (uint64_t)group_cnt * group_dim * sizeof(float);
+    heads_slice.owner = 0;
+
+    const uint64_t a_off = out_a_offset + (uint64_t)group0 * rank * row_a_bytes;
+    return ds4_gpu_attention_output_low_q8_tensor(low,
+                                                  model_map,
+                                                  model_size,
+                                                  a_off,
+                                                  group_dim,
+                                                  rank,
+                                                  group_cnt,
+                                                  &heads_slice) &&
+           ds4_gpu_matmul_q8_0_kslice_rows_tensor(out,
+                                             model_map,
+                                             model_size,
+                                             out_b_offset,
+                                             low_dim_total,
+                                             out_dim,
+                                             k_off,
+                                             k_cnt,
+                                             low,
+                                             1);
 }
 
-extern "C" int ds4_gpu_hc_expand_add_tensor(
-        ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out,
-        const ds4_gpu_tensor *block_add, const ds4_gpu_tensor *residual_hc,
-        const ds4_gpu_tensor *post, const ds4_gpu_tensor *comb,
-        uint32_t n_embd, uint32_t n_hc) {
-    (void)out_hc; (void)block_out; (void)block_add; (void)residual_hc;
-    (void)post; (void)comb; (void)n_embd; (void)n_hc;
-    return ds4_rocm_tp_stub_ok("ds4_gpu_hc_expand_add_tensor");
-}
+/* Real implementation lives in rocm/ds4_rocm_hc_output_launch.cuh (included
+ * above), next to the sibling ds4_gpu_hc_expand_tensor it was ported
+ * alongside -- see that file for the port note. */

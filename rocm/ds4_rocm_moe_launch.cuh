@@ -2356,6 +2356,189 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
                              selected, weights, n_total_expert, n_expert, clamp, x, layer_index, 1,
                              force_resident);
 }
+/* Two-rank tensor-parallel routed MoE: this rank computes only the 6-slot
+ * weighted-but-unsummed contribution of the experts it's resident for
+ * (see moe_owned_local_expert in ds4_rocm_moe.cuh), writing zero-work
+ * (untouched) slots for experts the other rank owns. The peer's matching
+ * call, its cross-device copy, and ds4_gpu_routed_moe_owned_slots_combine_
+ * tensor complete the sum. Ported from the CUDA TP path (ds4_cuda.cu, same
+ * name); unlike CUDA's resident-cache-optimized fused warp32 kernels, this
+ * uses the plain per-slot f32 dot-product kernels ROCm's non-owned
+ * fallback path already relies on (moe_gate_up_mid_f32_kernel family,
+ * ds4_rocm_moe.cuh) since correctness, not the resident-cache VRAM
+ * optimization, is what issue 05 gates -- see
+ * .scratch/rocm-tensor-parallel/issues/05-first-correct-token.md.
+ *
+ * Only the IQ2_XXS-gate / Q2_K-down quant pairing (gate_type == 16,
+ * down_type == 10) is supported, matching what DeepSeek-V4-Flash's routed
+ * experts actually use; Q4_K experts are out of scope for this model.
+ * pack_fixed3 (CUDA's packed-4-slot layout) always fails here -- ROCm
+ * forces cuda_tp_ep_pack_exact off (ds4.c) so it is never requested. */
+extern "C" int ds4_gpu_routed_moe_one_owned_tensor(
+        ds4_gpu_tensor       *out,
+        ds4_gpu_tensor       *gate,
+        ds4_gpu_tensor       *up,
+        ds4_gpu_tensor       *mid,
+        ds4_gpu_tensor       *down,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              gate_offset,
+        uint64_t              up_offset,
+        uint64_t              down_offset,
+        uint32_t              gate_type,
+        uint32_t              down_type,
+        uint64_t              gate_expert_bytes,
+        uint64_t              gate_row_bytes,
+        uint64_t              down_expert_bytes,
+        uint64_t              down_row_bytes,
+        uint32_t              expert_in_dim,
+        uint32_t              expert_mid_dim,
+        uint32_t              out_dim,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t              n_total_expert,
+        uint32_t              n_expert,
+        uint32_t              resident_expert_base,
+        uint32_t              resident_expert_count,
+        float                 clamp,
+        const ds4_gpu_tensor *x,
+        ds4_gpu_tensor       *down_output,
+        bool                  pack_fixed3,
+        ds4_gpu_tensor       *shared_prequant) {
+    (void)shared_prequant;
+    if (!out || !gate || !up || !mid || !down || !model_map ||
+        !selected || !weights || !x || n_expert != 6u ||
+        n_total_expert == 0u || resident_expert_count == 0u ||
+        gate_expert_bytes == 0u || gate_row_bytes == 0u ||
+        down_expert_bytes == 0u || down_row_bytes == 0u ||
+        resident_expert_base >= n_total_expert ||
+        resident_expert_count > n_total_expert - resident_expert_base ||
+        expert_in_dim % CUDA_QK_K != 0u ||
+        expert_mid_dim % CUDA_QK_K != 0u ||
+        gate_type != 16u || down_type != 10u ||
+        selected->bytes < 6u * sizeof(int32_t) ||
+        weights->bytes < 6u * sizeof(float) ||
+        x->bytes < (uint64_t)expert_in_dim * sizeof(float) ||
+        mid->bytes < 6ull * expert_mid_dim * sizeof(float) ||
+        out->bytes < (uint64_t)out_dim * sizeof(float)) {
+        return 0;
+    }
+    if (pack_fixed3) return 0;
+
+    if (resident_expert_base > UINT64_MAX / gate_expert_bytes ||
+        resident_expert_count > UINT64_MAX / gate_expert_bytes ||
+        resident_expert_base > UINT64_MAX / down_expert_bytes ||
+        resident_expert_count > UINT64_MAX / down_expert_bytes) {
+        return 0;
+    }
+    const uint64_t gate_shift = (uint64_t)resident_expert_base * gate_expert_bytes;
+    const uint64_t down_shift = (uint64_t)resident_expert_base * down_expert_bytes;
+    const uint64_t gate_bytes = (uint64_t)resident_expert_count * gate_expert_bytes;
+    const uint64_t down_bytes = (uint64_t)resident_expert_count * down_expert_bytes;
+    if (gate_offset > model_size || gate_shift > model_size - gate_offset ||
+        gate_bytes > model_size - gate_offset - gate_shift ||
+        up_offset > model_size || gate_shift > model_size - up_offset ||
+        gate_bytes > model_size - up_offset - gate_shift ||
+        down_offset > model_size || down_shift > model_size - down_offset ||
+        down_bytes > model_size - down_offset - down_shift) {
+        return 0;
+    }
+    const char *gate_w = cuda_model_range_ptr(model_map, gate_offset + gate_shift, gate_bytes, "moe_owned_gate");
+    const char *up_w = cuda_model_range_ptr(model_map, up_offset + gate_shift, gate_bytes, "moe_owned_up");
+    const char *down_w = cuda_model_range_ptr(model_map, down_offset + down_shift, down_bytes, "moe_owned_down");
+    if (!gate_w || !up_w || !down_w) return 0;
+
+    ds4_gpu_tensor *down_target = down_output ? down_output : down;
+    const uint64_t down_output_bytes = 6ull * out_dim * sizeof(float);
+    if (down_target->bytes < down_output_bytes ||
+        gate->bytes < 6ull * expert_mid_dim * sizeof(float) ||
+        up->bytes < 6ull * expert_mid_dim * sizeof(float)) {
+        return 0;
+    }
+
+    const dim3 gate_grid(expert_mid_dim, n_expert, 1u);
+    moe_gate_up_mid_owned_f32_kernel<<<gate_grid, 256>>>(
+            (float *)gate->ptr,
+            (float *)up->ptr,
+            (float *)mid->ptr,
+            gate_w,
+            up_w,
+            (const float *)x->ptr,
+            (const int32_t *)selected->ptr,
+            (const float *)weights->ptr,
+            gate_expert_bytes,
+            gate_row_bytes,
+            expert_in_dim,
+            expert_mid_dim,
+            n_expert,
+            resident_expert_base,
+            resident_expert_count,
+            clamp);
+    if (!cuda_ok(cudaGetLastError(), "owned routed_moe gate/up/mid launch")) return 0;
+
+    const dim3 down_grid(out_dim, n_expert, 1u);
+    moe_down_owned_f32_kernel<<<down_grid, 256>>>(
+            (float *)down_target->ptr,
+            down_w,
+            (const float *)mid->ptr,
+            (const int32_t *)selected->ptr,
+            down_expert_bytes,
+            down_row_bytes,
+            expert_mid_dim,
+            out_dim,
+            n_expert,
+            resident_expert_base,
+            resident_expert_count);
+    return cuda_ok(cudaGetLastError(), "owned routed_moe down launch");
+}
+
+/* Combines this rank's (home) and the peer's (already cross-device-copied)
+ * per-slot owned MoE contributions from ds4_gpu_routed_moe_one_owned_tensor
+ * into the full 6-expert weighted sum. Ported from the CUDA TP path
+ * (ds4_cuda.cu ds4_gpu_routed_moe_owned_slots_combine_tensor). */
+extern "C" int ds4_gpu_routed_moe_owned_slots_combine_rows_tensor(
+        ds4_gpu_tensor       *out,
+        const ds4_gpu_tensor *home_slots,
+        const ds4_gpu_tensor *peer_slots,
+        const ds4_gpu_tensor *selected,
+        uint32_t              out_dim,
+        uint32_t              expert_split,
+        uint32_t              rows) {
+    if (!out || !home_slots || !peer_slots || !selected || out_dim == 0u ||
+        rows == 0u || rows > 65535u) {
+        return 0;
+    }
+    const uint64_t row_elems = (uint64_t)rows * out_dim;
+    if (row_elems > UINT64_MAX / (6u * sizeof(float))) return 0;
+    const uint64_t out_bytes = row_elems * sizeof(float);
+    const uint64_t slots_bytes = row_elems * 6u * sizeof(float);
+    const uint64_t selected_bytes = (uint64_t)rows * 6u * sizeof(int32_t);
+    if (out->bytes < out_bytes || home_slots->bytes < slots_bytes ||
+        peer_slots->bytes < slots_bytes || selected->bytes < selected_bytes) {
+        return 0;
+    }
+    const dim3 grid((out_dim + 255u) / 256u, rows, 1u);
+    moe_owned_slots_combine_kernel<<<grid, 256>>>(
+            (float *)out->ptr,
+            (const float *)home_slots->ptr,
+            (const float *)peer_slots->ptr,
+            (const int32_t *)selected->ptr,
+            out_dim,
+            expert_split);
+    return cuda_ok(cudaGetLastError(), "owned routed_moe slot rows combine launch");
+}
+
+extern "C" int ds4_gpu_routed_moe_owned_slots_combine_tensor(
+        ds4_gpu_tensor       *out,
+        const ds4_gpu_tensor *home_slots,
+        const ds4_gpu_tensor *peer_slots,
+        const ds4_gpu_tensor *selected,
+        uint32_t              out_dim,
+        uint32_t              expert_split) {
+    return ds4_gpu_routed_moe_owned_slots_combine_rows_tensor(
+            out, home_slots, peer_slots, selected, out_dim, expert_split, 1u);
+}
+
 extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_total_expert, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t layer_index, uint32_t n_tokens, bool *mid_is_f16, bool force_resident) {
     if (mid_is_f16) *mid_is_f16 = false;
     return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,

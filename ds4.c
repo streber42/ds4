@@ -16316,6 +16316,14 @@ static bool metal_graph_cuda_tp_moe_requested(void) {
 static bool metal_graph_cuda_tp_ep_pack_exact_requested(void) {
 #if defined(__APPLE__)
     return false;
+#elif defined(DS4_ROCM_BUILD)
+    /* The packed-4-slot layout (and the fused HC-reduce owned kernel it
+     * gates) is a CUDA-only perf optimisation over the plain 6-slot owned
+     * combine -- see ds4_gpu_routed_moe_owned_slots_combine_tensor and
+     * .scratch/rocm-tensor-parallel/issues/05-first-correct-token.md. ROCm
+     * always takes the unpacked path so it never needs the packed-combine
+     * or fused-hc-reduce-owned entry points ported. */
+    return false;
 #else
     return metal_graph_tp_env_flag("DS4_CUDA_TP_EP_PACK_EXACT", true);
 #endif

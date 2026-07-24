@@ -255,6 +255,37 @@ extern "C" int ds4_gpu_hc_expand_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_te
                                                     n_hc, (uint32_t)comb_stride, 0);
     return cuda_ok(cudaGetLastError(), "hc_expand launch");
 }
+/* Two-rank TP decode combines this rank's own attn-out block with the
+ * cross-device copy of the peer rank's attn-out block before the HC expand,
+ * so unlike ds4_gpu_hc_expand_tensor there are two additive block sources.
+ * Ported from the CUDA TP path (ds4_cuda.cu ds4_gpu_hc_expand_add_tensor),
+ * adapted to this file's narrower hc_expand_kernel (no second add term --
+ * CUDA's own call site here also passes has_add2=0, so the two are
+ * equivalent). */
+extern "C" int ds4_gpu_hc_expand_add_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *block_add, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *post, const ds4_gpu_tensor *comb, uint32_t n_embd, uint32_t n_hc) {
+    uint64_t n_tokens64 = 0, flat_bytes = 0, hc_bytes = 0, post_bytes = 0, comb_bytes = 0, comb_stride = 0;
+    if (!out_hc || !block_out || !block_add || !residual_hc || !post || !comb ||
+        !cuda_hc_hc_token_count(out_hc, n_embd, n_hc, &n_tokens64) ||
+        !cuda_u64_mul3_checked(n_tokens64, n_embd, sizeof(float), &flat_bytes) ||
+        !cuda_u64_mul3_checked(n_tokens64, (uint64_t)n_hc * n_embd, sizeof(float), &hc_bytes) ||
+        !cuda_u64_mul3_checked(n_tokens64, n_hc, sizeof(float), &post_bytes) ||
+        !cuda_u64_mul_checked(n_hc, n_hc, &comb_stride) || comb_stride > UINT32_MAX ||
+        !cuda_u64_mul3_checked(n_tokens64, comb_stride, sizeof(float), &comb_bytes) ||
+        block_out->bytes < flat_bytes || block_add->bytes < flat_bytes ||
+        residual_hc->bytes < hc_bytes ||
+        post->bytes < post_bytes || comb->bytes < comb_bytes) return 0;
+    uint32_t n_tokens = (uint32_t)n_tokens64;
+    uint64_t n_elem = (uint64_t)n_tokens * n_hc * n_embd;
+    hc_expand_kernel<<<(n_elem + 255) / 256, 256>>>((float *)out_hc->ptr,
+                                                    (const float *)block_out->ptr,
+                                                    (const float *)block_add->ptr,
+                                                    (const float *)residual_hc->ptr,
+                                                    (const float *)post->ptr,
+                                                    (const float *)comb->ptr,
+                                                    n_embd, n_hc, n_tokens,
+                                                    n_hc, (uint32_t)comb_stride, 1);
+    return cuda_ok(cudaGetLastError(), "hc_expand_add launch");
+}
 extern "C" int ds4_gpu_hc_expand_split_tensor(ds4_gpu_tensor *out_hc, const ds4_gpu_tensor *block_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc) {
     uint64_t n_tokens64 = 0, flat_bytes = 0, hc_bytes = 0, split_bytes = 0, mix_hc64 = 0;
     if (!out_hc || !block_out || !residual_hc || !split ||

@@ -528,6 +528,72 @@ extern "C" int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model
                                            in_dim, out_dim, x, n_tok, "q8_0");
 }
 
+/* Tensor-parallel k-slice matvec: out[out_dim] += W[:, in_start:+in_count] @
+ * x, where W rows still span full in_dim (only this rank's owned K range is
+ * read) and x holds just the owned slice. Callers sum every rank's partial
+ * via cross-device accumulate to recover the full projection. Ported from
+ * the CUDA TP path (ds4_cuda.cu ds4_gpu_matmul_q8_0_kslice_rows_tensor);
+ * decode-only callers here always pass n_tok == 1. */
+extern "C" int ds4_gpu_matmul_q8_0_kslice_rows_tensor(
+        ds4_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              in_dim,
+        uint64_t              out_dim,
+        uint64_t              in_start,
+        uint64_t              in_count,
+        const ds4_gpu_tensor *x,
+        uint64_t              n_tok) {
+    if (!out || !x || !model_map || in_dim == 0 || out_dim == 0 ||
+        in_count == 0 || n_tok == 0 || n_tok > 65535u) return 0;
+    if ((in_start % 32u) != 0 || (in_count % 32u) != 0 ||
+        in_start > in_dim || in_count > in_dim - in_start) return 0;
+    const uint64_t full_blocks = (in_dim + 31u) / 32u;
+    const uint64_t block_start = in_start / 32u;
+    const uint64_t slice_blocks = in_count / 32u;
+    uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (weight_offset > model_size ||
+        !cuda_u64_mul_checked(full_blocks, 34u, &row_bytes) ||
+        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !cuda_u64_mul3_checked(n_tok, in_count, sizeof(float), &x_bytes) ||
+        !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
+    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0_kslice");
+    if (!wptr) return 0;
+
+    const uint64_t xq_bytes = n_tok * slice_blocks * 32u;
+    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+    const uint64_t tmp_bytes = scale_offset + n_tok * slice_blocks * sizeof(float);
+    void *tmp = cuda_tmp_alloc(tmp_bytes, "q8_0 kslice prequant");
+    if (!tmp) return 0;
+    int8_t *xq = (int8_t *)tmp;
+    float *xscale = (float *)((char *)tmp + scale_offset);
+    const int use_dp4a = 1;
+    const dim3 qgrid((unsigned)slice_blocks, (unsigned)n_tok, 1u);
+    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
+            xq,
+            xscale,
+            (const float *)x->ptr,
+            in_count,
+            slice_blocks);
+    if (!cuda_ok(cudaGetLastError(), "matmul_q8_0_kslice quantize launch")) return 0;
+    const dim3 grid(((unsigned)out_dim + 7u) / 8u, (unsigned)n_tok, 1u);
+    matmul_q8_0_kslice_preq_warp8_kernel<<<grid, 256>>>(
+            (float *)out->ptr,
+            reinterpret_cast<const unsigned char *>(wptr),
+            xq,
+            xscale,
+            in_count,
+            out_dim,
+            full_blocks,
+            block_start,
+            slice_blocks,
+            use_dp4a);
+    return cuda_ok(cudaGetLastError(), "matmul_q8_0_kslice launch");
+}
+
 extern "C" int ds4_gpu_matmul_q8_0_decode_mpp_tensor(
         ds4_gpu_tensor       *out,
         const void             *model_map,

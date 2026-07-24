@@ -4489,3 +4489,173 @@ __global__ static void moe_down_f32_kernel(
     }
     if (threadIdx.x == 0) down_out[(uint64_t)pair * out_dim + row] = partial[0];
 }
+
+/* Two-rank tensor-parallel expert-parallel MoE: each rank is resident for
+ * only a contiguous half of the routed experts (see
+ * .scratch/rocm-tensor-parallel/PRD.md sharding policy), so of a token's 6
+ * top-k selected experts only the ones landing in [expert_base,
+ * expert_base+expert_count) are this rank's to compute. Ported from the
+ * CUDA TP path's moe_owned_local_expert (ds4_cuda.cu) -- same ownership
+ * test, reused by both the gate/up/mid and down owned kernels below so a
+ * pair whose expert this rank doesn't own is skipped identically at both
+ * stages (never reads or writes that pair's slot). */
+__device__ __forceinline__ static bool moe_owned_local_expert(
+        int32_t expert,
+        uint32_t expert_base,
+        uint32_t expert_count,
+        uint32_t *local_expert) {
+    if (expert < 0) return false;
+    const uint32_t e = (uint32_t)expert;
+    if (e < expert_base || e - expert_base >= expert_count) return false;
+    if (local_expert) *local_expert = e - expert_base;
+    return true;
+}
+
+/* Owned-range counterpart of moe_gate_up_mid_f32_kernel (IQ2_XXS gate/up):
+ * identical math, gated so a pair whose selected expert this rank doesn't
+ * own is left untouched -- ds4_gpu_routed_moe_owned_slots_combine_tensor
+ * re-derives ownership from `selected` independently and never reads a
+ * slot from the tier that doesn't own it, so no zero-fill is needed here. */
+__global__ static void moe_gate_up_mid_owned_f32_kernel(
+        float *gate_out,
+        float *up_out,
+        float *mid_out,
+        const char *gate_base,
+        const char *up_base,
+        const float *x,
+        const int32_t *selected,
+        const float *weights,
+        uint64_t gate_expert_bytes,
+        uint64_t gate_row_bytes,
+        uint32_t expert_in_dim,
+        uint32_t expert_mid_dim,
+        uint32_t n_expert,
+        uint32_t expert_base,
+        uint32_t expert_count,
+        float clamp) {
+    uint32_t row = blockIdx.x;
+    uint32_t pair = blockIdx.y;
+    if (row >= expert_mid_dim) return;
+    uint32_t tok = pair / n_expert;
+    uint32_t slot = pair - tok * n_expert;
+    uint32_t expert = 0;
+    if (!moe_owned_local_expert(selected[(uint64_t)tok * n_expert + slot],
+                                expert_base, expert_count, &expert)) {
+        return;
+    }
+    const uint32_t nb = expert_in_dim / CUDA_QK_K;
+    const cuda_block_iq2_xxs *gr = (const cuda_block_iq2_xxs *)(gate_base + (uint64_t)expert * gate_expert_bytes + (uint64_t)row * gate_row_bytes);
+    const cuda_block_iq2_xxs *ur = (const cuda_block_iq2_xxs *)(up_base + (uint64_t)expert * gate_expert_bytes + (uint64_t)row * gate_row_bytes);
+    const float *xr = x + (uint64_t)tok * expert_in_dim;
+    float gate = 0.0f;
+    float up = 0.0f;
+    for (uint32_t b = threadIdx.x; b < nb; b += blockDim.x) {
+        gate += dev_iq2_xxs_dot_f32(gr + b, xr + (uint64_t)b * CUDA_QK_K, 1);
+        up += dev_iq2_xxs_dot_f32(ur + b, xr + (uint64_t)b * CUDA_QK_K, 1);
+    }
+    __shared__ float partial_gate[256];
+    __shared__ float partial_up[256];
+    partial_gate[threadIdx.x] = gate;
+    partial_up[threadIdx.x] = up;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial_gate[threadIdx.x] += partial_gate[threadIdx.x + stride];
+            partial_up[threadIdx.x] += partial_up[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        gate = partial_gate[0];
+        up = partial_up[0];
+        if (clamp > 1.0e-6f) {
+            if (gate > clamp) gate = clamp;
+            if (up > clamp) up = clamp;
+            if (up < -clamp) up = -clamp;
+        }
+        const uint64_t off = (uint64_t)pair * expert_mid_dim + row;
+        gate_out[off] = gate;
+        up_out[off] = up;
+        mid_out[off] = (gate / (1.0f + expf(-gate))) * up * weights[(uint64_t)tok * n_expert + slot];
+    }
+}
+
+/* Owned-range counterpart of moe_down_f32_kernel (Q2_K down projection):
+ * same ownership gate as the gate/up/mid kernel above, so this rank's
+ * down_out only ever holds real values at the slots it actually computed. */
+__global__ static void moe_down_owned_f32_kernel(
+        float *down_out,
+        const char *down_base,
+        const float *mid,
+        const int32_t *selected,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t expert_mid_dim,
+        uint32_t out_dim,
+        uint32_t n_expert,
+        uint32_t expert_base,
+        uint32_t expert_count) {
+    uint32_t row = blockIdx.x;
+    uint32_t pair = blockIdx.y;
+    if (row >= out_dim) return;
+    uint32_t tok = pair / n_expert;
+    uint32_t slot = pair - tok * n_expert;
+    uint32_t expert = 0;
+    if (!moe_owned_local_expert(selected[(uint64_t)tok * n_expert + slot],
+                                expert_base, expert_count, &expert)) {
+        return;
+    }
+    const uint32_t nb = expert_mid_dim / CUDA_QK_K;
+    const cuda_block_q2_K *wr = (const cuda_block_q2_K *)(down_base + (uint64_t)expert * down_expert_bytes + (uint64_t)row * down_row_bytes);
+    const float *xr = mid + (uint64_t)pair * expert_mid_dim;
+    float acc = 0.0f;
+    for (uint32_t b = threadIdx.x; b < nb; b += blockDim.x) acc += dev_q2_K_dot_f32(wr + b, xr + (uint64_t)b * CUDA_QK_K, 1);
+    __shared__ float partial[256];
+    partial[threadIdx.x] = acc;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) down_out[(uint64_t)pair * out_dim + row] = partial[0];
+}
+
+/* Two-rank owned-slot combine: recombines this rank's (home) and the
+ * cross-device copy of the peer's (peer) per-slot owned MoE contributions
+ * into the full 6-expert weighted sum, re-deriving per-slot ownership from
+ * `selected` rather than trusting either buffer to be complete -- a slot
+ * this rank didn't own was never written into home_slots (see
+ * moe_owned_local_expert above), so it must be read from peer_slots, and
+ * vice versa. Ported from the CUDA TP path's moe_owned_slots_combine_fixed3
+ * (ds4_cuda.cu): the home/peer split of the final add (rather than a plain
+ * 6-way accumulate) matches the reference reduction's rounding exactly. */
+__global__ static void moe_owned_slots_combine_kernel(
+        float *out,
+        const float *home_slots,
+        const float *peer_slots,
+        const int32_t *selected,
+        uint32_t out_dim,
+        uint32_t expert_split) {
+    const uint32_t col = (uint32_t)((uint64_t)blockIdx.x * blockDim.x + threadIdx.x);
+    const uint32_t row = blockIdx.y;
+    if (col >= out_dim) return;
+    out += (uint64_t)row * out_dim;
+    home_slots += (uint64_t)row * 6u * out_dim;
+    peer_slots += (uint64_t)row * 6u * out_dim;
+    selected += (uint64_t)row * 6u;
+    float slotv[6];
+    #pragma unroll
+    for (uint32_t slot = 0; slot < 6u; slot++) {
+        const int32_t expert = selected[slot];
+        if (expert < 0 || (uint32_t)expert >= 2u * expert_split) {
+            slotv[slot] = 0.0f;
+        } else {
+            const bool on_home = (uint32_t)expert < expert_split;
+            const float *src = on_home ? home_slots : peer_slots;
+            slotv[slot] = src[(uint64_t)slot * out_dim + col];
+        }
+    }
+    float home = slotv[0] + slotv[1] + slotv[2];
+    float peer = slotv[3] + slotv[4] + slotv[5];
+    out[col] = home + peer;
+}

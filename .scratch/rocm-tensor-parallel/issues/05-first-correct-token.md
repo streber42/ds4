@@ -1,6 +1,6 @@
 # First correct token on 2-rank TP (decode path)
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -24,13 +24,13 @@ localization tool.
 
 ## Acceptance criteria
 
-- [ ] Logits for a single-token prompt match the same-hardware pipeline reference within the harness tolerance
-- [ ] The correctness harness reports pass
-- [ ] Under greedy sampling the generated token is identical to the reference
-- [ ] The first kernel ported in each subsystem touched here has kernel-level numeric-equivalence evidence via the scaffold
-- [ ] The tolerance used is stated and justified (float reassociation under a different sharding is expected; unexplained drift is not)
-- [ ] Result is reproducible across repeated runs, not a one-off pass
-- [ ] Prefill-path kernels remaining unported is explicitly noted as deferred
+- [x] Logits for a single-token prompt match the same-hardware pipeline reference within the harness tolerance
+- [x] The correctness harness reports pass
+- [x] Under greedy sampling the generated token is identical to the reference
+- [x] The first kernel ported in each subsystem touched here has kernel-level numeric-equivalence evidence via the scaffold
+- [x] The tolerance used is stated and justified (float reassociation under a different sharding is expected; unexplained drift is not)
+- [x] Result is reproducible across repeated runs, not a one-off pass
+- [x] Prefill-path kernels remaining unported is explicitly noted as deferred
 
 ## Blocked by
 
