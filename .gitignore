@@ -8,6 +8,7 @@
 /ds4_server_test
 /ds4_test
 /ds4flash.gguf
+/tests/mini_ds4flash.gguf
 /TODO.md
 /gguf/
 /core

@@ -570,6 +570,44 @@ static const ds4_shape DS4_SHAPE_FLASH = {
     .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
 };
 
+static const ds4_shape DS4_SHAPE_MINI_FLASH = {
+    .name = "DeepSeek V4 Mini Flash",
+    .family = DS4_MODEL_FAMILY_DEEPSEEK4,
+    .variant = DS4_VARIANT_FLASH,
+    .n_layer = 4,
+    .n_embd = 512,
+    .n_vocab = 1000,
+    .n_head = 8,
+    .n_head_kv = 1,
+    .n_head_dim = 64,
+    .n_value_dim = 64,
+    .n_rot = 64,
+    .n_out_group = 1,
+    .n_lora_q = 128,
+    .n_lora_o = 128,
+    .n_expert = 16,
+    .n_expert_used = 2,
+    .n_expert_shared = 1,
+    .n_ff_exp = 256,
+    .n_hash_layer = 0,
+    .n_swa = 128,
+    .n_indexer_head = 8,
+    .n_indexer_head_dim = 32,
+    .n_indexer_top_k = 8,
+    .n_hc = 4,
+    .n_hc_sinkhorn_iter = 20,
+    .rms_eps = DS4_DEFAULT_RMS_EPS,
+    .hc_eps = DS4_DEFAULT_HC_EPS,
+    .expert_weight_scale = 1.5f,
+    .swiglu_clamp_exp = DS4_DEFAULT_SWIGLU_CLAMP_EXP,
+    .rope_freq_base = DS4_DEFAULT_ROPE_FREQ_BASE,
+    .rope_scale_factor = DS4_DEFAULT_ROPE_SCALE_FACTOR,
+    .rope_yarn_beta_fast = DS4_DEFAULT_ROPE_YARN_BETA_FAST,
+    .rope_yarn_beta_slow = DS4_DEFAULT_ROPE_YARN_BETA_SLOW,
+    .compress_rope_freq_base = DS4_DEFAULT_COMPRESS_ROPE_FREQ_BASE,
+    .rope_orig_ctx = DS4_DEFAULT_ROPE_ORIG_CTX,
+};
+
 static const ds4_shape DS4_SHAPE_PRO = {
     .name = "DeepSeek V4 Pro",
     .family = DS4_MODEL_FAMILY_DEEPSEEK4,
@@ -5451,6 +5489,18 @@ static void ds4_select_shape_from_metadata(
         g_ds4_shape = DS4_SHAPE_PRO;
         return;
     }
+    if (ds4_shape_matches_metadata(&DS4_SHAPE_MINI_FLASH,
+                                   n_layer, n_embd, n_vocab, n_head, n_head_kv,
+                                   n_head_dim, n_value_dim, n_rot, n_lora_q,
+                                   n_lora_o, n_out_group, n_expert,
+                                   n_expert_used, n_ff_exp, n_expert_shared,
+                                   n_hash_layer, n_swa, n_indexer_head,
+                                   n_indexer_head_dim, n_indexer_top_k, n_hc,
+                                   n_hc_sinkhorn_iter)) {
+        g_ds4_shape = DS4_SHAPE_MINI_FLASH;
+        return;
+    }
+
 
     fprintf(stderr,
             "ds4: unsupported DeepSeek4 shape: layers=%u embd=%u heads=%u "

@@ -201,3 +201,39 @@ validation is currently blocked for all three.
 Status reset to `ready-for-agent`; acceptance criteria above updated to
 require the fixture explicitly and scope this issue's validation to it,
 deferring production-model numbers to issue 11.
+
+**2026-07-24 — fixture built and verified on single GPU; session timed out
+before TP validation.** An agent session made real progress on the fixture
+but was cut off mid-task (`Error: timeout waiting for response`) before
+reaching the actual TP validation this issue needs. Recording exactly
+where it left off so the next session doesn't redo this part:
+
+**Done and verified:**
+- `gguf-tools/generate_mini_deepseek_gguf.py` — generates a small, real,
+  loadable DeepSeek-V4 Mini Flash GGUF (4 layers, 512 embd, 1000 vocab, 16
+  experts/2 used, ~31MB resident weights). Plain-stdlib GGUF binary writer,
+  no external deps.
+- New `DS4_SHAPE_MINI_FLASH` registered in `ds4.c`'s existing shape-dispatch
+  table (`ds4_select_shape_from_metadata`), alongside the real
+  `DS4_SHAPE_FLASH`/`DS4_SHAPE_PRO` entries — same mechanism production
+  models use, no special-casing.
+- Verified working single-GPU: `./ds4 -m tests/mini_ds4flash.gguf -p "Hello
+  world" --temp 0` runs a real forward pass and generates tokens
+  (558.8 t/s combined, 31MB resident weights, 0.5GiB KV cache) on real
+  hardware (gfx1201).
+- `tests/mini_ds4flash.gguf` itself is gitignored (regenerate via the
+  script above) rather than committing a 32MB binary; the generator is the
+  source of truth.
+
+**Not yet done (what the next session should pick up):**
+- Never attempted the actual 2-rank `--cuda-tensor-parallel` run against
+  this fixture — single-GPU only so far. This is the actual point of the
+  fixture and hasn't been exercised yet.
+- Never ran `test_engine_correctness_harness --logits` comparing pipeline
+  vs. TP output on this fixture, which is what the acceptance criteria
+  above actually require.
+- No acceptance-criteria checkboxes updated; no throughput number recorded.
+
+Build and single-GPU run are solid groundwork — the remaining work is
+exercising the TP path itself against this fixture, which is the part
+that was never reached.
