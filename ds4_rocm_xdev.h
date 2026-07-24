@@ -65,6 +65,28 @@ int ds4_rocm_xdev_accumulate_f16(ds4_rocm_xdev_mesh *mesh,
 int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices);
 ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
 
+/*
+ * Tensor-parallel transport reachability.
+ *
+ * Tensor parallelism needs to move data between `half` home/partner tier
+ * pairs (i, i+half). A working host-staging bounce buffer is a universal
+ * fallback that covers every pair by itself (this is the path already
+ * proven correct and fast enough -- see the PRD's feasibility notes), so it
+ * alone is sufficient; only when host-staging is unavailable does every
+ * individual pair need bidirectional direct peer access.
+ *
+ * ds4_rocm_xdev_tp_transport_ok is pure decision logic (no device I/O), so
+ * it can be unit-tested with fabricated inputs without hardware.
+ * ds4_rocm_xdev_tp_transport_probe gathers the real inputs via lightweight
+ * capability queries -- no hipSetDevice, no peer-access enable calls, safe
+ * to call before ds4_gpu_init_multi's mesh actually establishes the peer
+ * mesh -- so callers can decide whether to attempt tensor parallelism at
+ * all before any placement or device-init work happens.
+ */
+bool ds4_rocm_xdev_tp_transport_ok(bool host_staging_available,
+                                   const bool *pair_peer_ok, int half);
+bool ds4_rocm_xdev_tp_transport_probe(const int *device_ids, int n_devices, int half);
+
 #ifdef __cplusplus
 }
 #endif

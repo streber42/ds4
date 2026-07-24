@@ -28,6 +28,7 @@
 /tests/test_rocm_tp_stubs
 /tests/test_rocm_xdev
 /tests/test_rocm_kernel_compare
+/tests/test_engine_rocm_tp_refusal
 /tests/test_sampling
 *.o
 *.dSYM/

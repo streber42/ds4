@@ -296,3 +296,43 @@ extern "C" ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void) {
     }
     return &g_global_mesh;
 }
+
+extern "C" bool ds4_rocm_xdev_tp_transport_ok(bool host_staging_available,
+                                               const bool *pair_peer_ok, int half) {
+    if (half <= 0) return false;
+    if (host_staging_available) return true;
+    if (!pair_peer_ok) return false;
+    for (int i = 0; i < half; i++) {
+        if (!pair_peer_ok[i]) return false;
+    }
+    return true;
+}
+
+extern "C" bool ds4_rocm_xdev_tp_transport_probe(const int *device_ids, int n_devices, int half) {
+    if (!device_ids || half <= 0 || half > DS4_ROCM_XDEV_MAX_DEVICES ||
+        n_devices < half * 2) {
+        return false;
+    }
+
+    /* Host-staging availability: a tiny pinned allocation is representative
+     * of whether the real (larger, lazily-grown) staging buffer in
+     * ds4_rocm_xdev_init_mesh will succeed -- both go through the same
+     * hipHostMalloc path, and pinned-memory exhaustion is a host-wide
+     * condition, not a per-size one. */
+    void *probe_buf = NULL;
+    bool host_staging_available =
+        hipHostMalloc(&probe_buf, 4096, hipHostMallocDefault) == hipSuccess;
+    if (probe_buf) (void)hipHostFree(probe_buf);
+
+    bool pair_ok[DS4_ROCM_XDEV_MAX_DEVICES];
+    for (int i = 0; i < half; i++) {
+        int home = device_ids[i];
+        int partner = device_ids[i + half];
+        int can_home_to_partner = 0, can_partner_to_home = 0;
+        (void)hipDeviceCanAccessPeer(&can_home_to_partner, home, partner);
+        (void)hipDeviceCanAccessPeer(&can_partner_to_home, partner, home);
+        pair_ok[i] = can_home_to_partner && can_partner_to_home;
+    }
+
+    return ds4_rocm_xdev_tp_transport_ok(host_staging_available, pair_ok, half);
+}

@@ -41,7 +41,7 @@ CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
 ROCM_ARCH ?= gfx1151
 ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH)
-ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt
+ROCM_LDLIBS ?= -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
 DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
 DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
@@ -395,10 +395,21 @@ tests/test_engine_correctness_harness-rocm: tests/test_engine_correctness_harnes
 		ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o \
 		ds4_help.o ds4_kvstore.o rax.o $(ROCM_LDLIBS)
 
-test-rocm: tests/test_rocm_tp_stubs tests/test_rocm_xdev tests/test_rocm_kernel_compare
+# ROCm build (requires ROCm backend objects to already exist, same as
+# test_engine_correctness_harness-rocm above). -lstdc++ is needed because
+# the ROCm objects are HIP (C++) translation units linked here with plain
+# cc, which -- unlike hipcc -- does not pull in the C++ runtime itself.
+tests/test_engine_rocm_tp_refusal: tests/test_engine_rocm_tp_refusal.c ds4.h ds4_gpu_mgpu.h
+	$(CC) $(CFLAGS) -no-pie -I. -DDS4_ROCM_BUILD -o $@ $< \
+		ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o \
+		ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o \
+		ds4_help.o ds4_gpu_args.o ds4_kvstore.o rax.o $(ROCM_LDLIBS) -lstdc++ -lamdhip64
+
+test-rocm: tests/test_rocm_tp_stubs tests/test_rocm_xdev tests/test_rocm_kernel_compare tests/test_engine_rocm_tp_refusal
 	DS4_ROCM_TP_BRINGUP=1 ./tests/test_rocm_tp_stubs
 	./tests/test_rocm_xdev
 	./tests/test_rocm_kernel_compare
+	./tests/test_engine_rocm_tp_refusal
 
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
@@ -447,4 +458,4 @@ q4k-dot-test: tests/test_q4k_dot.c
 	./tests/test_q4k_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official tests/test_q4k_dot tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/test_tp_sharding tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official tests/test_q4k_dot tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_rocm_tp_refusal tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/test_tp_sharding tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o

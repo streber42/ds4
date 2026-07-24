@@ -303,6 +303,71 @@ int main(void) {
     free(h_res);
     ds4_rocm_xdev_destroy_mesh(&mesh);
 
+    // 7. Tensor-Parallel Transport Reachability (issue 09: refusal & fallback)
+    //
+    // ds4_rocm_xdev_tp_transport_ok is pure decision logic -- no device I/O --
+    // so every case below is checked with fabricated inputs, independent of
+    // whatever this box's real topology happens to be.
+    printf("\n--- Testing TP Transport Reachability Decision ---\n");
+    {
+        bool all_peer_ok[4] = {true, true, true, true};
+        bool one_peer_down[4] = {true, false, true, true};
+
+        // Host-staging available covers every pair regardless of peer_ok.
+        if (!ds4_rocm_xdev_tp_transport_ok(true, one_peer_down, 4)) {
+            fprintf(stderr, "[FAIL] host-staging available should cover a degraded peer pair\n");
+            return 1;
+        }
+        // No host-staging, but every pair has direct peer access: still ok.
+        if (!ds4_rocm_xdev_tp_transport_ok(false, all_peer_ok, 4)) {
+            fprintf(stderr, "[FAIL] no host-staging + all peer_ok should still be reachable\n");
+            return 1;
+        }
+        // No host-staging and one pair down: genuinely unreachable.
+        if (ds4_rocm_xdev_tp_transport_ok(false, one_peer_down, 4)) {
+            fprintf(stderr, "[FAIL] no host-staging + one degraded pair must be unreachable\n");
+            return 1;
+        }
+        // No host-staging and no peer array at all: unreachable, not a crash.
+        if (ds4_rocm_xdev_tp_transport_ok(false, NULL, 4)) {
+            fprintf(stderr, "[FAIL] null pair_peer_ok with no host-staging must be unreachable\n");
+            return 1;
+        }
+        // Degenerate rank counts refuse rather than vacuously succeed.
+        if (ds4_rocm_xdev_tp_transport_ok(true, all_peer_ok, 0) ||
+            ds4_rocm_xdev_tp_transport_ok(true, all_peer_ok, -1)) {
+            fprintf(stderr, "[FAIL] half<=0 must be unreachable, not vacuously true\n");
+            return 1;
+        }
+        printf("[PASS] Pure decision logic covers host-staging, peer-only, and unreachable cases.\n");
+    }
+
+    // The hardware probe wraps the same decision with real capability
+    // queries. This box's peer mesh is fully connected (verified above), so
+    // the probe must report every adjacent-pair TP topology as reachable.
+    if (device_count >= 2) {
+        int ids[DS4_ROCM_XDEV_MAX_DEVICES];
+        for (int i = 0; i < device_count; i++) ids[i] = i;
+        int half = device_count / 2;
+        if (half > 0) {
+            if (!ds4_rocm_xdev_tp_transport_probe(ids, device_count, half)) {
+                fprintf(stderr,
+                        "[FAIL] tp_transport_probe reported unreachable on a box with a "
+                        "fully-connected peer mesh (half=%d)\n", half);
+                return 1;
+            }
+            printf("[PASS] tp_transport_probe reports reachable for the real %d-device topology (half=%d).\n",
+                   device_count, half);
+        }
+    }
+    // Malformed inputs refuse cleanly rather than reading out of bounds.
+    if (ds4_rocm_xdev_tp_transport_probe(NULL, device_count, 1) ||
+        ds4_rocm_xdev_tp_transport_probe(NULL, 0, 0)) {
+        fprintf(stderr, "[FAIL] tp_transport_probe must refuse malformed inputs, not crash\n");
+        return 1;
+    }
+    printf("[PASS] tp_transport_probe refuses malformed inputs cleanly.\n");
+
     printf("\n================================================================================\n");
     printf("ALL CROSS-DEVICE TRANSFER STANDALONE TESTS PASSED SUCCESSFULLY!\n");
     printf("================================================================================\n");

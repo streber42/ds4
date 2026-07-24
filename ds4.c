@@ -55536,8 +55536,21 @@ static int ds4_engine_open_internal(ds4_engine **out,
     if (opt->cuda_tensor_parallel &&
         (opt->backend != DS4_BACKEND_CUDA || !gpu_cfg ||
          gpu_cfg->n_gpus < 2 || (gpu_cfg->n_gpus & 1) != 0)) {
-        fprintf(stderr,
-                "ds4: --cuda-tensor-parallel requires an even multi-GPU CUDA placement\n");
+        /* Name the actual constraint that failed rather than a generic
+         * message: wrong backend and wrong rank count are different
+         * operator mistakes with different fixes. */
+        if (opt->backend != DS4_BACKEND_CUDA) {
+            fprintf(stderr,
+                    "ds4: --cuda-tensor-parallel requires the %s backend "
+                    "(got %s)\n",
+                    ds4_backend_name(DS4_BACKEND_CUDA),
+                    ds4_backend_name(opt->backend));
+        } else {
+            fprintf(stderr,
+                    "ds4: --cuda-tensor-parallel requires an even number of "
+                    "GPUs >= 2 (--gpu-devices gave %d)\n",
+                    gpu_cfg ? gpu_cfg->n_gpus : 0);
+        }
         free(e);
         *out = NULL;
         return 1;
@@ -55615,7 +55628,10 @@ static int ds4_engine_open_internal(ds4_engine **out,
     if (e->cuda_tensor_parallel &&
         DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_DEEPSEEK4) {
         fprintf(stderr,
-                "ds4: --cuda-tensor-parallel is currently supported only for DeepSeek models\n");
+                "ds4: --cuda-tensor-parallel is currently supported only for "
+                "DeepSeek-V4-Flash; loaded model is %s\n",
+                DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ?
+                    "GLM 5.2 (glm-dsa)" : "an unrecognized shape");
         ds4_engine_close(e);
         *out = NULL;
         return 1;
@@ -55813,6 +55829,36 @@ static int ds4_engine_open_internal(ds4_engine **out,
         *out = NULL;
         return 1;
     }
+#ifdef DS4_ROCM_BUILD
+    /* Graceful TP fallback: an odd/insufficient GPU count and a mismatched
+     * model family were already hard-refused above (both are configuration
+     * mistakes the operator can fix immediately). Cross-device transport
+     * failure is different -- it is an environment condition, not a
+     * configuration mistake -- so instead of refusing outright, disable TP
+     * and continue as the existing, already-correct pipeline layer-split
+     * path rather than leaving the operator with no working inference.
+     * Declared locally (not via a shared header) so CUDA/Metal builds never
+     * reference this ROCm-only symbol; see ds4_rocm_xdev.h for the
+     * implementation. Must run before engine_classify_multi_tier, which
+     * picks the TP-sharded vs. plain layer-split placement based on
+     * e->cuda_tensor_parallel. */
+    extern bool ds4_rocm_xdev_tp_transport_probe(const int *device_ids,
+                                                  int n_devices, int half);
+    if (e->cuda_tensor_parallel && gpu_cfg) {
+        const int half = gpu_cfg->n_gpus / 2;
+        if (!ds4_rocm_xdev_tp_transport_probe(gpu_cfg->device_indices,
+                                               gpu_cfg->n_gpus, half)) {
+            fprintf(stderr,
+                    "ds4: ROCm: no peer access and no host-staging buffer "
+                    "available for tensor-parallel cross-device transport -- "
+                    "falling back to pipeline layer-split (tensor parallelism "
+                    "disabled for this run; expect pipeline throughput, not TP)\n");
+            e->cuda_tensor_parallel = false;
+            e->prefill_chunk =
+                ds4_effective_prefill_chunk(false, opt->prefill_chunk);
+        }
+    }
+#endif
     if (engine_classify_multi_tier(e, gpu_cfg) != 0) {
         fprintf(stderr, "ds4: failed to classify multi-tier placement\n");
         ds4_engine_close(e);
