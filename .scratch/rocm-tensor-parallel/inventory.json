@@ -2,9 +2,9 @@
   "feature": "rocm-tensor-parallel",
   "version": "1.0",
   "summary": {
-    "total_entry_points": 36,
+    "total_entry_points": 37,
     "implemented": 0,
-    "stubbed": 36
+    "stubbed": 37
   },
   "entry_points": [
     {
@@ -90,6 +90,13 @@
       "status": "stubbed",
       "signature": "int ds4_gpu_dspark_markov_argmax_tensor(...)",
       "target_slice": "08-auxiliary-tp-hooks.md"
+    },
+    {
+      "name": "ds4_gpu_hc_expand_add_tensor",
+      "category": "Attention",
+      "status": "stubbed",
+      "signature": "int ds4_gpu_hc_expand_add_tensor(...)",
+      "target_slice": "05-first-correct-token.md"
     },
     {
       "name": "ds4_gpu_indexer_top1_value_tensor",

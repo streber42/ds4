@@ -1,11 +1,15 @@
-/* Shared graph code references CUDA-only fused and multi-device hooks even
- * when ROCm validation guarantees that those paths cannot be selected.  Keep
- * the unavailable surface in one place.  These C-linkage stubs intentionally
- * accept any argument list because they never inspect their arguments. */
+/* Tensor-parallel GPU compute has no ROCm implementation yet (see
+ * .scratch/rocm-tensor-parallel/PRD.md). Keep the unimplemented surface in
+ * one place. These C-linkage stubs intentionally accept any argument list
+ * because they never inspect their arguments -- by default they fail loudly
+ * and name themselves via ds4_rocm_tp_stub() rather than silently returning
+ * a neutral value that would corrupt tensor-parallel output. */
 
 #include <stdint.h>
 
-#define ROCM_UNAVAILABLE_INT(name) extern "C" int name(...) { return 0; }
+#include "ds4_rocm_tp_bringup.h"
+
+#define ROCM_UNAVAILABLE_INT(name) extern "C" int name(...) { return ds4_rocm_tp_stub(#name); }
 
 ROCM_UNAVAILABLE_INT(ds4_gpu_add_xdev_tensor)
 ROCM_UNAVAILABLE_INT(ds4_gpu_attention_decode_rows_rope_tensor)
@@ -37,5 +41,5 @@ ROCM_UNAVAILABLE_INT(ds4_gpu_shared_down_hc_expand_add_q8_0_tensor)
 ROCM_UNAVAILABLE_INT(ds4_gpu_shared_down_hc_expand_owned_q8_0_tensor)
 ROCM_UNAVAILABLE_INT(ds4_gpu_shared_mid_swiglu_q8_0_decode_exact_tensor)
 
-extern "C" uint64_t ds4_gpu_tp_big_gate_kick(...) { return 0; }
+extern "C" uint64_t ds4_gpu_tp_big_gate_kick(...) { return (uint64_t)ds4_rocm_tp_stub("ds4_gpu_tp_big_gate_kick"); }
 ROCM_UNAVAILABLE_INT(ds4_gpu_tp_big_gate_wait)
