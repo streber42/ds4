@@ -1,6 +1,6 @@
 # Sharding policy module + CPU unit tests
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -21,14 +21,14 @@ arithmetic that would otherwise be smeared across kernels.
 
 ## Acceptance criteria
 
-- [ ] Ownership is reported for all three sharded dimensions (routed experts, attention heads, vocabulary rows)
-- [ ] Every expert, head, and vocabulary row is owned by exactly one rank — a complete partition with no gaps
-- [ ] No element is owned by more than one rank (no overlaps)
-- [ ] Uneven division across ranks is handled deterministically and documented
-- [ ] The single-rank degenerate configuration returns full ownership
-- [ ] Tests run on CPU with no GPU present and no model loaded
-- [ ] Kernels and engine code obtain ownership only from this module
-- [ ] Tests follow the existing multi-GPU placement test pattern already in the codebase
+- [x] Ownership is reported for all three sharded dimensions (routed experts, attention heads, vocabulary rows)
+- [x] Every expert, head, and vocabulary row is owned by exactly one rank — a complete partition with no gaps
+- [x] No element is owned by more than one rank (no overlaps)
+- [x] Uneven division across ranks is handled deterministically and documented
+- [x] The single-rank degenerate configuration returns full ownership
+- [x] Tests run on CPU with no GPU present and no model loaded
+- [x] Kernels and engine code obtain ownership only from this module
+- [x] Tests follow the existing multi-GPU placement test pattern already in the codebase
 
 ## Blocked by
 

@@ -373,12 +373,19 @@ else
 	$(NVCC) $(NVCCFLAGS) -o $@ ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS) $(CUDA_LDLIBS)
 endif
 
+tests/test_tp_sharding.o: tests/test_tp_sharding.c ds4_tp_shard.h
+	$(CC) $(CFLAGS) -I. -c -o $@ $<
+
+tests/test_tp_sharding: tests/test_tp_sharding.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 test-rocm: tests/test_rocm_tp_stubs tests/test_rocm_xdev
 	DS4_ROCM_TP_BRINGUP=1 ./tests/test_rocm_tp_stubs
 	./tests/test_rocm_xdev
 
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
+	tests/test_tp_sharding \
 	$(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-agent tests/test_rocm_xdev
 	./ds4-eval --self-test-extractors
 	./ds4_agent_test
@@ -387,6 +394,7 @@ test: ds4_test ds4_agent_test ds4-eval q4k-dot-test \
 	./tests/test_engine_mgpu_placement
 	./tests/test_gpu_args
 	./tests/test_gpu_args_cli.sh
+	./tests/test_tp_sharding
 	./tests/test_rocm_xdev
 ifneq ($(UNAME_S),Darwin)
 	./tests/test_sampling
@@ -422,4 +430,4 @@ q4k-dot-test: tests/test_q4k_dot.c
 	./tests/test_q4k_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official tests/test_q4k_dot tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official tests/test_q4k_dot tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/test_tp_sharding tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
