@@ -294,6 +294,12 @@ tests/test_rocm_tp_stubs.o: tests/test_rocm_tp_stubs.cu ds4_rocm.h
 tests/test_rocm_tp_stubs: tests/test_rocm_tp_stubs.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o
 	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
+tests/test_rocm_kernel_compare.o: tests/test_rocm_kernel_compare.cu ds4_gpu.h
+	$(HIPCC) $(ROCM_CFLAGS) -DDS4_ROCM_BUILD -I. -c -o $@ $<
+
+tests/test_rocm_kernel_compare: tests/test_rocm_kernel_compare.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o
+	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
 ifneq ($(UNAME_S),Darwin)
 tests/test_gpu_xdev.o: tests/test_gpu_xdev.c ds4_gpu.h ds4_gpu_mgpu.h
 	$(CC) $(CFLAGS) -I. -I$(CUDA_HOME)/include -c -o $@ $<
@@ -389,9 +395,10 @@ tests/test_engine_correctness_harness-rocm: tests/test_engine_correctness_harnes
 		ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o \
 		ds4_help.o ds4_kvstore.o rax.o $(ROCM_LDLIBS)
 
-test-rocm: tests/test_rocm_tp_stubs tests/test_rocm_xdev
+test-rocm: tests/test_rocm_tp_stubs tests/test_rocm_xdev tests/test_rocm_kernel_compare
 	DS4_ROCM_TP_BRINGUP=1 ./tests/test_rocm_tp_stubs
 	./tests/test_rocm_xdev
+	./tests/test_rocm_kernel_compare
 
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
