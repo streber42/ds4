@@ -1,0 +1,5 @@
+ds4: GPU config: 2 devices [0,1] requested, budgets 30,30 GB; auto=true
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: CUDA EP cannot fit balanced stage 0 in pair budgets 26.96/26.96 GiB (43 layers remain)
+ds4: failed to classify multi-tier placement
+EXIT_CODE=1
