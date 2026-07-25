@@ -1,6 +1,6 @@
 # Full quality-fixture validation
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 

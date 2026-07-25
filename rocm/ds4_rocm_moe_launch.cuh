@@ -511,6 +511,18 @@ static int routed_moe_full_table_is_cached(
            cuda_model_range_is_cached(model_map, down_offset, down_bytes);
 }
 
+/* owned_filtered is set to 1 when the caller has already filtered
+ * `selected` to only the experts this rank owns (e.g. the TP
+ * ds4_gpu_routed_moe_batch_owned_tensor path calls
+ * moe_filter_owned_pairs_kernel before dispatching).  When true,
+ * ROCm takes the same sorted-pairs dispatch path that CUDA uses
+ * for the owned path: skip pair-sorting (use_p2_sorted=0), enable
+ * expert-tile gate/up + down kernels, and clear the mid buffer
+ * before compute because the per-pair kernels will not write every
+ * slot.  Without this flag the non-TP batch path correctly takes
+ * the standard sorted-pairs path; with it the TP batch path avoids
+ * the pair-sorting kernels that would re-distribute work to the
+ * partner rank's experts. */
 static int routed_moe_launch(
         ds4_gpu_tensor *out,
         ds4_gpu_tensor *gate,
@@ -539,7 +551,8 @@ static int routed_moe_launch(
         const ds4_gpu_tensor *x,
         uint32_t layer_index,
         uint32_t n_tokens,
-        bool force_resident) {
+        bool force_resident,
+        bool owned_filtered) {
     routed_moe_launch_plan plan;
     if (!routed_moe_build_plan(out, gate, up, mid, down, model_map, model_size,
                                gate_offset, up_offset, down_offset, gate_type, down_type,
@@ -740,14 +753,29 @@ static int routed_moe_launch(
         /* Correctness rollback for the optimized resident IQ2 prefill path. */
         const uint32_t disable_resident_iq2_sorted =
             iq2_gate_path && getenv("DS4_ROCM_DISABLE_RESIDENT_IQ2_SORTED") != NULL;
+        /* owned_filtered is set when the caller already filtered
+         * `selected` to only the experts this rank owns (TP batch
+         * path: moe_filter_owned_pairs_kernel).  When true, CUDA
+         * skips pair-sorting (use_p2_sorted=0) and takes the direct
+         * per-pair kernels; ROCm must do the same, otherwise the
+         * pair-sorting logic would re-distribute work to the partner
+         * rank's experts, producing identical-and-exploding output. */
         const uint32_t use_sorted_pairs =
-            n_tokens > 1u &&
+            owned_filtered || (n_tokens > 1u &&
             (!q4k_path || n_tokens >= 32u) &&
-            !disable_resident_iq2_sorted;
-        const uint32_t use_expert_tiles = use_sorted_pairs;
+            !disable_resident_iq2_sorted);
+        const uint32_t use_expert_tiles =
+            use_sorted_pairs && !owned_filtered;
         const uint32_t expert_tile_m = 4u;
         const uint32_t write_gate_up = 0u;
-        const uint32_t use_p2_sorted = 0u;
+        /* owned_filtered means selected is already sparsified to
+         * only owned experts (with -1/0 weight for unowned pairs),
+         * so skip the pair-sorting step that would group pairs by
+         * expert index.  The per-pair kernels handle -1 skips
+         * internally.  Without this the pair-sort path produces
+         * wrong results for the TP owned batch call. */
+        const uint32_t use_p2_sorted =
+            !owned_filtered && 0u;
         const uint32_t use_atomic_down = use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_gate_row2048 = !q4k_path && use_expert_tiles && n_tokens >= 128u;
         const uint32_t use_down_tile16 = !q4k_path && use_atomic_down && n_tokens >= 128u;
@@ -972,6 +1000,18 @@ static int routed_moe_launch(
                     ok = cuda_ok(cudaGetLastError(), "routed_moe expert tile16 launch");
                 }
             }
+        }
+        /* When owned_filtered, the gate/up per-pair kernels will not
+         * write every slot (pairs with -1 selected are skipped).  The
+         * mid buffer must be zeroed first so that skipped pairs don't
+         * carry stale data.  CUDA gates this on
+         * !use_owned_sparse_buffers; ROCm has no sparse-buffer path,
+         * so it applies unconditionally when owned_filtered is true. */
+        if (ok && owned_filtered) {
+            const uint64_t mid_bytes =
+                (uint64_t)n_tokens * n_expert * expert_mid_dim * sizeof(float);
+            ok = cuda_ok(cudaMemset(mid->ptr, 0, (size_t)mid_bytes),
+                         "owned routed_moe mid clear");
         }
         uint32_t iq2_gate_hot_count = 0u;
         uint32_t iq2_gate_hot_max = 0u;
@@ -2353,7 +2393,7 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_total_expert, n_expert, clamp, x, layer_index, 1,
-                             force_resident);
+                             force_resident, 0);
 }
 /* Two-rank tensor-parallel routed MoE: this rank computes only the 6-slot
  * weighted-but-unsummed contribution of the experts it's resident for
@@ -2547,7 +2587,7 @@ extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tens
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_total_expert, n_expert, clamp, x, layer_index, n_tokens,
-                             force_resident);
+                             force_resident, 0);
 }
 
 /* Two-rank tensor-parallel routed MoE for the prefill/batch path (n_tokens
@@ -2641,7 +2681,8 @@ extern "C" int ds4_gpu_routed_moe_batch_owned_tensor(
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, resident_expert_count, n_expert,
                              clamp, x, layer_index, n_tokens,
-                             /*force_resident=*/true);
+                             /*force_resident=*/true,
+                             /*owned_filtered=*/true);
 }
 
 /* MoE handoff pack (issue 08, auxiliary TP hooks): the sole "MoE Handoff"
