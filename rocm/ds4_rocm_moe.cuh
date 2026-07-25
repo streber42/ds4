@@ -993,8 +993,7 @@ __global__ static void moe_count_sorted_pairs_kernel(
     uint32_t pair = (uint32_t)((uint64_t)blockIdx.x * blockDim.x + threadIdx.x);
     if (pair >= pair_count) return;
     int32_t expert_i = selected[pair];
-    if (expert_i < 0) expert_i = 0;
-    if ((uint32_t)expert_i >= n_total_expert) return;
+    if (expert_i < 0 || (uint32_t)expert_i >= n_total_expert) return;
     atomicAdd(counts + (uint32_t)expert_i, 1u);
 }
 
@@ -1023,8 +1022,7 @@ __global__ static void moe_scatter_sorted_pairs_kernel(
     uint32_t pair = (uint32_t)((uint64_t)blockIdx.x * blockDim.x + threadIdx.x);
     if (pair >= pair_count) return;
     int32_t expert_i = selected[pair];
-    if (expert_i < 0) expert_i = 0;
-    if ((uint32_t)expert_i >= n_total_expert) return;
+    if (expert_i < 0 || (uint32_t)expert_i >= n_total_expert) return;
     uint32_t pos = atomicAdd(cursors + (uint32_t)expert_i, 1u);
     sorted_pairs[pos] = pair;
 }
@@ -1042,7 +1040,7 @@ __global__ static void moe_scatter_sorted_pairs_deterministic_kernel(
     uint32_t pos = offsets[expert];
     for (uint32_t pair = 0; pair < pair_count; pair++) {
         int32_t expert_i = selected[pair];
-        if (expert_i < 0) expert_i = 0;
+        if (expert_i < 0 || (uint32_t)expert_i >= n_total_expert) continue;
         if ((uint32_t)expert_i == expert) sorted_pairs[pos++] = pair;
     }
 }

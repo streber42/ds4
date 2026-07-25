@@ -220,7 +220,18 @@ extern "C" int ds4_gpu_tensor_copy_xdev3_default_dst(
 
 extern "C" int ds4_gpu_tensor_wait_xdev(const ds4_gpu_tensor *src,
                                           int dst_tier) {
-    return src && rocm_tier_valid(dst_tier);
+    /* dst_tier is about to read src via direct peer access rather than an
+     * explicit xdev copy; src's writer may still have kernels in flight on
+     * its own stream, which has no implicit ordering against dst_tier's
+     * queue. Block until src's device has drained so the peer read is safe. */
+    if (!src || !rocm_tier_valid(dst_tier)) return 0;
+    const int src_dev = rocm_tier_device(ds4_gpu_tensor_device(src));
+    int cur_dev = 0;
+    if (hipGetDevice(&cur_dev) != hipSuccess) return 0;
+    if (hipSetDevice(src_dev) != hipSuccess) return 0;
+    const bool ok = hipDeviceSynchronize() == hipSuccess;
+    (void)hipSetDevice(cur_dev);
+    return ok;
 }
 
 /* Cross-device accumulate: out = local + remote, where remote may live on

@@ -141,9 +141,17 @@ extern "C" int ds4_rocm_xdev_copy(ds4_rocm_xdev_mesh *mesh,
     }
 
     if (use_peer) {
+        /* The writing kernels on src_dev may still be in flight on src_dev's
+         * own stream: hipMemcpyPeerAsync below is enqueued on dst_dev and has
+         * no implicit ordering against src_dev's queue, so without this the
+         * peer copy can race ahead of src_dev's last write and read stale /
+         * partially-written memory. */
+        (void)hipSetDevice(src_dev);
+        (void)hipDeviceSynchronize();
         (void)hipSetDevice(dst_dev);
         hipError_t err = hipMemcpyPeerAsync(dst_ptr, dst_dev, src_ptr, src_dev, bytes, stream);
         if (err == hipSuccess) {
+            if (!stream) (void)hipDeviceSynchronize();
             return 1;
         }
         // Fall back to host staging if peer memcpy returned error

@@ -298,8 +298,10 @@ static uint64_t g_model_load_progress_next;
 static double g_model_load_progress_last;
 static int g_model_load_progress_started;
 static int g_model_load_progress_tty;
-static void *g_cuda_tmp;
-static uint64_t g_cuda_tmp_bytes;
+static void *g_cuda_tmp[DS4_MAX_GPUS];
+static uint64_t g_cuda_tmp_bytes[DS4_MAX_GPUS];
+static void *g_moe_scratch[DS4_MAX_GPUS];
+static uint64_t g_moe_scratch_bytes[DS4_MAX_GPUS];
 static void *g_model_stage_raw[4];
 static void *g_model_stage[4];
 static cudaEvent_t g_model_stage_event[4];
@@ -588,23 +590,48 @@ static void cuda_shared_gate_up_async_cleanup(void);
 
 static void *cuda_tmp_alloc(uint64_t bytes, const char *what) {
     if (bytes == 0) return NULL;
-    if (g_cuda_tmp_bytes >= bytes) return g_cuda_tmp;
-    if (g_cuda_tmp) {
-        (void)cudaFree(g_cuda_tmp);
-        g_cuda_tmp = NULL;
-        g_cuda_tmp_bytes = 0;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= DS4_MAX_GPUS) dev = 0;
+    if (g_cuda_tmp_bytes[dev] >= bytes) return g_cuda_tmp[dev];
+    if (g_cuda_tmp[dev]) {
+        (void)cudaFree(g_cuda_tmp[dev]);
+        g_cuda_tmp[dev] = NULL;
+        g_cuda_tmp_bytes[dev] = 0;
     }
     void *ptr = NULL;
     cudaError_t err = cudaMalloc(&ptr, (size_t)bytes);
     if (err != cudaSuccess) {
-        fprintf(stderr, DS4_GPU_LOG_PREFIX "temp alloc failed for %s (%.2f MiB): %s\n",
-                what ? what : "scratch", (double)bytes / 1048576.0, cudaGetErrorString(err));
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "temp alloc dev=%d failed for %s (%.2f MiB): %s\n",
+                dev, what ? what : "scratch", (double)bytes / 1048576.0, cudaGetErrorString(err));
         (void)cudaGetLastError();
         return NULL;
     }
-    g_cuda_tmp = ptr;
-    g_cuda_tmp_bytes = bytes;
-    return g_cuda_tmp;
+    g_cuda_tmp[dev] = ptr;
+    g_cuda_tmp_bytes[dev] = bytes;
+    return g_cuda_tmp[dev];
+}
+
+static void *cuda_moe_scratch_alloc(uint64_t bytes, const char *what) {
+    if (bytes == 0) return NULL;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= DS4_MAX_GPUS) dev = 0;
+    if (g_moe_scratch_bytes[dev] >= bytes) return g_moe_scratch[dev];
+    if (g_moe_scratch[dev]) {
+        (void)cudaFree(g_moe_scratch[dev]);
+        g_moe_scratch[dev] = NULL;
+        g_moe_scratch_bytes[dev] = 0;
+    }
+    void *ptr = NULL;
+    cudaError_t err = cudaMalloc(&ptr, (size_t)bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "moe scratch alloc dev=%d failed for %s (%.2f MiB): %s\n",
+                dev, what ? what : "scratch", (double)bytes / 1048576.0, cudaGetErrorString(err));
+        (void)cudaGetLastError();
+        return NULL;
+    }
+    g_moe_scratch[dev] = ptr;
+    g_moe_scratch_bytes[dev] = bytes;
+    return g_moe_scratch[dev];
 }
 
 static int cuda_attention_score_buffer_fits(uint32_t n_comp) {
@@ -3627,11 +3654,16 @@ static int cuda_stream_batch_selected_prepare(
     int32_t *ids = (int32_t *)malloc((size_t)n_ids64 * sizeof(ids[0]));
     if (!ids) return 0;
 
+    int orig_dev = 0;
+    cudaGetDevice(&orig_dev);
+    int target_dev = (selected && selected->device_id >= 0 && selected->device_id < g_n_gpus) ? g_gpu[selected->device_id].device_id : orig_dev;
+    if (orig_dev != target_dev) cudaSetDevice(target_dev);
     const int copy_ok = cuda_ok(cudaMemcpy(ids,
                                            selected->ptr,
                                            (size_t)n_ids64 * sizeof(ids[0]),
                                            cudaMemcpyDeviceToHost),
                                 "streaming batch selected ids copy");
+    if (orig_dev != target_dev) cudaSetDevice(orig_dev);
     const int ok = copy_ok &&
         cuda_stream_batch_selected_prepare_from_host(model_map,
                                                      model_size,
@@ -4608,8 +4640,130 @@ static const char *cuda_model_range_copy_uncached(
     return (const char *)dev;
 }
 
+struct rocm_device_cache {
+    void   *base;     /* device-side slab base */
+    size_t  bytes;
+    int     present;
+};
+static rocm_device_cache g_dev_cache[DS4_MAX_GPUS];
+
+struct cache_range_entry {
+    uint64_t source_offset;
+    uint64_t bytes;
+    int      device_id;
+    void    *device_ptr;
+};
+static std::vector<cache_range_entry> g_cache_ranges;
+
+extern "C" int ds4_gpu_lookup_cache_strict(uint64_t source_offset,
+                                            uint64_t bytes,
+                                            int      expected_device,
+                                            void   **out_device_ptr) {
+    if (g_cache_ranges.empty()) return 0;
+
+    for (const auto &e : g_cache_ranges) {
+        if (e.device_id != expected_device) continue;
+        if (source_offset >= e.source_offset && source_offset < e.source_offset + e.bytes) {
+            uint64_t into = source_offset - e.source_offset;
+            if (out_device_ptr) {
+                *out_device_ptr = (char *)e.device_ptr + into;
+            }
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+extern "C" int ds4_gpu_lookup_cache(uint64_t source_offset, uint64_t bytes,
+                                    int *out_device_id, void **out_device_ptr) {
+    int active_device = -1;
+    (void)hipGetDevice(&active_device);
+
+    if (!g_cache_ranges.empty()) {
+        auto it = std::upper_bound(
+            g_cache_ranges.begin(), g_cache_ranges.end(),
+            source_offset,
+            [](uint64_t off, const cache_range_entry &e) {
+                return off < e.source_offset;
+            });
+        const cache_range_entry *match_any  = NULL;
+        const cache_range_entry *match_pref = NULL;
+        while (it != g_cache_ranges.begin()) {
+            --it;
+            if (source_offset >= it->source_offset) {
+                uint64_t into = source_offset - it->source_offset;
+                if (into <= it->bytes && bytes <= it->bytes - into) {
+                    if (it->device_id == active_device) {
+                        match_pref = &*it;
+                        break;
+                    }
+                    if (!match_any) match_any = &*it;
+                }
+            }
+        }
+        const cache_range_entry *m = match_pref ? match_pref : match_any;
+        if (m) {
+            if (out_device_id) *out_device_id = m->device_id;
+            if (out_device_ptr) {
+                *out_device_ptr = (char *)m->device_ptr + (source_offset - m->source_offset);
+            }
+            return 1;
+        }
+    }
+
+    const char *p = cuda_model_range_ptr_from_fd(g_model_host_base, source_offset, bytes, "lookup_cache");
+    if (p) {
+        if (out_device_id) *out_device_id = 0;
+        if (out_device_ptr) *out_device_ptr = (void *)p;
+        return 1;
+    }
+    return 0;
+}
+
+extern "C" int ds4_gpu_lookup_cache_device(uint64_t source_offset, uint64_t bytes) {
+    int d = -1;
+    if (!ds4_gpu_lookup_cache(source_offset, bytes, &d, NULL)) return -1;
+    return d;
+}
+
+static const char *cuda_resolve_weight_ptr(const void *model_map,
+                                             uint64_t offset,
+                                             uint64_t bytes,
+                                             int logical_tier,
+                                             const char *label) {
+    if (g_n_gpus <= 1) {
+        return cuda_model_range_ptr(model_map, offset, bytes, label);
+    }
+    if (logical_tier < 0 || logical_tier >= g_n_gpus) {
+        return cuda_model_range_ptr(model_map, offset, bytes, label);
+    }
+    const int physical_device = g_gpu[logical_tier].device_id;
+    void *dev_ptr = NULL;
+    if (ds4_gpu_lookup_cache_strict(offset, bytes, physical_device, &dev_ptr) && dev_ptr) {
+        return (const char *)dev_ptr;
+    }
+    int cur_dev = -1;
+    if (hipGetDevice(&cur_dev) == hipSuccess &&
+        cur_dev != physical_device &&
+        ds4_gpu_lookup_cache_strict(offset, bytes, cur_dev, &dev_ptr) &&
+        dev_ptr) {
+        return (const char *)dev_ptr;
+    }
+    return cuda_model_range_ptr(model_map, offset, bytes, label);
+}
+
 static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
     if (bytes == 0) return cuda_model_ptr(model_map, offset);
+
+    int cur_dev = -1;
+    if (hipGetDevice(&cur_dev) == hipSuccess && cur_dev >= 0) {
+        void *dev_ptr = NULL;
+        if (ds4_gpu_lookup_cache_strict(offset, bytes, cur_dev, &dev_ptr) && dev_ptr) {
+            return (const char *)dev_ptr;
+        }
+    }
+
     const char *image_ptr =
         cuda_model_image_range_ptr(model_map, offset, bytes);
     if (image_ptr) return image_ptr;
@@ -5958,10 +6112,13 @@ extern "C" void ds4_gpu_cleanup(void) {
     g_q8_f16_disabled_after_oom = 0;
     g_q8_f16_disabled_for_multi_model = 0;
     g_q8_f16_budget_notice_printed = 0;
-    if (g_cuda_tmp) {
-        (void)cudaFree(g_cuda_tmp);
-        g_cuda_tmp = NULL;
-        g_cuda_tmp_bytes = 0;
+    for (int d = 0; d < DS4_MAX_GPUS; d++) {
+        if (g_cuda_tmp[d]) {
+            (void)cudaSetDevice(d);
+            (void)cudaFree(g_cuda_tmp[d]);
+            g_cuda_tmp[d] = NULL;
+            g_cuda_tmp_bytes[d] = 0;
+        }
     }
     for (size_t i = 0; i < 4; i++) {
         if (g_model_stage_event[i]) {
@@ -6442,6 +6599,8 @@ extern "C" void ds4_gpu_print_memory_report(const char *label) {
     }
     const uint64_t used_b = (uint64_t)total_b - (uint64_t)free_b;
     const char *placement = cuda_model_image_bytes() ? "device_copy" : "mapped/range_cache";
+    uint64_t total_tmp_b = 0;
+    for (int d = 0; d < DS4_MAX_GPUS; d++) total_tmp_b += g_cuda_tmp_bytes[d];
     fprintf(stderr,
             DS4_GPU_LOG_PREFIX "memory %s: used=%.2f GiB free=%.2f GiB total=%.2f GiB "
             "placement=%s model_image=%.2f GiB range_cache=%.2f GiB "
@@ -6454,7 +6613,7 @@ extern "C" void ds4_gpu_print_memory_report(const char *label) {
             (double)cuda_model_image_bytes() / 1073741824.0,
             (double)g_model_range_bytes / 1073741824.0,
             (double)g_q8_f16_bytes / 1073741824.0,
-            (double)g_cuda_tmp_bytes / 1073741824.0);
+            (double)total_tmp_b / 1073741824.0);
     fprintf(stderr, "\n");
 }
 

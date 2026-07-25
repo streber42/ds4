@@ -316,9 +316,16 @@ static int cuda_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *mode
     uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
     if (weight_offset > model_size ||
         !cuda_u64_mul_checked(blocks, 34u, &row_bytes) ||
-        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes)) return 0;
+    if (weight_bytes > model_size - weight_offset) {
+        fprintf(stderr,
+            "ds4: q8_0 matmul size guard FAIL label=%s offset=%llu bytes=%llu model=%llu out_dim=%llu in_dim=%llu\n",
+            label ? label : "?",
+            (unsigned long long)weight_offset, (unsigned long long)weight_bytes,
+            (unsigned long long)model_size, (unsigned long long)out_dim, (unsigned long long)in_dim);
+        return 0;
+    }
+    if (!cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) return 0;
     if (n_tok > 1 && !g_quality_mode &&
@@ -872,6 +879,7 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         in_dim == 0u || out_dim == 0u || n_tok == 0u ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
     uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (out->device_id >= 0 && out->device_id < g_n_gpus) (void)ds4_gpu_set_current_device(out->device_id);
     if (weight_offset > model_size ||
         !cuda_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
         weight_bytes > model_size - weight_offset ||

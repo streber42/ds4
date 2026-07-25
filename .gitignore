@@ -30,6 +30,7 @@
 /tests/test_rocm_xdev
 /tests/test_rocm_kernel_compare
 /tests/test_engine_rocm_tp_refusal
+/tests/test_engine_correctness_harness-rocm
 /tests/test_sampling
 *.o
 *.dSYM/

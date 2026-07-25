@@ -1,6 +1,6 @@
 # Full quality-fixture validation
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -107,3 +107,133 @@ available without a human decision to pause that service.
 experiment-log entry (there is nothing to compare against the reference score yet). Nothing
 destructive was done; no acceptance criteria above are checked because none were actually
 satisfied.
+
+**2026-07-25 — Empirical Logits Diagnostics & Hardware Verification.**
+- **Hardware & VRAM**: `rocm-smi` verified all 4× AMD Radeon AI Pro R9700 GPUs are fully available (0% VRAM used, third-party workloads gone).
+- **Harness Support**: Updated `tests/test_engine_correctness_harness.c` `parse_backend()` to accept `"rocm"` as alias for `DS4_BACKEND_CUDA` under ROCm builds.
+- **CPU Reference Baseline**: Verified CPU reference on 81 GiB production model (`DeepSeek-V4-Flash-IQ2XXS-w2Q2K...`) produces 100% coherent output (`"2 + 2 = 4"`).
+- **Single-GPU ROCm Baseline**: Verified single-GPU ROCm on `mini_ds4flash.gguf` matches CPU reference byte-for-byte (`max_abs_err = 0.000000`, 5/5 steps pass).
+- **4-GPU ROCm Multi-GPU Divergence**: Ran logits comparison harness (`test_engine_correctness_harness-rocm`) on the 81 GiB production model across 4 GPUs:
+  - CPU ref token 0: `id=20` (`'2'`)
+  - 4-GPU ROCm Pipeline token 0: `id=4229` (`'波'`), `max_abs_err = 35.685890` (FAIL at step 0)
+  - 4-GPU ROCm TP token 0: `id=761` (`'方'`), `max_abs_err = 43.044365` (FAIL at step 0)
+- **Conclusion**: The underlying ROCm multi-GPU activation/prefill path suffers a Step-0 logit divergence on the production model. Issue 10 remains `ready-for-human` pending resolution of this multi-GPU layer/activation transfer bug.
+
+**2026-07-25 (session 3) — Prior "deterministic logic bug" diagnosis overturned: this is a
+genuine data race, with a reliable deterministic repro now available.** Continuing the
+BOS-loop investigation (full detail in
+`.scratch/rocm-tensor-parallel/issues/10-checkpoint-2026-07-25-session3.md`): re-ran the exact
+same command back-to-back with nothing changed and got different results run to run (clean vs.
+100%-NaN at layer 22) — that's a race by definition, contradicting the prior session's "not a
+race" conclusion. Setting `HIP_LAUNCH_BLOCKING=1` (forces fully serialized kernel launches)
+makes the corruption **100% reproducible** instead of intermittent, which both confirms the
+race hypothesis and, usefully, gives a reliable deterministic repro for whoever picks this up
+next (no more "run it 5 times and hope"). Traced the corruption further upstream than any prior
+session had: it originates during **prefill**, not decode — `layer_attn_comp_cache[il]` (the
+compressed-KV cache) for layer 22 already contains corrupted data (partial NaNs, suspiciously
+flat near-zero values) immediately after prefill's `ds4_gpu_compressor_prefill_tensor` write
+(`rocm/ds4_rocm_compressor.cuh:324`), even though every direct input to that call is clean.
+Still specific to tier1↔tier3 (the second TP pipeline stage) and ratio-4 layers, same as prior
+sessions found — tier0↔tier2's ratio-4 layers stay clean every time. Root cause (the specific
+missing synchronization/dependency edge) not yet found; next step is bisecting inside that one
+function under the new deterministic repro. Also checked, as an aside, whether plain 4-GPU
+pipeline mode (no `--cuda-tensor-parallel`) still garbles the way an earlier comment on this
+issue reported — it no longer garbles, it now hard-errors at layer 0 with an unrelated MoE
+copy-argument error, so that's a separate pre-existing bug, not investigated further here.
+Issue remains open; not closable yet, but meaningfully closer — the search space has gone from
+"somewhere in a huge attention/TP code path" to "one function, one specific race." No open
+decision is blocking further work here (the only architectural trade-off in this cluster of
+issues, issue 11's two-pair-vs-four-rank topology choice, was already decided) — what's left is
+bisection inside one function under a now-deterministic repro. Reclassified `ready-for-agent`.
+
+**2026-07-25 (session 4) — Session 3's "race in the compressor" diagnosis superseded: root
+cause is a real (now partially fixed) bug in the TP-owned routed-MoE combine path, not a
+synchronization race. Two concrete findings, one fixed, one still open.**
+
+Picked up from session 3's checkpoint. Re-ran the exact repro
+(`HIP_LAUNCH_BLOCKING=1 DS4_DEBUG_TP_OUTPUT=1 ./ds4 ... -n 2 -p "Explain C pointers..."`) and
+extended the debug instrumentation one level further back than session 3 had gone: added stat
+dumps at the batch/prefill tier-hop boundary (`metal_graph_set_active_tier_batch`, previously
+only the decode-path hop was instrumented) and at `after_attn`/`after_ffn` `cur_hc` inside
+`metal_graph_encode_layer_batch`. This immediately showed the tier-0→tier-1 hop itself is clean,
+and layer 21 (tier 1's *first* layer, ratio ≠ 4) computes cleanly through attention — but its
+**FFN output already contains `-inf`/huge values before layer 22 (tier 1's first ratio-4 layer)
+ever runs**. So session 3's localization to `ds4_gpu_compressor_prefill_tensor` was consuming
+already-corrupted data, not producing it; the compressor kernel itself is not the culprit. This
+also finally explains why it looked like a race: the corruption is deterministic (confirmed by
+running the exact same command 3x with and without `HIP_LAUNCH_BLOCKING=1` — same failure every
+time, just different exact NaN/garbage values each run, because the inputs feeding the bug are
+themselves numerically unstable/exploding, not because of a scheduling race).
+
+**Root cause 1 (found and fixed): `logical_tier` computed from `ds4_gpu_tensor.owner` instead of
+`.device_id`.** `ds4_gpu_tensor` has two separate int fields — `owner` (a boolean: "does this
+tensor own/should-free its allocation") and `device_id` (which physical tier it lives on). Four
+sites across the ROCm port used `->owner` where the CUDA reference (`ds4_cuda.cu`, via its
+`ds4_tensor_device_idx()` helper) uses `device_id`:
+- `rocm/ds4_rocm_moe_launch.cuh:695` — `cuda_resolve_weight_ptr`'s `logical_tier` inside
+  `routed_moe_launch`'s dense/default weight-resolution branch.
+- `rocm/ds4_rocm_matmul.cuh:681` — `ds4_gpu_matmul_f16_tensor`'s device-switch-before-dispatch.
+- `rocm/ds4_rocm_router.cuh:184` — `ds4_gpu_router_select_batch_tensor`'s device switch.
+- `rocm/ds4_rocm_runtime.cuh:3640` — `cuda_stream_batch_selected_pending_matches`' target-device
+  resolution for a D2H selected-ids copy.
+
+Since borrowed/view tensors (`metal_graph_borrow_tensor_view`, used pervasively for the TP-owned
+MoE split) always set `owner=0` regardless of which tier they actually live on, `logical_tier`
+was silently wrong (0) for essentially every TP-owned MoE call, on both the "home" and "partner"
+side, in exactly the scenario this issue's TP build depends on. Fixed all four call sites to use
+`->device_id` (matching the CUDA reference exactly). **Verified empirically**, not just by code
+reading: added temporary instrumentation (since removed) that dumped the actual resolved weight
+pointer and the first 32 raw weight bytes for both the home and partner `routed_moe_batch_owned`
+calls at layer 21 — before the fix, both calls resolved to logical_tier 0 regardless of which
+tier was really being computed on; after the fix, `logical_tier` and the resolved device pointer
+correctly differ (1 vs 3) and the underlying weight bytes read at those two addresses are
+genuinely different, confirming the fix changes real behavior, not just cosmetically.
+
+**Root cause 2 (found, NOT fixed — this is the real blocker): ROCm's `routed_moe_launch` is
+missing an `owned_filtered`-equivalent dispatch parameter that CUDA's has.** Even after root
+cause 1's fix, `local_out` (home tier's owned-expert partial sum) and `peer_out` (partner tier's
+owned-expert partial sum) inside `metal_graph_encode_mixed_routed_rows` (`ds4.c:62883`) still
+come out **byte-identical** to each other for every token, despite: confirmed-different resolved
+weight pointers, confirmed-different underlying weight bytes, and confirmed-correctly-different
+`selected` arrays after the ownership filter (`moe_filter_owned_pairs_kernel` — checked directly,
+e.g. token 0 remaps to `[81,-1,103,64,-1,-1]` on the partner side vs `[-1,51,-1,-1,96,16]` on the
+home side, which is exactly the expected disjoint 3-of-6 split). Comparing directly against
+`ds4_cuda.cu`'s `ds4_gpu_routed_moe_batch_owned_tensor` (`ds4_cuda.cu:22281`) and its
+`routed_moe_launch` (`ds4_cuda.cu:20792`) found the actual gap: CUDA's `routed_moe_launch` takes
+**two** trailing flags, `allow_streaming` and `owned_filtered` (ds4_cuda.cu:20820-20821); ROCm's
+(`rocm/ds4_rocm_moe_launch.cuh:511`) only has **one**, `force_resident`, which only gates the
+(here-inapplicable, SSD-streaming-only) full-layer cache check. CUDA's `owned_filtered` gates
+substantial additional dispatch logic specific to a *sparsely-masked* `selected` array (the kind
+`moe_filter_owned_pairs_kernel` produces, where roughly half of every token's 6 slots are `-1`)
+— see `ds4_cuda.cu:20929-20997` (`use_owned_sparse_buffers`, disabling `use_p2_sorted` when
+`owned_filtered`, `use_small_sorted_prep`) and further conditional branches at
+`ds4_cuda.cu:21188` and `ds4_cuda.cu:21586`. None of this exists in the ROCm port — the sorted-
+pairs/expert-tile counting and scattering kernels themselves correctly skip `-1` entries (checked
+`moe_count_sorted_pairs_kernel`/`moe_scatter_sorted_pairs_deterministic_kernel` in
+`rocm/ds4_rocm_moe.cuh` line-by-line, these are fine), but the **downstream gate/up/down compute
+kernels that CUDA's `owned_filtered` branch selects specifically to handle experts with few-or-
+zero assigned tokens** were never ported; ROCm always takes the dense/full-occupancy dispatch
+path, which is what's producing the identical-and-exploding output for both the home and partner
+calls.
+
+**Why this is not a quick fix.** This is a genuine missing subsystem-sized chunk of the port
+(a new `owned_filtered` parameter threaded through `routed_moe_launch`, plus whatever HIP
+equivalent of CUDA's "owned sparse buffers" kernels is needed for gfx1201), not a one-line
+correction — the PRD's own kernel-porting discipline ("each kernel wave lands only with its
+numeric-equivalence evidence") argues against rushing this. Confirmed end-to-end with the fix
+from root cause 1 alone in place: real production-model generation is still garbled (repeated
+`<｜begin▁of▁sentence｜>` tokens), so root cause 2 is still live and user-visible.
+
+**Not attempted this session:** the actual `owned_filtered` port itself (out of scope for a
+single sitting — this is real new kernel work, see above); the `ds4-eval` quality-fixture run
+(would be meaningless while output is still incoherent). No acceptance criteria checked; none
+are satisfied yet.
+
+**Handoff for whoever picks this up next:** start from `ds4_cuda.cu:20929` (the
+`use_sorted_pairs`/`use_owned_sparse_buffers` block) and `rocm/ds4_rocm_moe_launch.cuh:539`
+(ROCm's `routed_moe_launch`, missing the `owned_filtered` param entirely). The four `->owner`→
+`->device_id` fixes from this session are already committed and should not need re-litigating.
+Recommend re-testing with the same repro command as session 3 (still valid, still deterministic)
+after each dispatch branch is ported, checking `local_out` vs `peer_out` divergence (they should
+differ once fixed) before moving to the full `ds4-eval` run this issue actually needs.
+

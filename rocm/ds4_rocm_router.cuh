@@ -161,7 +161,7 @@ extern "C" int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_te
                     bias, hash, (const float *)logits->ptr, NULL, tok, hash_rows, 1,
                     active_n_expert_used, active_scale, has_bias && !hash_mode, hash_mode);
         }
-        ok = cuda_ok(cudaGetLastError(), "router_select launch");
+        ok = cuda_ok(cudaDeviceSynchronize(), "router_select launch");
     }
     return ok;
 }
@@ -181,6 +181,7 @@ extern "C" int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_
         !cuda_tensor_has_elems2(weights, n_tokens, active_n_expert_used, sizeof(float))) {
         return 0;
     }
+    if (selected && selected->device_id >= 0 && selected->device_id < g_n_gpus) (void)ds4_gpu_set_current_device(selected->device_id);
     const float *bias = NULL;
     const int32_t *hash = NULL;
     if (has_bias && !hash_mode) {
@@ -229,5 +230,5 @@ extern "C" int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_
                 has_bias && !hash_mode,
                 hash_mode);
     }
-    return cuda_ok(cudaGetLastError(), "router_select launch");
+    return cuda_ok(cudaDeviceSynchronize(), "router_select launch");
 }

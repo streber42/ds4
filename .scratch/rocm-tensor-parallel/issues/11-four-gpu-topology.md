@@ -1,6 +1,6 @@
 # Four-GPU topology: decide & extend
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -85,3 +85,9 @@ overhead is accounted for), but a throughput number is not the correctness re-va
 issue's own acceptance criteria call for. Unmarked those two criteria and reopened to
 `ready-for-human`. Full findings and repro steps in
 `.scratch/rocm-tensor-parallel/issues/12-package-container.md`'s Comments.
+
+**2026-07-25 — reclassified `ready-for-agent`.** This issue's own architectural decision
+(Option A, two TP pairs pipelined) was already made and recorded above; the remaining unchecked
+criteria (correctness re-validation, experiment-log entry) only need issue 10's underlying bug
+fixed and the fixture re-run — no further human judgment call is outstanding here. Still
+blocked by issue 10 in practice.

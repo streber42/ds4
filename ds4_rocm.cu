@@ -150,17 +150,116 @@ extern "C" int ds4_gpu_register_model_map_no_copy(const void *model_map, uint64_
     return ds4_gpu_set_model_map(model_map, model_size);
 }
 
-/* Real per-device selective weight caching (the VRAM/perf optimization
- * engine_install_per_device_caches is building toward) is not ported yet.
- * Always-succeed no-op is correctness-safe rather than a bring-up-only
- * bypass: every weight read goes through cuda_model_range_ptr, which
- * already falls back to a host-mapped/uncached read when no device range
- * was cached for it (see ds4_rocm_tp_bringup.h's comment on this same
- * safety property for the other errno-contract entry point,
- * ds4_gpu_device_cache_support_tensors). Slower, not wrong -- performance
- * is out of scope for issue 05. */
-extern "C" int ds4_gpu_device_cache_tensors(int device_id, const ds4_tensor_range *ranges, int n_ranges) {
-    (void)device_id; (void)ranges; (void)n_ranges;
+/* Real per-device selective weight caching for multi-GPU ROCm sessions.
+ * Allocates a per-device VRAM slab for device_id, copies selective weight
+ * ranges from host mmap to device_id's slab, and populates g_cache_ranges. */
+extern "C" int ds4_gpu_device_cache_tensors(int device_id,
+                                            const ds4_tensor_range *ranges,
+                                            int n_ranges) {
+    if (device_id < 0 || device_id >= DS4_MAX_GPUS) return 1;
+    if (n_ranges < 0 || (!ranges && n_ranges > 0)) return 2;
+    if (n_ranges == 0) return 0;
+
+    if (!g_model_host_base || g_model_registered_size == 0) return 3;
+
+    uint64_t want_bytes = 0;
+    for (int i = 0; i < n_ranges; i++) {
+        if (ranges[i].target_device != device_id) continue;
+        const uint64_t off = ranges[i].source_offset;
+        const uint64_t nb  = ranges[i].bytes;
+        if (nb == 0) continue;
+        if (off > g_model_registered_size) return 8;
+        if (nb > g_model_registered_size - off) return 9;
+        if (want_bytes > UINT64_MAX - nb) return 10;
+        want_bytes += nb;
+    }
+    if (want_bytes == 0) return 0;
+
+    rocm_device_cache &c = g_dev_cache[device_id];
+
+    int prev_device = -1;
+    if (hipGetDevice(&prev_device) != hipSuccess) prev_device = -1;
+    if (hipSetDevice(device_id) != hipSuccess) return 4;
+
+    void *new_base = NULL;
+    size_t new_bytes = c.bytes + want_bytes;
+
+    {
+        size_t free_b = 0, total_b = 0;
+        if (hipMemGetInfo(&free_b, &total_b) == hipSuccess) {
+            const size_t safety = (size_t)2ull * 1024ull * 1024ull * 1024ull;
+            const size_t need = new_bytes + safety;
+            if (need > free_b) {
+                fprintf(stderr,
+                        "ds4: ROCm device cache slab needs %.2f GiB on device %d "
+                        "but only %.2f GiB free (slab=%.2f GiB + %.2f GiB safety). "
+                        "Refusing upfront to avoid late OOM at hipMalloc.\n",
+                        (double)need / 1073741824.0,
+                        device_id,
+                        (double)free_b / 1073741824.0,
+                        (double)new_bytes / 1073741824.0,
+                        (double)safety / 1073741824.0);
+                if (prev_device >= 0) (void)hipSetDevice(prev_device);
+                return 5;
+            }
+        }
+    }
+
+    if (hipMalloc(&new_base, new_bytes) != hipSuccess) {
+        if (prev_device >= 0) (void)hipSetDevice(prev_device);
+        return 5;
+    }
+    if (c.present && c.bytes > 0) {
+        hipError_t e = hipMemcpy(new_base, c.base, c.bytes, hipMemcpyDeviceToDevice);
+        if (e != hipSuccess) {
+            (void)hipFree(new_base);
+            if (prev_device >= 0) (void)hipSetDevice(prev_device);
+            return 6;
+        }
+        char *old_base = (char *)c.base;
+        char *grown    = (char *)new_base;
+        for (size_t k = 0; k < g_cache_ranges.size(); k++) {
+            if (g_cache_ranges[k].device_id == device_id) {
+                g_cache_ranges[k].device_ptr =
+                    grown + ((char *)g_cache_ranges[k].device_ptr - old_base);
+            }
+        }
+        (void)hipFree(c.base);
+    }
+    c.base = new_base;
+    c.bytes = new_bytes;
+    c.present = 1;
+
+    const char *host_base = (const char *)g_model_host_base;
+    size_t write_off = c.bytes - want_bytes;
+    for (int i = 0; i < n_ranges; i++) {
+        if (ranges[i].target_device != device_id) continue;
+        char *dev_ptr = (char *)c.base + write_off;
+        hipError_t e = hipMemcpy(dev_ptr,
+                                 host_base + ranges[i].source_offset,
+                                 (size_t)ranges[i].bytes,
+                                 hipMemcpyHostToDevice);
+        if (e != hipSuccess) {
+            if (prev_device >= 0) (void)hipSetDevice(prev_device);
+            return 7;
+        }
+        cache_range_entry ent;
+        ent.source_offset = ranges[i].source_offset;
+        ent.bytes         = ranges[i].bytes;
+        ent.device_id     = device_id;
+        ent.device_ptr    = dev_ptr;
+        g_cache_ranges.push_back(ent);
+        write_off += ranges[i].bytes;
+    }
+
+    std::sort(g_cache_ranges.begin(), g_cache_ranges.end(),
+              [](const cache_range_entry &a, const cache_range_entry &b) {
+                  if (a.source_offset != b.source_offset)
+                      return a.source_offset < b.source_offset;
+                  return a.device_id < b.device_id;
+              });
+
+    if (prev_device >= 0) (void)hipSetDevice(prev_device);
     return 0;
 }
 

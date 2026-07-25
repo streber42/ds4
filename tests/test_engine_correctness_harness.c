@@ -115,7 +115,7 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
 
 static int parse_backend(const char *s) {
     if (strcmp(s, "cpu") == 0)   return DS4_BACKEND_CPU;
-    if (strcmp(s, "cuda") == 0)  return DS4_BACKEND_CUDA;
+    if (strcmp(s, "cuda") == 0 || strcmp(s, "rocm") == 0) return DS4_BACKEND_CUDA;
     if (strcmp(s, "metal") == 0) return DS4_BACKEND_METAL;
     fprintf(stderr, "unknown backend: %s\n", s);
     exit(2);

@@ -1,6 +1,6 @@
 # Package ported build into container workflow
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -136,3 +136,21 @@ output on this exact model/quantization/hardware combination, then re-run the of
 `ds4-eval` quality fixture for real (issue 10's original, still-unmet acceptance criterion) to
 get an actual go/no-go signal before either issue 10, issue 11, or this issue can be honestly
 closed.
+
+**2026-07-25 — reclassified `ready-for-agent`.** No open decision blocks continued work here —
+finding the root cause of the incoherent output is debugging, not a judgment call, and issue
+10's session-3 pass (see that issue's Comments and
+`.scratch/rocm-tensor-parallel/issues/10-checkpoint-2026-07-25-session3.md`) made real progress
+on exactly that: found a genuine data race in the prefill compressed-KV cache write, with a
+now-deterministic repro (`HIP_LAUNCH_BLOCKING=1`). One thing worth an agent's attention before
+assuming that race is the whole story: this issue's finding above was that the incoherence
+happens in *plain pipeline mode too* (no TP, no sharding) — but a quick same-session check just
+now found plain pipeline mode no longer reproduces that; it now hard-errors immediately at
+layer 0 (`ds4: ROCm routed_moe iq2/q2 float-down counts copy failed: invalid argument`) before
+it can even reach the point where the earlier garbling was observed. That's a different
+symptom than what's described above, so whether "the TP race" and "the pipeline garbling" are
+the same underlying bug is still an open question, not yet reconciled — worth checking early in
+the next pass rather than assuming issue 10's fix will automatically resolve this issue too.
+The packaging artifacts themselves are still marked ready-to-merge-on-their-own-merits per
+above; that merge is a separate decision from the debugging work and should still go to a human
+when it comes up, but it does not block continuing the investigation.
