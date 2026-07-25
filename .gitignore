@@ -32,12 +32,17 @@
 /tests/test_engine_rocm_tp_refusal
 /tests/test_engine_correctness_harness-rocm
 /tests/test_sampling
+/tests/test_tp_sharding
 *.o
+*.o.tmp
+*.tmp
 *.dSYM/
 __pycache__/
 *.pyc
 /misc/
 /.worktrees/
+.scratch/rocm-tensor-parallel/eval-out/
+.scratch/rocm-tensor-parallel/logs/
 .*.swp
 
 build.log

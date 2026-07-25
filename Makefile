@@ -47,7 +47,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-quality
+.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch test-opencode-eval dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-quality
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -422,6 +422,9 @@ test-rocm: tests/test_rocm_tp_stubs tests/test_rocm_xdev tests/test_rocm_kernel_
 	./tests/test_rocm_xdev
 	./tests/test_rocm_kernel_compare
 	./tests/test_engine_rocm_tp_refusal
+
+test-opencode-eval:
+	python3 tests/test_opencode_reference_eval.py
 
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
