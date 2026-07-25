@@ -1,5 +1,63 @@
 # ROCm tensor-parallel: experiment log
 
+## 2026-07-25 — first quality-fixture run on the 4-GPU build (issue 10)
+
+**Goal:** issue 10's core deliverable — score the multi-GPU/tensor-parallel build
+on the official 100-case fixture (`gguf-tools/quality-testing/data/flash`,
+DeepSeek V4 Flash continuations collected from the official DeepSeek API) and
+compare tensor-parallel against the pipeline reference path on the same
+hardware and quantisation.
+
+**Tooling change that made this possible.** `score_official` had no multi-GPU
+plumbing at all — it only ever called `ds4_engine_open`, so every previous
+attempt at this issue could only have scored the single-GPU path. It now
+accepts `--gpu-devices` / `--gpu-vram` / `--cuda-tensor-parallel` (same syntax
+as ds4's CLI) and routes through `ds4_engine_create_with_gpu_config`. The
+ROCm link recipe for it was also broken (hipcc's `-x c` leaked onto the object
+files); fixed, and exposed as `make rocm-quality`.
+
+**Setup:** 4x AMD Radeon AI Pro R9700 (gfx1201), all idle. Model
+`/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf`
+(81 GiB), ctx 4096, 100 cases / 2289 scored tokens. Build:
+`make ROCM_ARCH=gfx1201 rocm -j16 && make ROCM_ARCH=gfx1201 rocm-quality -j16`.
+Includes this session's `hc_split_weighted_sum_norm` multi-row fix.
+
+| config | avg_nll | first_match | avg_lcp | api_top1_rate | api_pair_rate |
+|---|---|---|---|---|---|
+| 4-GPU pipeline, default | 1.355060 | 1/100 | 0.010 | 0.7221 | 0.9557 |
+| 4-GPU tensor-parallel, default | 3.076559 | 0/100 | 0.000 | 0.6378 | 0.9169 |
+| 4-GPU pipeline, `AMD_SERIALIZE_KERNEL=3` | 0.373815 | 64/100 | 5.810 | 0.8589 | 0.9883 |
+| **4-GPU tensor-parallel, `AMD_SERIALIZE_KERNEL=3`** | **0.369930** | **68/100** | **6.700** | **0.8646** | **0.9893** |
+
+Lower `avg_nll` is better. Raw per-case TSVs are kept in
+`.scratch/rocm-tensor-parallel/quality-out/`.
+
+**Finding 1 — with kernel dispatch serialized, tensor parallelism is quality-
+equivalent to the pipeline reference.** `compare_scores.py` on the two
+serialized runs: `delta_new_minus_old = -0.003884` (**-1.04%**, TP slightly
+*better*), 60 case wins for TP vs 40 for pipeline, no ties, first-token matches
+68 vs 64, greedy LCP 6.70 vs 5.81. The per-case spread is symmetric — the
+largest TP win is `case_052` (-4.90 nll) and the largest TP loss is `case_091`
+(+3.30) — which is the signature of floating-point reassociation across a
+different sharding, exactly what the PRD's Testing Decisions anticipate, not of
+a sharded-arithmetic error. **This is the first direct evidence that the ported
+TP kernels are numerically sound end-to-end on a real quality metric.**
+
+**Finding 2 — in the default configuration both multi-GPU paths are still
+broken by a kernel-ordering race, and TP is hurt roughly twice as badly.**
+Default 4-GPU pipeline scores 1.355 (3.6x worse than serialized) and default
+4-GPU TP scores 3.077 (8.3x worse). First-token match collapses to 1/100 and
+0/100 respectively. TP suffering more is consistent with it doing strictly more
+cross-device work per layer. Setting `AMD_SERIALIZE_KERNEL=3` (or
+`HIP_LAUNCH_BLOCKING=1`) is currently the only way to get trustworthy output
+from either path; it costs ~60% throughput on the fixture (2m10s -> 3m29s).
+
+**Conclusion.** The remaining blocker is a multi-GPU dispatch-ordering bug in
+the ROCm backend that is *not* tensor-parallel-specific — it degrades the plain
+pipeline path too. Once it is fixed, this table should be re-measured without
+the serialization workaround; the serialized rows are the prediction for what
+the fixed build should score. Full diagnosis in issue 10's Comments.
+
 ## 2026-07-24 — confirmed VRAM fit is a hard constraint, not contention (issue 07)
 
 Re-attempted the isolated 2-rank run after stopping the production `vllm

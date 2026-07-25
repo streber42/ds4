@@ -1,6 +1,6 @@
 # Full quality-fixture validation
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -18,10 +18,10 @@ spread, and it is the last correctness gate before this is treated as production
 
 ## Acceptance criteria
 
-- [ ] The official multi-case quality fixture runs to completion on the tensor-parallel build
+- [x] The official multi-case quality fixture runs to completion on the tensor-parallel build
 - [ ] Score is equivalent to the reference pipeline path within the fixture's own accepted variance
-- [ ] Any case that regresses is investigated and either fixed or documented with a justification
-- [ ] Results recorded in the project's experiment log alongside the reference score
+- [x] Any case that regresses is investigated and either fixed or documented with a justification
+- [x] Results recorded in the project's experiment log alongside the reference score
 - [x] Both decode and prefill paths are exercised by the run
 - [x] The run is reproducible from a documented command
 
@@ -31,6 +31,178 @@ spread, and it is the last correctness gate before this is treated as production
 - `.scratch/rocm-tensor-parallel/issues/08-auxiliary-tp-hooks.md`
 
 ## Comments
+
+**2026-07-25 (session 9, live hardware, all 4 GPUs idle) — The garbled output had a
+single dominant root cause, now found and fixed: the ROCm batch-prefill path was
+RMS-norming only row 0 of the FFN input, so every prefill token except the first got a
+zero FFN contribution. With that fixed, the quality fixture was run for the first time in
+this issue's history — 100/100 cases, and tensor parallelism scores 1.04% BETTER than the
+pipeline reference. A second, smaller defect remains: a multi-GPU kernel-ordering race
+that is not TP-specific.**
+
+### Root cause found and fixed: `ds4_gpu_hc_split_weighted_sum_norm_tensor` normed one row
+
+`rocm/ds4_rocm_hc_output_launch.cuh`'s multi-row fallback called
+`ds4_gpu_rms_norm_weight_tensor` — the **single-row** entry, which launches
+`rms_norm_weight_kernel<<<1, 256>>>(..., n, /*rows=*/1, eps)`. The CUDA reference
+(`ds4_cuda.cu:22503`) calls `ds4_gpu_rms_norm_weight_rows_tensor` with the real row count
+and carries a comment warning about precisely this: *"Multi-row fallback: norm EVERY row
+(rms_norm_weight_tensor is the single-row entry and would leave rows 1..n-1 of norm_out
+untouched)."* The ROCm port dropped that. Fixed to mirror CUDA.
+
+**Why this hid for nine sessions.** The fused single-row kernel is taken when `n_rows == 1`,
+so single-GPU SSD-streaming — the only single-GPU config that can hold this 81 GiB model,
+and therefore every "known-good" control run anyone used — prefills one token at a time and
+never reaches the buggy branch. `fuse_hc_norm` additionally requires `n_tokens > 1`. So the
+bug needed *batch prefill*, which in practice only happens on the multi-GPU path, which is
+why it looked like a multi-GPU/TP bug and why sessions 3-8 kept searching the cross-device
+and TP-owned MoE code. It is neither: it is a batch-prefill bug in a shared launcher.
+
+**How it was localized** (method worth reusing): dumped every named tensor for one layer
+with the existing `DS4_ROCM_GRAPH_DUMP_PREFIX`/`DS4_ROCM_GRAPH_DUMP_LAYER` machinery and
+reshaped each prefill dump to `[n_tokens, dim]` instead of eyeballing whole-tensor NaN
+counts. That immediately showed layer 0's `ffn_norm` had 4096 non-zero values for token 0
+and **exactly 0 for tokens 1-15**, while its input `hc_ffn_pre` was fully populated for all
+16 — and that `hc_ffn_post` equalled `hc_attn_post` for tokens 1-15, i.e. the FFN
+contributed literally nothing. Per-token slicing is what made a nine-session bug obvious in
+one dump; the aggregate "how many NaNs in this tensor" view prior sessions used cannot see
+it, because the corruption is zeros, not NaNs.
+
+**Effect.** Same prompt, same build, 4-GPU pipeline, `--temp 0`:
+- before: `بيها 3.5 كيلو واط. 3.5 كيلو واط` (and `بتكون 2개가...`, `оралид...` — the
+  mixed-script noise every session since the reopen has been chasing)
+- after: fluent, on-topic English; and with the race below worked around, byte-identical to
+  the single-GPU reference: `We need to explain C pointers in one sentence. The user asks:
+  "Explain C pointers in one sentence." So we must provide a concise, single-sentence
+  explanation...`
+
+Also fixed, separately: `ds4_gpu_lookup_cache_strict` (`rocm/ds4_rocm_runtime.cuh`) checked
+only that the request *starts* inside a cached range, never that the range covers
+`bytes`. The device slab packs ranges back-to-back in install order, so an overrunning
+lookup would silently return a pointer into whatever tensor sits next to it. CUDA's version
+does both bounds checks, and `tests/test_gpu_lookup_cache_strict.c` already asserts the
+behaviour — but that test only ever linked `ds4_cuda.o`, so ROCm's separate implementation
+was never checked against it. Instrumented first: this **fired zero times** on the repro, so
+it is a latent divergence, not the cause of anything observed. Kept because it is correct
+and free.
+
+### Quality fixture: run to completion, TP is equivalent to pipeline
+
+`score_official` — the binary behind the "official multi-case quality fixture" — had **no
+multi-GPU plumbing at all**. It only ever called `ds4_engine_open`, so it could physically
+only score the single-GPU path; no previous session could have satisfied this issue's
+criteria with it as it stood. Added `--gpu-devices` / `--gpu-vram` /
+`--cuda-tensor-parallel` (same syntax as ds4's CLI, routed through
+`ds4_engine_create_with_gpu_config`), fixed its ROCm link recipe (hipcc's `-x c` was
+leaking onto the object files, so the recipe could never have built), and exposed it as
+`make rocm-quality`.
+
+100 cases / 2289 tokens, ctx 4096, official DeepSeek-API Flash continuations:
+
+| config | avg_nll | first_match | avg_lcp | api_top1 | api_pair |
+|---|---|---|---|---|---|
+| 4-GPU pipeline, default | 1.355060 | 1/100 | 0.010 | 0.7221 | 0.9557 |
+| 4-GPU tensor-parallel, default | 3.076559 | 0/100 | 0.000 | 0.6378 | 0.9169 |
+| 4-GPU pipeline, `AMD_SERIALIZE_KERNEL=3` | 0.373815 | 64/100 | 5.810 | 0.8589 | 0.9883 |
+| **4-GPU TP, `AMD_SERIALIZE_KERNEL=3`** | **0.369930** | **68/100** | **6.700** | **0.8646** | **0.9893** |
+
+With dispatch serialized, `compare_scores.py` gives TP vs pipeline
+`delta_new_minus_old = -0.003884` (**-1.04%, TP slightly better**), 60 case wins to 40, no
+ties. Per-case regressions were investigated: the spread is symmetric (largest TP win
+`case_052` -4.90 nll, largest TP loss `case_091` +3.30) and there is no systematic
+direction — the signature of floating-point reassociation across a different sharding,
+which the PRD's Testing Decisions explicitly call expected and which is why the fixture is
+compared with a tolerance rather than for bit-identity. **No case regresses for a reason
+attributable to sharded arithmetic.** Raw TSVs in
+`.scratch/rocm-tensor-parallel/quality-out/`; table also in the experiment log.
+
+### The one criterion left unchecked, and why
+
+"Score is equivalent to the reference pipeline path within the fixture's own accepted
+variance" is **met under `AMD_SERIALIZE_KERNEL=3` and not met in the default
+configuration** (TP 3.077 vs pipeline 1.355 — TP is hurt roughly twice as badly, consistent
+with it doing strictly more cross-device work per layer). Deliberately left unchecked
+rather than checked-with-an-asterisk: the shipping configuration is the one without the
+env var, and claiming the gate passed on a workaround is how this issue got a "closed"
+status it had not earned once already.
+
+### Remaining defect: a multi-GPU kernel-ordering race (not TP-specific)
+
+Sharply characterised, root cause not yet pinned:
+
+- **It is purely an ordering problem, not arithmetic.** `AMD_SERIALIZE_KERNEL=3` or
+  `HIP_LAUNCH_BLOCKING=1` makes output exactly match the single-GPU reference.
+  `AMD_SERIALIZE_COPY=3` mostly fixes it too. Cost: ~60% throughput (fixture 2m10s -> 3m29s).
+- **It affects the plain pipeline path as well as TP**, so it is a backend-wide multi-GPU
+  bug, not something issues 05-11's TP surface introduced.
+- **Onset is at the first tier hop.** Two runs of the same prompt at `--temp 0`: prefill
+  `hc_ffn_post` is bit-identical for layers 0-12 (all on GPU0) and first differs at layer 13
+  or 14 — the first/second layer on GPU1. Plain-vs-serialized differs first at layer 13
+  exactly.
+- **Any added synchronisation hides it.** Dumping every tensor at layer 13 (the dump path
+  calls `ds4_gpu_synchronize()` between tensors) makes plain and serialized bit-identical,
+  so instrumentation perturbs the measurement — absence of a diff in a heavily-dumped run
+  proves nothing.
+
+**Hypotheses tested and REJECTED this session** (do not re-litigate these):
+- *Weight-cache lookups returning wrong-device or overrunning pointers* — instrumented
+  `ds4_gpu_lookup_cache_strict`: zero overruns. Instrumented `cuda_model_range_ptr` misses:
+  390 total, **all during model load**, none during inference.
+- *The HIP current device drifting from the engine's `active_tier`* — recorded the expected
+  device on every `ds4_gpu_set_current_device` and compared it at every weight resolution:
+  **zero mismatches**. Also tried forcing `ds4_gpu_set_current_device(this_tier)` at the top
+  of every batch layer: no change.
+- *One of the `g_quality_mode`-gated fast paths* — `--quality` still reproduces it.
+- *The async shared-expert stream* (`g_shared_gate_up_stream`) — it is decode-only and
+  `g_quality_mode` disables it, and `--quality` still reproduces. **Note for whoever fixes
+  this: `g_shared_gate_up_stream` / `_ready_event` / `_tmp` in
+  `rocm/ds4_rocm_shared_expert.cuh:341-345` are still genuinely wrong for multi-GPU — one
+  global stream, event and device buffer created on whichever device was current first, then
+  reused from every tier. Same shape as the per-tier cuBLAS handle bug issue 04 fixed. It is
+  not this race, but it should be made per-device.** `g_hipblaslt_gemm_plans`
+  (`rocm/ds4_rocm_hipblaslt.cuh:18`) has the same shape: a global plan cache keyed only on
+  shape, whose `hipblasLtMatmulAlgo_t` was obtained from whichever tier's handle was active
+  first.
+- *An end-of-layer barrier being enough* — a `ds4_gpu_synchronize()` at the end of every
+  batch layer does **not** fix it, so the hazard is inside a single layer's kernel sequence.
+
+**Tool built for the next session.** The fastest way back in is a temporary sync-bisect
+probe: in `cuda_ok()` (`rocm/ds4_rocm_runtime.cuh:5359`, the wrapper every kernel launch
+already checks), add a `cudaDeviceSynchronize()` gated on an env var matched against the
+`what` label, e.g. `DS4DBG_SYNC=routed_moe`. `DS4DBG_SYNC='*'` reproduces the full fix,
+which validates the probe; narrowing the substring then bisects down to the individual
+kernel that needs the barrier. This was built and confirmed working this session (removed
+before commit — it is diagnostic scaffolding, not shippable). Note that
+`ds4_gpu_synchronize()` is `cudaDeviceSynchronize()` on the **current device only** and is
+not a cross-device barrier, which may itself be the gap.
+
+**Reproduce all of the above:**
+```
+make ROCM_ARCH=gfx1201 rocm -j16 && make ROCM_ARCH=gfx1201 rocm-quality -j16
+M=/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
+# quality fixture, tensor-parallel (prefix AMD_SERIALIZE_KERNEL=3 for the correct-output run)
+./gguf-tools/quality-testing/score_official $M \
+  gguf-tools/quality-testing/data/flash/manifest.tsv /tmp/q_tp.tsv 4096 \
+  --gpu-devices 0,1,2,3 --cuda-tensor-parallel
+python3 gguf-tools/quality-testing/compare_scores.py /tmp/q_pipeline.tsv /tmp/q_tp.tsv
+# single-prompt race repro
+./ds4 -m $M --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 -n 25 \
+  -p "Explain C pointers in one sentence."
+```
+`make ROCM_ARCH=gfx1201 test-rocm` passes (tp stubs, xdev transport, 6/6 kernel numeric
+comparisons, TP refusal). Note the single-GPU SSD-streaming reference is *not* a practical
+control for the fixture: it is I/O-bound and read 213 GB without finishing a single case in
+12 minutes.
+
+**Recommendation.** Do not close this issue on the serialized numbers. The next step is a
+single, well-scoped bug hunt — find the missing barrier inside one layer's kernel sequence
+using the `cuda_ok` sync-bisect probe above — after which this fixture run should be
+repeated without `AMD_SERIALIZE_KERNEL=3`; the serialized rows in the table are the
+prediction for what the fixed build should score. The decision a human is needed for is
+whether that hunt belongs in this issue or in its own (it is a general ROCm multi-GPU bug
+that degrades the plain pipeline path, so arguably its own), and whether the TP-vs-pipeline
+equivalence demonstrated above is sufficient to unblock issue 11's throughput work in
+parallel.
 
 **2026-07-25 (session 8, paired with a human, live hardware access) — Session 7's "general,
 pre-existing ROCm decode bug, out of scope" conclusion does not hold up. Reproduced and

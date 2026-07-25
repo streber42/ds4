@@ -1,4 +1,6 @@
 #include "ds4.h"
+#include "ds4_gpu_args.h"
+#include "ds4_gpu_mgpu.h"
 #include "ds4_ssd.h"
 
 #include <ctype.h>
@@ -21,7 +23,9 @@ static void usage(const char *prog) {
             "usage: %s MODEL manifest.tsv OUT.tsv [ctx] "
             "[--ssd-streaming] [--ssd-streaming-cold] "
             "[--ssd-streaming-cache-experts N|NGB] "
-            "[--ssd-streaming-preload-experts N]\n",
+            "[--ssd-streaming-preload-experts N] "
+            "[--gpu-devices LIST] [--gpu-vram LIST|auto] "
+            "[--cuda-tensor-parallel]\n",
             prog);
 }
 
@@ -522,10 +526,22 @@ int main(int argc, char **argv) {
     uint32_t ssd_streaming_cache_experts = 0;
     uint64_t ssd_streaming_cache_bytes = 0;
     uint32_t ssd_streaming_preload_experts = 0;
+    /* Multi-GPU placement, so the fixture can score the pipeline/tensor-
+     * parallel build and not just the single-GPU path. Same flag syntax as
+     * ds4's own CLI; omitting both leaves the engine's single-GPU default. */
+    const char *gpu_devices_arg = NULL;
+    const char *gpu_vram_arg = NULL;
+    bool cuda_tensor_parallel = false;
 
     for (int i = 4; i < argc; i++) {
         const char *arg = argv[i];
-        if (!strcmp(arg, "--ssd-streaming")) {
+        if (!strcmp(arg, "--gpu-devices")) {
+            gpu_devices_arg = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--gpu-vram")) {
+            gpu_vram_arg = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--cuda-tensor-parallel")) {
+            cuda_tensor_parallel = true;
+        } else if (!strcmp(arg, "--ssd-streaming")) {
             ssd_streaming = true;
         } else if (!strcmp(arg, "--ssd-streaming-cold")) {
             ssd_streaming_cold = true;
@@ -567,10 +583,35 @@ int main(int argc, char **argv) {
         .quality = false,
         .ssd_streaming = ssd_streaming,
         .ssd_streaming_cold = ssd_streaming_cold,
+        .cuda_tensor_parallel = cuda_tensor_parallel,
     };
 
+    ds4_gpu_config gpu_cfg;
+    bool has_gpu_cfg = false;
+    if (gpu_devices_arg || gpu_vram_arg) {
+        memset(&gpu_cfg, 0, sizeof(gpu_cfg));
+        bool skip_cuda = false;
+        char errbuf[256] = {0};
+        if (parse_gpu_vram_arg(gpu_vram_arg, gpu_devices_arg, &gpu_cfg,
+                               &skip_cuda, errbuf, sizeof(errbuf)) != 0) {
+            fprintf(stderr, "score_official: bad GPU placement: %s\n", errbuf);
+            return 2;
+        }
+        if (skip_cuda || gpu_cfg.n_gpus <= 0) {
+            fprintf(stderr, "score_official: GPU placement resolved to zero devices\n");
+            return 2;
+        }
+        has_gpu_cfg = true;
+    } else if (cuda_tensor_parallel) {
+        fprintf(stderr, "score_official: --cuda-tensor-parallel needs --gpu-devices\n");
+        return 2;
+    }
+
     ds4_engine *engine = NULL;
-    if (ds4_engine_open(&engine, &opt) != 0) die("failed to open model");
+    if ((has_gpu_cfg ? ds4_engine_create_with_gpu_config(&engine, &opt, &gpu_cfg)
+                     : ds4_engine_open(&engine, &opt)) != 0) {
+        die("failed to open model");
+    }
 
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, ctx_size) != 0) die("failed to create session");

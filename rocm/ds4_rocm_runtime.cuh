@@ -4665,6 +4665,11 @@ extern "C" int ds4_gpu_lookup_cache_strict(uint64_t source_offset,
         if (e.device_id != expected_device) continue;
         if (source_offset >= e.source_offset && source_offset < e.source_offset + e.bytes) {
             uint64_t into = source_offset - e.source_offset;
+            /* The entry must cover the whole request, not just its start:
+             * the device slab packs ranges back-to-back in install order,
+             * so a pointer into a range that ends early would silently read
+             * whatever tensor happens to sit next to it. */
+            if (bytes > e.bytes - into) continue;
             if (out_device_ptr) {
                 *out_device_ptr = (char *)e.device_ptr + into;
             }
