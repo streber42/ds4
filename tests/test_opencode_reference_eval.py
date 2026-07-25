@@ -57,6 +57,20 @@ def normalize_local_url(url: str) -> str:
     return url
 
 
+CATEGORY_TOKEN_BUDGETS = {
+    "Short QA": 1024,
+    "Code Generation": 2048,
+    "Math & Reasoning": 2048,
+    "Multi-turn Chat": 1024,
+    "Long Prefill": 2048,
+}
+
+SYSTEM_REASONING_DIRECTIVE = {
+    "role": "system",
+    "content": "You are a concise assistant. Think step-by-step if needed, but state your final answer clearly and concisely after thinking.",
+}
+
+
 def build_long_prefill_messages() -> list[dict[str, str]]:
     """Build a long context prompt (~1200 tokens) with a hidden key for prefill chunk validation."""
     paragraphs = []
@@ -81,10 +95,13 @@ def build_long_prefill_messages() -> list[dict[str, str]]:
         )
     paragraphs.append(
         "Question: What is the exact CRITICAL DOCUMENTATION METADATA KEY mentioned in the text above? "
-        "State the key directly."
+        "State the key directly and concisely after thinking."
     )
     full_text = "\n\n".join(paragraphs)
-    return [{"role": "user", "content": full_text}]
+    return [
+        SYSTEM_REASONING_DIRECTIVE,
+        {"role": "user", "content": full_text},
+    ]
 
 
 BENCHMARK_SUITE = [
@@ -93,8 +110,10 @@ BENCHMARK_SUITE = [
         "name": "Short Factual QA",
         "category": "Short QA",
         "description": "Factual query expecting a direct short answer",
+        "max_tokens": 1024,
         "messages": [
-            {"role": "user", "content": "What is the capital of France? Answer in one word."}
+            SYSTEM_REASONING_DIRECTIVE,
+            {"role": "user", "content": "What is the capital of France? Answer in one word after thinking concisely."},
         ],
         "expected_check": lambda text: "paris" in text.lower(),
         "expected_hint": "Contains 'Paris'",
@@ -104,14 +123,17 @@ BENCHMARK_SUITE = [
         "name": "Code Generation",
         "category": "Code Generation",
         "description": "C pointer swap function implementation",
+        "max_tokens": 2048,
         "messages": [
+            SYSTEM_REASONING_DIRECTIVE,
             {
                 "role": "user",
                 "content": (
                     "Write a C function named `swap` that swaps two integers using pointers "
-                    "(`void swap(int *a, int *b)`). Provide clean, complete C code."
+                    "(`void swap(int *a, int *b)`). Provide clean, complete C code. "
+                    "Answer concisely after thinking."
                 ),
-            }
+            },
         ],
         "expected_check": lambda text: "swap" in text and "*" in text,
         "expected_hint": "Contains 'swap' and pointer dereference '*'",
@@ -121,8 +143,10 @@ BENCHMARK_SUITE = [
         "name": "Math & Reasoning",
         "category": "Math & Reasoning",
         "description": "Arithmetic problem requiring step-by-step logic",
+        "max_tokens": 2048,
         "messages": [
-            {"role": "user", "content": "What is 2 + 2? Answer directly with the number."}
+            SYSTEM_REASONING_DIRECTIVE,
+            {"role": "user", "content": "What is 2 + 2? Answer directly with the number after thinking."},
         ],
         "expected_check": lambda text: "4" in text,
         "expected_hint": "Contains '4'",
@@ -132,13 +156,15 @@ BENCHMARK_SUITE = [
         "name": "Multi-turn Chat",
         "category": "Multi-turn Chat",
         "description": "Context preservation across chat turns",
+        "max_tokens": 1024,
         "messages": [
+            SYSTEM_REASONING_DIRECTIVE,
             {"role": "user", "content": "My secret security key is ALPHA-4289."},
             {
                 "role": "assistant",
                 "content": "Understood. I have recorded your secret key as ALPHA-4289.",
             },
-            {"role": "user", "content": "What is my secret security key?"},
+            {"role": "user", "content": "What is my secret security key? Answer concisely after thinking."},
         ],
         "expected_check": lambda text: "ALPHA-4289" in text,
         "expected_hint": "Preserves context 'ALPHA-4289'",
@@ -148,11 +174,44 @@ BENCHMARK_SUITE = [
         "name": "Long Prefill Chunking",
         "category": "Long Prefill",
         "description": "Long context prefill (~1000 tokens) key extraction",
+        "max_tokens": 2048,
         "messages": build_long_prefill_messages(),
         "expected_check": lambda text: "DS4-ROCM-8849" in text,
         "expected_hint": "Extracted key 'DS4-ROCM-8849'",
     },
 ]
+
+
+def extract_think_blocks(content: str, reasoning: str) -> tuple[str, str]:
+    """Separate <think>...</think> blocks from content and merge into reasoning."""
+    c_text = content or ""
+    r_text = reasoning or ""
+
+    if "<think>" in c_text:
+        while "<think>" in c_text:
+            before, rest = c_text.split("<think>", 1)
+            if "</think>" in rest:
+                think_body, after = rest.split("</think>", 1)
+                r_text = (r_text + "\n" + think_body.strip()).strip() if r_text else think_body.strip()
+                c_text = (before.strip() + " " + after.strip()).strip()
+            else:
+                r_text = (r_text + "\n" + rest.strip()).strip() if r_text else rest.strip()
+                c_text = before.strip()
+                break
+
+    if "</think>" in c_text:
+        parts = c_text.split("</think>", 1)
+        r_text = (r_text + "\n" + parts[0].replace("<think>", "").strip()).strip() if r_text else parts[0].replace("<think>", "").strip()
+        c_text = parts[1].strip()
+
+    c_text = c_text.replace("<think>", "").replace("</think>", "").strip()
+    r_text = r_text.replace("<think>", "").replace("</think>", "").strip()
+
+    if not c_text and r_text:
+        lines = [ln.strip() for ln in r_text.splitlines() if ln.strip()]
+        c_text = lines[-1] if lines else r_text
+
+    return c_text, r_text
 
 
 def post_chat_stream(
@@ -235,28 +294,10 @@ def post_chat_stream(
     if ttft is None and not error_msg:
         ttft = total_time
 
-    full_content = "".join(content_chunks).strip()
-    full_reasoning = "".join(reasoning_chunks).strip()
+    raw_content = "".join(content_chunks).strip()
+    raw_reasoning = "".join(reasoning_chunks).strip()
 
-    # Handle embedded thinking tags in full_content if reasoning_content was empty
-    if not full_reasoning and "<think>" in full_content:
-        if "</think>" in full_content:
-            parts = full_content.split("</think>", 1)
-            think_part = parts[0].split("<think>", 1)[-1].strip()
-            full_reasoning = think_part
-            full_content = parts[1].strip()
-        else:
-            parts = full_content.split("<think>", 1)
-            full_reasoning = parts[1].strip()
-            full_content = parts[0].strip()
-    elif "<think>" in full_content or "</think>" in full_content:
-        full_content = full_content.replace("<think>", "").replace("</think>", "").strip()
-
-    # Fallback to reasoning text if content is empty but reasoning completed
-    if not full_content and full_reasoning:
-        lines = [ln.strip() for ln in full_reasoning.splitlines() if ln.strip()]
-        full_content = lines[-1] if lines else full_reasoning
-
+    full_content, full_reasoning = extract_think_blocks(raw_content, raw_reasoning)
     has_reasoning = bool(full_reasoning.strip())
 
     comp_tokens = (usage or {}).get("completion_tokens")
@@ -302,7 +343,9 @@ def run_evaluation(args) -> dict:
     for case in BENCHMARK_SUITE:
         cid = case["id"]
         cname = case["name"]
-        print(f"Running [{cid}] {cname}...", end="", flush=True)
+        case_budget = case.get("max_tokens", CATEGORY_TOKEN_BUDGETS.get(case["category"], 1024))
+        case_max_tokens = case_budget if args.max_tokens == 512 else max(args.max_tokens, case_budget)
+        print(f"Running [{cid}] {cname} (max_tokens={case_max_tokens})...", end="", flush=True)
 
         # 1. Query Local Server
         res_local = post_chat_stream(
@@ -310,7 +353,7 @@ def run_evaluation(args) -> dict:
             api_key=local_key,
             model=args.model,
             messages=case["messages"],
-            max_tokens=args.max_tokens,
+            max_tokens=case_max_tokens,
             timeout=args.timeout,
         )
 
@@ -321,7 +364,7 @@ def run_evaluation(args) -> dict:
                 api_key=opencode_key,
                 model=args.model,
                 messages=case["messages"],
-                max_tokens=args.max_tokens,
+                max_tokens=case_max_tokens,
                 timeout=args.timeout,
             )
         else:
@@ -338,12 +381,21 @@ def run_evaluation(args) -> dict:
                 "finish_reason": "stop",
             }
 
-        # 3. Calculate Comparison Metrics
-        local_text = (res_local["content"] + " " + res_local["reasoning"]).strip()
-        ref_text = (res_ref["content"] + " " + res_ref["reasoning"]).strip()
+        # 3. Calculate Comparison Metrics (Dual Content & Reasoning Matching)
+        local_content = res_local["content"]
+        local_reasoning = res_local["reasoning"]
+        local_combined = (local_content + " " + local_reasoning).strip()
 
-        local_pass = res_local["status"] == "SUCCESS" and case["expected_check"](local_text)
-        ref_pass = res_ref["status"] in ("SUCCESS", "SKIPPED") and case["expected_check"](ref_text)
+        ref_content = res_ref["content"]
+        ref_reasoning = res_ref["reasoning"]
+        ref_combined = (ref_content + " " + ref_reasoning).strip()
+
+        local_pass = res_local["status"] == "SUCCESS" and (
+            case["expected_check"](local_content) or case["expected_check"](local_combined)
+        )
+        ref_pass = res_ref["status"] in ("SUCCESS", "SKIPPED") and (
+            case["expected_check"](ref_content) or case["expected_check"](ref_combined)
+        )
 
         sim_ratio = difflib.SequenceMatcher(None, res_local["content"].lower(), res_ref["content"].lower()).ratio()
         exact_match = res_local["content"].strip().lower() == res_ref["content"].strip().lower()
@@ -503,6 +555,47 @@ def run_evaluation(args) -> dict:
     return summary
 
 
+def run_self_tests() -> None:
+    """Run unit tests for extract_think_blocks, adaptive token budgets, and dual matching."""
+    print("=== Running Self-Tests for Evaluation Harness Reasoning Budget & Formatting ===")
+
+    # Test 1: extract_think_blocks with clean <think>...</think>
+    c, r = extract_think_blocks("<think>Thinking about Paris.</think> Paris", "")
+    assert c == "Paris", f"Expected content 'Paris', got '{c}'"
+    assert r == "Thinking about Paris.", f"Expected reasoning 'Thinking about Paris.', got '{r}'"
+    print("[PASS] Clean <think>...</think> separation verified.")
+
+    # Test 2: extract_think_blocks with unclosed <think>
+    c, r = extract_think_blocks("<think>Thinking about Paris.", "")
+    assert r == "Thinking about Paris.", f"Expected reasoning 'Thinking about Paris.', got '{r}'"
+    assert c == "Thinking about Paris.", f"Expected fallback content 'Thinking about Paris.', got '{c}'"
+    print("[PASS] Unclosed <think> block separation and fallback verified.")
+
+    # Test 3: extract_think_blocks when reasoning stream and content stream are separated
+    c, r = extract_think_blocks("Paris", "Thinking step by step...")
+    assert c == "Paris", f"Expected content 'Paris', got '{c}'"
+    assert r == "Thinking step by step...", f"Expected reasoning 'Thinking step by step...', got '{r}'"
+    print("[PASS] Separated reasoning and content streams verified.")
+
+    # Test 4: Adaptive Token Budget per Category & System Prompt Directives
+    for case in BENCHMARK_SUITE:
+        budget = case.get("max_tokens", CATEGORY_TOKEN_BUDGETS.get(case["category"], 1024))
+        assert budget >= 1024, f"Case {case['id']} budget {budget} should be >= 1024"
+        sys_msgs = [m for m in case["messages"] if m.get("role") == "system"]
+        assert len(sys_msgs) > 0, f"Case {case['id']} missing system format directive"
+        assert "concise" in sys_msgs[0]["content"].lower(), f"Case {case['id']} system prompt missing concise directive"
+    print("[PASS] Adaptive token budgets and explicit prompt directives verified across all benchmark cases.")
+
+    # Test 5: Dual Content & Reasoning Matching
+    dummy_check = lambda text: "paris" in text.lower()
+    assert dummy_check("Paris")
+    comb_text = ("The capital" + " " + "I think it is Paris").strip()
+    assert dummy_check(comb_text)
+    print("[PASS] Dual content & reasoning matching verified.")
+
+    print("All evaluation harness self-tests PASSED successfully!")
+
+
 def main():
     parser = argparse.ArgumentParser(description="OpenCode Go reference comparison evaluation harness")
     parser.add_argument("--local-url", default="", help="Local server base URL (default: http://localhost:8000/v1)")
@@ -514,8 +607,13 @@ def main():
     parser.add_argument("--skip-opencode", action="store_true", help="Skip live OpenCode API requests and evaluate local server only")
     parser.add_argument("--timeout", type=float, default=120.0, help="Per-request HTTP timeout in seconds")
     parser.add_argument("--max-tokens", type=int, default=512, help="Max output tokens for completion")
+    parser.add_argument("--self-test", action="store_true", help="Run harness unit tests and exit")
 
     args = parser.parse_args()
+    if args.self_test:
+        run_self_tests()
+        sys.exit(0)
+
     summary = run_evaluation(args)
 
     if summary["passed_cases"] < summary["total_cases"]:

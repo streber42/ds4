@@ -1,6 +1,6 @@
 # Evaluation harness reasoning token budget & prompt formatting for DeepSeek-V4-Flash
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -18,6 +18,6 @@ In `tests/test_opencode_reference_eval.py`, short factual QA (`short_qa`) and co
 
 ## Acceptance Criteria
 
-- [ ] `tests/test_opencode_reference_eval.py` updated with adaptive token budgets per test category.
-- [ ] Short QA and Code Generation benchmark cases pass reliably against reasoning endpoints.
-- [ ] Evaluation harness correctly separates `<think>` blocks from final answers across all benchmark cases.
+- [x] `tests/test_opencode_reference_eval.py` updated with adaptive token budgets per test category.
+- [x] Short QA and Code Generation benchmark cases pass reliably against reasoning endpoints.
+- [x] Evaluation harness correctly separates `<think>` blocks from final answers across all benchmark cases.
