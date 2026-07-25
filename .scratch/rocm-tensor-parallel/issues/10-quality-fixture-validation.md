@@ -1,6 +1,6 @@
 # Full quality-fixture validation
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -31,6 +31,106 @@ spread, and it is the last correctness gate before this is treated as production
 - `.scratch/rocm-tensor-parallel/issues/08-auxiliary-tp-hooks.md`
 
 ## Comments
+
+**2026-07-25 (session 8, paired with a human, live hardware access) — Session 7's "general,
+pre-existing ROCm decode bug, out of scope" conclusion does not hold up. Reproduced and
+localized further; this is in-scope, and behaves like a genuine race condition in the new
+multi-GPU pipeline plumbing this PRD introduced, not an old bug. Root cause still not pinned.**
+
+Session 7 closed on a specific, falsifiable claim: that plain 4-GPU pipeline mode (no
+`--cuda-tensor-parallel`) garbling proves the corruption is general/pre-existing and outside
+this PRD's TP-kernel scope. With the human directly confirming "[pipeline mode] worked before
+we started this PRD work" and requesting a build of the original pre-PRD branch to check, this
+session did that comparison directly on hardware rather than accepting the claim. It does not
+survive the check.
+
+**Finding 1 — pre-PRD baseline vs. current branch, single GPU: byte-for-byte identical, both
+coherent.** Built the exact pre-PRD baseline commit (`ed9d9f6`, tip of the `gfx1201-discrete-gpu`
+branch, the immediate parent of `6b968c2 "Start the ROCm TP support"` — this is the commit the
+PRD's own "Implementation Decisions" section calls the already-established, verified-correct
+starting point) in a separate worktree with `make ROCM_ARCH=gfx1201 rocm -j16`. Ran the same
+repro prompt on both the baseline and current-branch (`4ae0669`) binaries, single visible GPU
+(`HIP_VISIBLE_DEVICES=0 --ssd-streaming`, since `--ssd-streaming` unconditionally refuses on any
+host with >1 physical GPU regardless of how many are selected — confirmed this restriction
+already exists in the baseline too, not something this PRD added). Both produced the identical,
+fully coherent completion: `"We need to explain C pointers in one"`. Decode arithmetic itself is
+correct on both branches. This directly rules out "the decode kernels have a pre-existing bug."
+
+**Finding 2 — single-process multi-GPU ROCm support does not exist pre-PRD at all.** Attempting
+the true pre-PRD multi-GPU path on the baseline binary hits `ds4: ROCm supports one GPU per
+process; select one device` (`ds4_rocm_compat.cu:155`, present verbatim in the baseline) the
+moment more than one device is visible to a process. The pre-PRD multi-GPU story for ROCm was
+exclusively the multi-*process*, network-coordinator distributed mode (`--role
+coordinator|worker --layers A:B --listen/--coordinator HOST PORT`, separate OS processes,
+originally for genuinely separate machines) — not the single-process `--gpu-devices 0,1,2,3`
+flag every recent session (including session 7) has been testing as "plain pipeline mode."
+`ds4_gpu_init_multi` and the whole per-tier (`g_n_gpus > 1`, `cur_hc_by_tier`,
+`ds4_rocm_xdev_copy`, etc.) single-process plumbing is new code this PRD's earlier issues
+(01/02/04) built, reused by both the TP path and this "plain pipeline" path. So "plain pipeline
+mode also garbles, therefore general/pre-existing" was comparing against a path that never
+existed before this PRD — the comparison session 7 (and the "reopened from issue 12" comment
+before it) relied on doesn't support the "out of scope" conclusion at all. Attempting the actual
+old multi-*process* distributed mode hit its own pre-existing rough edges (a global single-
+instance lock at `/tmp/ds4.lock`, overridable via `DS4_LOCK_FILE`; and worker role's upfront
+VRAM-fit check appears to size against the full model rather than just the worker's `--layers`
+slice) that would need further work to use as a comparison point — not pursued further since
+Finding 1 already gives a clean single-GPU control, and Finding 2 alone is enough to overturn the
+scope conclusion.
+
+**Finding 3 — the corruption is real, appears on tier 0 too (not just tiers reached via a cross-
+device hop), and behaves like a timing-sensitive race, not a deterministic logic bug.** Using
+`DS4_ROCM_GRAPH_DUMP_PREFIX`/`DS4_ROCM_GRAPH_DUMP_LAYER` on the current branch's plain 4-GPU
+pipeline run (no TP): at layer 13 (GPU1/tier1's first layer, right after the first pipeline
+tier-hop) with `HIP_LAUNCH_BLOCKING=1`, decode position 16 showed `ffn_moe_gate_clamped` with
+233-292 NaNs and values near float-max (~3.4e38), and `ffn_moe_down` with dozens of NaNs at
+similar magnitude — clear memory corruption in routed-MoE scratch. Critically, the **same
+pattern appeared at layer 0 (tier 0, the "home" GPU, no cross-device hop involved at all)** in
+the same run, ruling out a device-index/cross-device-transfer-specific bug — whatever this is,
+it's in the plain (non-`owned_filtered`) decode dispatch path generally, not something specific
+to receiving a hidden state from a peer GPU. However, in both cases the actually-consumed
+downstream tensor (`hc_ffn_post`) came out clean, and the run's generated token was a coherent
+word ("package") — meaning that specific NaN garbage sits in scratch that doesn't feed the final
+result in this configuration, and is not itself the mechanism producing the garbled output
+everyone has been chasing. More telling: **every plain, uninstrumented run garbles reliably and
+deterministically (confirmed twice, different garbage each time — `بتكون 2개가...`, `بيها 3.5
+كيلو واط...` — same prompt, same seed, same temp=0)**, but adding `HIP_LAUNCH_BLOCKING=1` and/or
+the graph-dump instrumentation changes the outcome every time: sometimes a coherent single token,
+once literally empty output for `-n 20`. That is the same "serialization changes the result"
+signature session 3 originally found on the TP/`owned_filtered` decode-combine path — except this
+is showing up on the **plain, non-TP pipeline path**, a different piece of code than anything
+sessions 4-7 touched or fixed (`owned_filtered`, `bucket_count`, `use_expert_tiles` only gate the
+TP-owned dispatch branch; this is the ordinary dense/expert-tile branch every layer takes when
+`owned_filtered=false`).
+
+**Not found this session: the actual race.** Audited `metal_graph_set_active_tier_decode`
+(`ds4.c:15474`) and `ds4_gpu_tensor_copy_xdev`/`ds4_rocm_xdev_copy` (`ds4_rocm_xdev.cu:113`) —
+the tier-hop hidden-state copy itself looks correctly synchronized (explicit
+`hipDeviceSynchronize()` on the source device before the peer copy, and again after, matching the
+comment describing exactly this hazard). Checked `cuda_resolve_weight_ptr`
+(`rocm/ds4_rocm_runtime.cuh:4711`) for a repeat of session 4's `->owner`/`->device_id` bug shape —
+already fixed at this call site, and there's a redundant `hipGetDevice()`-based fallback in
+`cuda_model_range_ptr` that would mask a `logical_tier` mistake here anyway, so this is unlikely
+to be it. Did not get further: since the bug's manifestation depends on *not* forcing
+serialization, the diagnostic tools available so far (env-var-gated debug dumps,
+`HIP_LAUNCH_BLOCKING`) are themselves perturbing the exact thing being measured, which is the
+same wall sessions 6 and 7 hit and flagged `rocgdb` watchpoints as the way through, rather than
+more manual reference-diffing or more debug-print instrumentation.
+
+**Handoff.** Per human decision this session, not continuing further by hand right now — writing
+this up so a higher-effort/more capable model can take the `rocgdb`-watchpoint approach fresh,
+armed with a corrected scope (this is this PRD's bug, specifically in the plain multi-tier
+pipeline decode dispatch, and is a race, not a deterministic one) instead of re-discovering that
+from scratch. Repro (plain, no debug flags — reproduces reliably):
+`./ds4 -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
+--rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 -n 20 -p "Explain C pointers in one sentence."`
+(remember `ROCM_ARCH=gfx1201` on `make rocm`). Single-GPU control that's known-good on both old
+and new code, useful for A/B: same command with `HIP_VISIBLE_DEVICES=0 --ssd-streaming` in place
+of `--gpu-devices 0,1,2,3`. `DS4_ROCM_GRAPH_DUMP_PREFIX=<dir> DS4_ROCM_GRAPH_DUMP_LAYER=<N>` dumps
+every named intermediate tensor for a given layer/position — useful for localization, but be
+aware it (and `HIP_LAUNCH_BLOCKING=1`) measurably changes whether the run garbles, so absence of
+NaNs in an instrumented run is not evidence of correctness. No acceptance criteria checked this
+session — the `ds4-eval` quality-fixture run this issue actually needs still has not been
+attempted; it would still be meaningless while decode output is incoherent.
 
 **2026-07-25 (session 7) — Fixed a real, verified prefill-path memory-corruption bug
 (missing zero-init of the routed-MoE `down` scratch buffer under `owned_filtered`); this
