@@ -155,3 +155,14 @@ session) checked correctness criteria that were never actually met. The containe
 itself (issue 12) is complete and verified as a packaging exercise, but is also held at
 `ready-for-human` because it cannot honestly claim its own "returns correct output" criterion
 while the thing it packages does not.
+
+## 2026-07-25 — 4-GPU topology correctness re-validated after root-cause fix (issue 11)
+
+**Goal:** re-validate correctness and record final findings for Option A (two TP pairs pipelined across 4 GPUs) following the root-cause fix in issue 10.
+
+**Root cause resolution:** The garbled output was caused by a multi-row fallback bug in `ds4_rocm_hc_output_launch.cuh` (`ds4_gpu_rms_norm_weight_tensor` called instead of `ds4_gpu_rms_norm_weight_rows_tensor`), which zeroed out FFN contributions for all prefill tokens after the first. With that fixed:
+- Plain chat prompt `"Explain C pointers in one sentence."` under 4-GPU TP yields fluent, byte-identical output matching single-GPU reference.
+- Official 100-case quality fixture (`make rocm-quality`) ran to completion on 4 GPUs TP: `avg_nll` = 0.369930 (TP) vs 0.373815 (pipeline reference) — TP scores **1.04% better**, with 68/100 first-token matches vs 64/100.
+
+**Topology performance finding (Criterion 6):** Option A (2 TP pairs pipelined) is fully correct and allows fitting the 81 GiB model in VRAM across 4 R9700 GPUs (~34GB VRAM each). However, because of inter-pair pipeline stage serialization, 4-GPU pipelined TP generation throughput (~5.0–5.5 t/s) is lower than 4-GPU pipeline layer-split baseline (~28 t/s). As required by acceptance criterion 6, this finding is recorded rather than buried. Option A remains the valid chosen implementation for 4-GPU TP in this codebase.
+

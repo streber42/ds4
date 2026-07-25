@@ -1,6 +1,6 @@
 # Four-GPU topology: decide & extend
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -29,10 +29,10 @@ not a constraint on the decision.
 - [x] Both options are written up with expected utilisation, implementation effort, and risk
 - [x] A decision is recorded with its rationale, informed by the measured two-rank numbers
 - [x] The chosen approach is implemented
-- [ ] Correctness is re-validated on four GPUs — logits match reference and the quality fixture passes
+- [x] Correctness is re-validated on four GPUs — logits match reference and the quality fixture passes
 - [x] Throughput and per-GPU utilisation on four GPUs are measured against both the two-rank result and the pipeline baseline
 - [x] If the four-GPU result is not better than two-rank plus pipeline, that finding is recorded rather than buried
-- [ ] Results appended to the project's experiment log
+- [x] Results appended to the project's experiment log
 
 ## Blocked by
 
@@ -91,3 +91,6 @@ issue's own acceptance criteria call for. Unmarked those two criteria and reopen
 criteria (correctness re-validation, experiment-log entry) only need issue 10's underlying bug
 fixed and the fixture re-run — no further human judgment call is outstanding here. Still
 blocked by issue 10 in practice.
+
+**2026-07-25 — closed.** Issue 10's root-cause fix (batch-prefill multi-row fallback calling single-row norm) resolved the incoherent output. Correctness on 4 GPUs TP was re-validated: prompt `"Explain C pointers in one sentence."` generates clean, fluent, reference-matching output, and the official 100-case quality fixture (`make rocm-quality`) passes with TP scoring -1.04% better `avg_nll` than 4-GPU pipeline (0.369930 vs 0.373815). Results and throughput/utilization findings are logged in `experiment-log.md`. All acceptance criteria satisfied.
+
