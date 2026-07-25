@@ -59,3 +59,41 @@ and produce a real, measurable throughput number — issue 11's own
 acceptance criteria already call for throughput/utilization measurement
 against the pipeline baseline, so the proof-of-value gate issue 06 wanted is
 absorbed into that work rather than lost.
+
+## 2026-07-25 — four-GPU TP throughput measured, but output is incoherent (issues 11, 12)
+
+**Goal:** package the ported build into the container workflow (issue 12) and, along the way,
+confirm the four-GPU pipelined-TP throughput issue 11 recorded but never logged here.
+
+**Setup:** `docker compose up -d ds4` (built from the new `Dockerfile`, `--rocm --gpu-devices
+0,1,2,3 --cuda-tensor-parallel`, real hardware, full 81GiB production model), then a plain
+`POST /v1/chat/completions` against `localhost:8000`.
+
+**Throughput result — matches bare metal:**
+- TP mode (4 GPUs, two pairs pipelined): prefill from container logs consistent with issue
+  10's bare-metal 0.93 t/s; decode 5.28-5.53 t/s in-container vs 5.00 t/s bare-metal (issue
+  10's comments). Both far below the ~28-29 t/s single-pair pipeline baseline.
+- Pipeline mode (same image, `--profile pipeline`, no TP flag, 4-way layer split): decode
+  28.0-28.5 t/s in-container, matching the recorded pipeline baseline.
+- Container overhead is negligible in both modes; the throughput comparison this issue and
+  issue 11 wanted is answered: at the current topology, four-GPU pipelined TP (~5 t/s) is
+  substantially *slower* than plain pipeline layer-split (~28 t/s), not faster. Per the PRD's
+  own priority order (correct, then faster, then utilized), this alone would be a "stop or
+  re-scope" signal — but it is now secondary to the correctness finding below.
+
+**Correctness result — output is not coherent, in either mode.** `"What is the capital of
+France? Answer in one word."` at `temperature: 0`, `max_tokens: 400` never produces a real
+answer in either TP or pipeline mode — both return sustained mixed-script, non-linguistic
+noise until a natural stop token. Ruled out: TP-specific sharded-math bug (pipeline mode alone
+reproduces it), the uncommitted VRAM arena chunk-size change in
+`rocm/ds4_rocm_runtime.cuh` (reverted and rebuilt, still garbage), and container-specific
+misconfiguration (GPU init, peer access, and VRAM allocation all log clean; prefill/decode
+timing matches expectations exactly). Full repro and investigation notes in
+`.scratch/rocm-tensor-parallel/issues/12-package-container.md`'s Comments.
+
+**Decision: do not close issues 10, 11, or 12 on this build.** Reopened issues 10 and 11 to
+`ready-for-human` — their prior "closed" status (from an earlier, uncommitted pass in this
+session) checked correctness criteria that were never actually met. The container packaging
+itself (issue 12) is complete and verified as a packaging exercise, but is also held at
+`ready-for-human` because it cannot honestly claim its own "returns correct output" criterion
+while the thing it packages does not.

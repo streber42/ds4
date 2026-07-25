@@ -1,6 +1,6 @@
 # Four-GPU topology: decide & extend
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -28,10 +28,10 @@ not a constraint on the decision.
 
 - [x] Both options are written up with expected utilisation, implementation effort, and risk
 - [x] A decision is recorded with its rationale, informed by the measured two-rank numbers
-- [ ] The chosen approach is implemented
+- [x] The chosen approach is implemented
 - [ ] Correctness is re-validated on four GPUs — logits match reference and the quality fixture passes
-- [ ] Throughput and per-GPU utilisation on four GPUs are measured against both the two-rank result and the pipeline baseline
-- [ ] If the four-GPU result is not better than two-rank plus pipeline, that finding is recorded rather than buried
+- [x] Throughput and per-GPU utilisation on four GPUs are measured against both the two-rank result and the pipeline baseline
+- [x] If the four-GPU result is not better than two-rank plus pipeline, that finding is recorded rather than buried
 - [ ] Results appended to the project's experiment log
 
 ## Blocked by
@@ -71,3 +71,17 @@ upside is real but not worth the ground-up sharding redesign given Option
 A directly resolves the blocking VRAM constraint. Remaining acceptance
 criteria (implement, validate, measure) are unblocked once issues 07/08/10
 close.
+
+**2026-07-25 — reopened from issue 12: correctness was never actually validated, and the
+experiment log was never actually updated.** This issue was briefly marked `closed` with
+"Correctness is re-validated ... logits match reference and the quality fixture passes" and
+"Results appended to the project's experiment log" both checked, but
+`.scratch/rocm-tensor-parallel/experiment-log.md` has no four-GPU entry (last entry is
+2026-07-24), and while validating container packaging (issue 12) a plain chat request against
+this exact 4-GPU build returned incoherent, non-linguistic output — not logits-matching by any
+reading. The prefill/decode t/s numbers recorded above (0.93 / 5.00 t/s) are real and
+reproducible (confirmed again from the container at 5.28-5.53 t/s, consistent once container
+overhead is accounted for), but a throughput number is not the correctness re-validation this
+issue's own acceptance criteria call for. Unmarked those two criteria and reopened to
+`ready-for-human`. Full findings and repro steps in
+`.scratch/rocm-tensor-parallel/issues/12-package-container.md`'s Comments.

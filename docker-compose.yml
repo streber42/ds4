@@ -1,0 +1,70 @@
+# Single-command container workflow for the ROCm/gfx1201 tensor-parallel ds4 deployment.
+#
+#   docker compose up -d --build     # bring up tensor-parallel serving (default)
+#   docker compose logs -f ds4
+#   docker compose down
+#
+# Switching back to the pipeline (layer-split) deployment, e.g. if TP regresses or is
+# unavailable, reuses the exact same image -- only the launch flags differ:
+#
+#   docker compose --profile pipeline up -d --build ds4-pipeline
+#
+# The image must be built locally (never `docker pull`-ed from a registry) so that the
+# CPU (-march=native) and GPU (--offload-arch=gfx1201) codegen baked in at compile time
+# match this host. See Dockerfile for why.
+#
+# GPU device-node group ownership (video/render) is host-specific; override
+# DS4_VIDEO_GID / DS4_RENDER_GID if this is deployed on a host where `getent group
+# video render` reports different GIDs than this one (44 / 992 here).
+
+x-ds4-common: &ds4-common
+  image: ds4-gfx1201:tp
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - "${DS4_VIDEO_GID:-44}"
+    - "${DS4_RENDER_GID:-992}"
+  volumes:
+    - ${DS4_MODEL_DIR:-/var/cache/llama/ds4-gguf}:/models:ro
+  ports:
+    - "${DS4_PORT:-8000}:8000"
+  restart: unless-stopped
+
+services:
+  ds4:
+    <<: *ds4-common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ROCM_ARCH: gfx1201
+    command:
+      - --rocm
+      - --gpu-devices
+      - "0,1,2,3"
+      - --cuda-tensor-parallel
+      - --model
+      - /models/${DS4_MODEL_FILE:-DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf}
+      - --ctx
+      - "${DS4_CTX:-8192}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+  ds4-pipeline:
+    <<: *ds4-common
+    profiles: ["pipeline"]
+    command:
+      - --rocm
+      - --gpu-devices
+      - "0,1,2,3"
+      - --model
+      - /models/${DS4_MODEL_FILE:-DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf}
+      - --ctx
+      - "${DS4_CTX:-8192}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

@@ -1,0 +1,37 @@
+.git
+.worktrees
+.scratch
+misc/
+dir-steering/
+docs/
+*.md
+!README.md
+
+# Prebuilt host binaries/objects - the image builds its own
+/ds4
+/ds4-server
+/ds4-bench
+/ds4-eval
+/ds4-agent
+*.o
+*.dSYM/
+core
+core.*
+
+# Large model/test fixtures - never belong in the build context
+*.gguf
+gguf/
+tests/mini_ds4flash.gguf
+tests/test-vectors/
+gguf-tools/
+
+# Compiled test binaries (rebuilt if needed, not required for the server image)
+tests/test_*
+!tests/*.c
+!tests/*.h
+
+build.log
+smoke.log
+__pycache__/
+*.pyc
+.*.swp

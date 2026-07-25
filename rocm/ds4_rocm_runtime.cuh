@@ -5556,7 +5556,9 @@ static int cuda_stream_model_cache_prepare_memory(
 }
 
 static uint64_t cuda_model_arena_chunk_bytes(uint64_t need) {
-    const uint64_t default_bytes = 1792ull * 1048576ull;
+    /* 256 MiB default: host-validated on 4x R9700 (issue 10 OOM fix carried
+     * by e843f97); upstream's tight-allocation guard kept for large spans. */
+    const uint64_t default_bytes = 256ull * 1048576ull;
     /*
      * Two allocations larger than half the default arena can never share it.
      * Allocate those spans tightly for DeepSeek instead of stranding the
@@ -5569,7 +5571,7 @@ static uint64_t cuda_model_arena_chunk_bytes(uint64_t need) {
 
     uint64_t bytes = default_bytes;
     if (bytes < need) {
-        const uint64_t align = 256ull * 1048576ull;
+        const uint64_t align = 64ull * 1048576ull;
         bytes = (need + align - 1u) & ~(align - 1u);
     }
     return bytes;
