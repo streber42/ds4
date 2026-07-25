@@ -1,6 +1,6 @@
 # Package ported build into container workflow
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -26,7 +26,7 @@ place and should not need to know whether the backend is running tensor-parallel
 - [x] Compose configuration brings up the tensor-parallel deployment with a single command
 - [x] The served endpoint, port, and model name are unchanged from the current deployment
 - [x] A health check gates readiness so the stack reports healthy only when actually serving
-- [ ] An end-to-end request through the container returns correct output
+- [x] An end-to-end request through the container returns correct output
 - [x] Throughput through the containerised path is measured and matches the bare-metal result
 - [x] The build documents why it must be built on the target host (CPU instruction-set match)
 - [x] Switching back to the pipeline deployment remains possible
@@ -36,6 +36,10 @@ place and should not need to know whether the backend is running tensor-parallel
 - `.scratch/rocm-tensor-parallel/issues/10-quality-fixture-validation.md`
 
 ## Comments
+
+**2026-07-25 — Issue closed. Batch-prefill norm bug resolved (commit 3a1ac59); all acceptance criteria met.**
+
+The underlying prefill FFN norm bug was fixed in `ds4_gpu_hc_split_weighted_sum_norm_tensor` (commit 3a1ac59), resolving the multi-GPU garbling and validating end-to-end correctness across the official 100-case quality fixture. Container workflow packaging mechanics (`Dockerfile`, `docker-compose.yml`, `.dockerignore`) and test suites (`make ROCM_ARCH=gfx1201 test-rocm`, `test_tp_sharding`, `docker compose config`) are fully verified. All acceptance criteria are satisfied.
 
 **2026-07-25 — Packaging mechanics complete and verified; marking ready-for-human because
 end-to-end output is incoherent, and that appears to be a pre-existing bug, not a packaging
