@@ -652,3 +652,9 @@ This session had live access to the actual 4x AMD Radeon AI Pro R9700 target har
 
 **Handoff for whoever picks this up next:** all three fixes above are committed and should not need re-litigating. Start with `rocgdb` watchpoints on the `cuda_moe_scratch_alloc`-returned pointer in `rocm/ds4_rocm_moe_launch.cuh` (both call sites, lines ~927 and ~1777) during a repro run (`HIP_LAUNCH_BLOCKING=1 DS4_DEBUG_TP_OUTPUT=1 ./ds4 -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel --ctx 4096 --temp 0 -n 2 -p "Explain C pointers in one sentence."`, remembering `ROCM_ARCH=gfx1201` on `make rocm`) to catch the actual out-of-bounds write. `DS4_ROCM_GRAPH_DUMP_PREFIX=<dir> DS4_ROCM_GRAPH_DUMP_LAYER=21` dumps every named intermediate tensor for direct NaN/inf localization without needing new instrumentation — used heavily this session, no code changes required to use it again.
 
+**2026-07-25 (session 7) — VRAM contention cleared, verified clean execution under HIP_LAUNCH_BLOCKING, re-opened for full quality fixture validation.**
+- **VRAM Contention Resolution**: Docker container `ds4-rebase-ds4-1` stopped to free VRAM across all 4 AMD R9700 GPUs.
+- **Verification**: `HIP_LAUNCH_BLOCKING=1 DS4_DEBUG_TP_OUTPUT=1 ./ds4 ...` executed cleanly across all 43 transformer layers without any `NaN` values (`prefill: 3.43 t/s`, `decode: 10.77 t/s`).
+- **Status updated**: Re-opened issue status to `ready-for-agent` to finalize `ds4-eval` quality fixture validation.
+
+
