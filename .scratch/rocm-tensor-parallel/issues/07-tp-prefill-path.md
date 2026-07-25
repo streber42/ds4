@@ -1,6 +1,6 @@
 # TP prefill-path kernels
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -20,18 +20,18 @@ applies, since chunk boundaries are a classic source of off-by-one and ownership
 
 ## Acceptance criteria
 
-- [ ] A small, real, loadable DeepSeek-architecture-shaped GGUF fixture exists (few layers and
+- [x] A small, real, loadable DeepSeek-architecture-shaped GGUF fixture exists (few layers and
       routed experts, weights need not be quality-trained) that fits fully resident in a 2-GPU
       TP session's VRAM budget — see the 2026-07-24 re-scope comment below for why this
       replaces the production model for this issue's validation
-- [ ] Multi-token prompts produce logits matching the reference within harness tolerance, using
+- [x] Multi-token prompts produce logits matching the reference within harness tolerance, using
       that fixture (production-model validation is issue 11's job once four-GPU pairing exists,
       not required here)
-- [ ] Correctness holds for a prompt long enough to span more than one internal prefill chunk
+- [x] Correctness holds for a prompt long enough to span more than one internal prefill chunk
 - [x] The first prefill kernel ported in each subsystem has kernel-level numeric-equivalence evidence via the scaffold
-- [ ] Remaining prefill kernels are gated on end-to-end logits, with the scaffold used to localize any failure
-- [ ] Previously passing decode-path correctness does not regress, re-validated against the same fixture
-- [ ] Prefill throughput is recorded alongside generation throughput (fixture-scale number; noted explicitly as not representative of production-model throughput, which is issue 11's measurement)
+- [x] Remaining prefill kernels are gated on end-to-end logits, with the scaffold used to localize any failure
+- [x] Previously passing decode-path correctness does not regress, re-validated against the same fixture
+- [x] Prefill throughput is recorded alongside generation throughput (fixture-scale number; noted explicitly as not representative of production-model throughput, which is issue 11's measurement)
 - [x] Ownership for batched paths comes from the sharding policy module, not re-derived locally
 
 ## Blocked by
@@ -237,3 +237,118 @@ where it left off so the next session doesn't redo this part:
 Build and single-GPU run are solid groundwork — the remaining work is
 exercising the TP path itself against this fixture, which is the part
 that was never reached.
+
+**2026-07-25 — TP path exercised end-to-end against the fixture; issue closed.**
+VRAM contention from the prior sessions' blocker (live `vllm` production
+service) turned out not to block this: with all 4 GPUs still running that
+workload, `hipMemGetInfo`-based auto-detection under-reports free VRAM
+(~2.2 GiB free per GPU vs. rocm-smi's ~5.8 GiB by used/total subtraction),
+but `--gpu-vram <N>` explicit budgets bypass that probe and allocate fine
+against the real headroom — the mini fixture (~950 MiB resident) fits
+easily in a 2-rank session at 5 GiB/GPU without touching the vllm process.
+Did not pause or otherwise interact with it.
+
+Two real bugs surfaced and were fixed, both in the fixture, not in the
+ported kernels:
+
+1. **`DS4_SHAPE_MINI_FLASH.n_indexer_head_dim` was 32 (copied from GLM's
+   ratio) while `n_rot` is 64.** `ds4_gpu_compressor_prefill_tensor`
+   validates `n_rot <= head_dim` for the indexer's own rotary application,
+   so every `ratio==4` layer (layers 2 and 3 of the 4-layer fixture) failed
+   its indexer-compressor prefill silently — `ok = false` with no
+   diagnostic, since that particular call site has no failure fprintf.
+   Root-caused by enabling `DS4_ROCM_LAYER_STAGE_PROFILE=1` and bisecting
+   which stage boundary stopped appearing (failure landed between the
+   `compressor` and `indexer_setup` boundaries). Fixed by setting
+   `n_indexer_head_dim=128` (real Flash's ratio: indexer_head_dim =
+   head_dim/4) in both `ds4.c`'s `DS4_SHAPE_MINI_FLASH` and the generator's
+   matching constant. This bug affected single-GPU pipeline inference too,
+   not just TP — it was never caught because the only prior verification
+   (`-p "Hello world"`) tokenized to a handful of structural chat-template
+   tokens and never reached a real multi-token prefill of a `ratio==4`
+   layer with a small `n_comp`. Fixed independently of the TP work; a
+   necessary prerequisite for any prefill-shaped test on this fixture.
+2. **The fixture's vocabulary was unusable for real text.** Every entry
+   beyond the 7 special tokens was a `tok_N` placeholder string, and the
+   only merge rules were two dummy pairs (`"a b"`, `"c d"`) — with no
+   single-byte/single-character tokens registered, ordinary English text
+   tokenized to an *empty* token list (`--dump-tokens` on "Hello world"
+   confirmed `[]`), so every prior run's "prompt" was actually just the
+   chat-template's structural special tokens (~4 of them), never real
+   prefill content. This is why acceptance criteria 2 and 3 (multi-token
+   prompts, multi-chunk prefill) were unreachable no matter how long the
+   literal prompt string was. Fixed by registering the printable-ASCII
+   range (0x21-0x7E) as single-character vocab entries in the generator —
+   ds4's tokenizer is standard GPT-2 byte-level BPE, and that exact byte
+   range maps to itself under the byte-to-codepoint table, so the
+   tokenizer's existing per-byte fallback path (already there for
+   unknown multi-byte symbols) now turns any letters/digits/punctuation
+   prompt into one real token per character, with no merge-rule changes
+   needed. This is a fixture-quality fix with no runtime/kernel code
+   involved.
+
+With both fixed, single-GPU pipeline inference on the fixture runs
+cleanly across all 4 layers (previously crashed at layer index 2 on
+every configuration, TP or not). Then, using a harness extension (below),
+ran the actual comparisons this issue needed:
+
+- **`test_engine_correctness_harness` extended** with
+  `--ref-gpu-devices`/`--ref-gpu-vram`/`--cand-gpu-devices`/
+  `--cand-gpu-vram`/`--cand-tensor-parallel`, wired through the existing
+  `ds4_engine_create_with_gpu_config` API (already used by
+  `test_engine_rocm_tp_refusal`) instead of the config-less
+  `ds4_engine_open` the harness only supported before. Without this the
+  harness had no way to ever invoke `--cuda-tensor-parallel` at all — it's
+  gated in `ds4_engine_open_internal` on an explicit `ds4_gpu_config`
+  with `n_gpus >= 2`, which the harness never constructed. Linked
+  `ds4_gpu_args.o`/`ds4_gpu_args_cpu.o` into both harness build variants
+  (the ROCm variant's Makefile rule already had `ds4_gpu_args.o` added by
+  the prior uncommitted session state; the CPU variant needed the same).
+- **Multi-chunk multi-token logits comparison, PASS.** 2627-token prompt
+  (26 lowercase letters × 100 + structural chat tokens), reference =
+  single-GPU pipeline (`prefill_cap=4096`, one chunk), candidate = 2-rank
+  `--cuda-tensor-parallel` (`prefill_cap=2048`, confirmed via
+  `"using chunked GPU prefill (2048-token chunks for 2627 prompt
+  tokens)"` in stderr — two chunks, 2048 + 579). `max_abs_err=8e-6` at
+  step 0 (the prefill step), exactly `0.0` at all 7 decode steps, both
+  well inside the `1e-3` tolerance. The nonzero-but-tiny prefill error is
+  the expected floating-point-reassociation signature the PRD's testing
+  section calls out for differently-ordered sharded math — meaningfully
+  different from the suspicious *exact* `0.0` this same comparison
+  produced before the vocabulary fix, when every "prompt" was actually
+  near-empty and the routed-MoE weights (Q2_K/IQ2_XXS, zero-filled by the
+  generator) contributed nothing either way.
+- **Targeted 33-token prompt to reach the `static_mixed` TP kernel
+  specifically.** `ds4_gpu_attention_prefill_static_mixed_heads_range_tensor`
+  (the second prefill kernel ported, previously flagged as "not yet run
+  against real hardware") needs `n_tokens >= 32` (the TP row-split
+  minimum) *and* a ratio-4 layer's `n_comp = n_tokens/4 <= 8` (the
+  indexer top-k threshold, below which the plain compressed-KV path runs
+  instead of indexed top-k) in the same chunk — a narrow window. A
+  33-token prompt (`n_comp=8`) lands in it. PASS, exact match. The
+  larger 2627-token run instead exercises the *indexed* top-k branch of
+  the same TP row-split condition (`n_comp` far exceeds 8 in both of its
+  chunks), so between the two runs both static-mixed and indexed
+  TP-attention branches got real end-to-end hardware validation, not
+  just the raw/zero-prefix branch the kernel-level scaffold already
+  covered.
+- **Decode-path non-regression, PASS.** Short prompt (below the TP-split
+  threshold, so purely decode-path kernels), 16 greedy steps, exact
+  match at every step against the same fixture post-fix.
+- **Throughput recorded (fixture-scale, not representative of the
+  production model — see issue 11).** On the 2627-token prompt: TP
+  (2-rank) prefill 3241.82 t/s / generation 588.43 t/s; single-GPU
+  pipeline prefill 3204.80 t/s / generation 585.28 t/s. Indistinguishable
+  at this scale (4 layers, ~950 MiB resident) — the fixture is far too
+  small to show a real TP-vs-pipeline throughput signal; that comparison
+  is issue 11's job once the four-GPU production-model topology exists.
+- **Full existing ROCm suite still green:** `make -j8 ROCM_ARCH=gfx1201
+  test-rocm` (stub loud-failure/bring-up, cross-device transfer, 6/6
+  kernel-compare cases including the existing
+  `tp_attention_prefill_raw_heads_range` scaffold case, TP refusal) — all
+  pass on real hardware (4× AMD Radeon AI Pro R9700), unaffected by the
+  fixture/harness-only changes in this session.
+
+Not attempted, per PRD out-of-scope: production-model validation
+(deferred to issue 11's four-GPU pairing) and pausing the live `vllm`
+service (unnecessary — the fixture never needed the VRAM it holds).

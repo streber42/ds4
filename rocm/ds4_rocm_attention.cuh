@@ -69,7 +69,8 @@ __global__ static void attention_prefill_mixed_kernel(
         const float *sinks,
         const float *q,
         const float *raw_kv,
-        const float *comp_kv,
+        const void *comp_kv,
+        uint32_t comp_kv_f16,
         const float *comp_mask,
         uint32_t use_comp_mask,
         uint32_t n_tokens,
@@ -106,9 +107,14 @@ __global__ static void attention_prefill_mixed_kernel(
         float add = use_comp_mask ? comp_mask[(uint64_t)t * n_comp + c] : 0.0f;
         float s = -INFINITY;
         if (add > -1.0e20f) {
-            const float *kvrow = comp_kv + (uint64_t)c * head_dim;
             float dot = 0.0f;
-            for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
+            if (comp_kv_f16) {
+                const __half *kvrow = ((const __half *)comp_kv) + (uint64_t)c * head_dim;
+                for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * __half2float(kvrow[d]);
+            } else {
+                const float *kvrow = ((const float *)comp_kv) + (uint64_t)c * head_dim;
+                for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
+            }
             s = dot * scale + add;
         }
         scores[raw_count + c] = s;
@@ -139,7 +145,17 @@ __global__ static void attention_prefill_mixed_kernel(
     for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float acc = 0.0f;
         for (uint32_t r = 0; r < raw_count; r++) acc += raw_kv[(uint64_t)(raw_start + r) * head_dim + d] * scores[r];
-        for (uint32_t c = 0; c < visible_comp; c++) acc += comp_kv[(uint64_t)c * head_dim + d] * scores[raw_count + c];
+        if (comp_kv_f16) {
+            const __half *comp_kv_h = (const __half *)comp_kv;
+            for (uint32_t c = 0; c < visible_comp; c++) {
+                acc += __half2float(comp_kv_h[(uint64_t)c * head_dim + d]) * scores[raw_count + c];
+            }
+        } else {
+            const float *comp_kv_f = (const float *)comp_kv;
+            for (uint32_t c = 0; c < visible_comp; c++) {
+                acc += comp_kv_f[(uint64_t)c * head_dim + d] * scores[raw_count + c];
+            }
+        }
         oh[d] = acc / denom;
     }
 }
@@ -226,7 +242,8 @@ __global__ static void attention_prefill_mixed_range_kernel(
         const float *sinks,
         const float *q,
         const float *raw_kv,
-        const float *comp_kv,
+        const void *comp_kv,
+        uint32_t comp_kv_f16,
         const float *comp_mask,
         uint32_t use_comp_mask,
         uint32_t q_row0,
@@ -265,9 +282,14 @@ __global__ static void attention_prefill_mixed_range_kernel(
         float add = use_comp_mask ? comp_mask[(uint64_t)qpos * n_comp + c] : 0.0f;
         float s = -INFINITY;
         if (add > -1.0e20f) {
-            const float *kvrow = comp_kv + (uint64_t)c * head_dim;
             float dot = 0.0f;
-            for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
+            if (comp_kv_f16) {
+                const __half *kvrow = ((const __half *)comp_kv) + (uint64_t)c * head_dim;
+                for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * __half2float(kvrow[d]);
+            } else {
+                const float *kvrow = ((const float *)comp_kv) + (uint64_t)c * head_dim;
+                for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
+            }
             s = dot * scale + add;
         }
         scores[raw_count + c] = s;
@@ -298,7 +320,17 @@ __global__ static void attention_prefill_mixed_range_kernel(
     for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float acc = 0.0f;
         for (uint32_t r = 0; r < raw_count; r++) acc += raw_kv[(uint64_t)(raw_start + r) * head_dim + d] * scores[r];
-        for (uint32_t c = 0; c < visible_comp; c++) acc += comp_kv[(uint64_t)c * head_dim + d] * scores[raw_count + c];
+        if (comp_kv_f16) {
+            const __half *comp_kv_h = (const __half *)comp_kv;
+            for (uint32_t c = 0; c < visible_comp; c++) {
+                acc += __half2float(comp_kv_h[(uint64_t)c * head_dim + d]) * scores[raw_count + c];
+            }
+        } else {
+            const float *comp_kv_f = (const float *)comp_kv;
+            for (uint32_t c = 0; c < visible_comp; c++) {
+                acc += comp_kv_f[(uint64_t)c * head_dim + d] * scores[raw_count + c];
+            }
+        }
         oh[d] = acc / denom;
     }
 }

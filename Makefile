@@ -385,15 +385,15 @@ tests/test_tp_sharding.o: tests/test_tp_sharding.c ds4_tp_shard.h
 tests/test_tp_sharding: tests/test_tp_sharding.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-tests/test_engine_correctness_harness: tests/test_engine_correctness_harness.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
-	$(CC) $(CFLAGS) -I. -DDS4_NO_GPU -o $@ $< $(CPU_CORE_OBJS) ds4_help.o ds4_kvstore.o rax.o $(LDLIBS)
+tests/test_engine_correctness_harness: tests/test_engine_correctness_harness.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h ds4_gpu_args_cpu.o
+	$(CC) $(CFLAGS) -I. -DDS4_NO_GPU -o $@ $< $(CPU_CORE_OBJS) ds4_help.o ds4_gpu_args_cpu.o ds4_kvstore.o rax.o $(LDLIBS)
 
 # ROCm build (requires ROCm backend objects to already exist)
 tests/test_engine_correctness_harness-rocm: tests/test_engine_correctness_harness.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
-	$(CC) $(CFLAGS) -I. -DDS4_ROCM_BUILD -o $@ $< \
+	$(CC) $(CFLAGS) -no-pie -I. -DDS4_ROCM_BUILD -o $@ $< \
 		ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o \
 		ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o \
-		ds4_help.o ds4_kvstore.o rax.o $(ROCM_LDLIBS)
+		ds4_help.o ds4_gpu_args.o ds4_kvstore.o rax.o $(ROCM_LDLIBS) -lstdc++ -lamdhip64
 
 # ROCm build (requires ROCm backend objects to already exist, same as
 # test_engine_correctness_harness-rocm above). -lstdc++ is needed because

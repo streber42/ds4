@@ -35,6 +35,8 @@
 
 #include "ds4.h"
 #include "ds4_distributed.h"
+#include "ds4_gpu_args.h"
+#include "ds4_gpu_mgpu.h"
 #include "ds4_ssd.h"
 
 #include <math.h>
@@ -54,6 +56,9 @@ static void usage(const char *prog) {
         "usage:\n"
         "  %s --logits REF_MODEL REF_BE CAND_MODEL CAND_BE\n"
         "      [--prompt \"text\"] [--ctx N] [--steps N] [--tol float]\n"
+        "      [--ref-gpu-devices LIST] [--ref-gpu-vram LIST|auto]\n"
+        "      [--cand-gpu-devices LIST] [--cand-gpu-vram LIST|auto]\n"
+        "      [--cand-tensor-parallel]\n"
         "  %s --quality MODEL MANIFEST OUT_TSV [--ctx N]\n"
         "  %s --provenance MODEL MANIFEST OUT_TSV [--ctx N]\n"
         "\n"
@@ -61,10 +66,43 @@ static void usage(const char *prog) {
         "  --quality     Run the multi-case quality fixture (score_official).\n"
         "  --provenance  Convenience alias for --quality.\n"
         "\n"
+        "  --*-gpu-devices/--*-gpu-vram select an explicit multi-GPU\n"
+        "  placement for a pass (same syntax as ds4's --gpu-devices/\n"
+        "  --gpu-vram); omit both to use the engine's single-GPU default.\n"
+        "  --cand-tensor-parallel enables --cuda-tensor-parallel on the\n"
+        "  candidate pass (requires --cand-gpu-devices with an even count\n"
+        "  >= 2 and a cuda/rocm candidate backend).\n"
+        "\n"
         "  Reference selection: the pipeline path on the same hardware and\n"
         "  quantisation, not a different backend on different hardware.\n",
         prog, prog, prog);
     exit(2);
+}
+
+/* Parses a --*-gpu-devices/--*-gpu-vram pair into a ds4_gpu_config. Both
+ * may be NULL (no explicit placement requested -> *out_has_cfg = false).
+ * Exits the process on a malformed list, mirroring the CLI's own
+ * fail-fast behaviour for an unusable placement request. */
+static void parse_pass_gpu_config(const char *devices_arg,
+                                  const char *vram_arg,
+                                  ds4_gpu_config *out_cfg,
+                                  bool *out_has_cfg) {
+    memset(out_cfg, 0, sizeof(*out_cfg));
+    *out_has_cfg = false;
+    if (!devices_arg && !vram_arg) return;
+
+    bool skip_cuda = false;
+    char errbuf[256] = {0};
+    if (parse_gpu_vram_arg(vram_arg, devices_arg, out_cfg, &skip_cuda,
+                           errbuf, sizeof(errbuf)) != 0) {
+        fprintf(stderr, "harness: bad GPU placement (--gpu-devices/--gpu-vram): %s\n", errbuf);
+        exit(2);
+    }
+    if (skip_cuda || out_cfg->n_gpus <= 0) {
+        fprintf(stderr, "harness: GPU placement resolved to zero devices\n");
+        exit(2);
+    }
+    *out_has_cfg = true;
 }
 
 static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
@@ -220,7 +258,8 @@ static void harness_run_cleanup(harness_run_t *r) {
  * process. */
 static int run_harness_pass(const char *model_path, int backend,
                             const char *prompt_text, int ctx_size,
-                            int max_steps, harness_run_t *out) {
+                            int max_steps, const ds4_gpu_config *gpu_cfg,
+                            bool tensor_parallel, harness_run_t *out) {
     ds4_engine *e = NULL;
     ds4_session *s = NULL;
     ds4_tokens prompt = {0};
@@ -240,8 +279,10 @@ static int run_harness_pass(const char *model_path, int backend,
     opt.n_threads = 0;
     opt.warm_weights = false;
     opt.quality = false;
+    opt.cuda_tensor_parallel = tensor_parallel;
 
-    rc = ds4_engine_open(&e, &opt);
+    rc = gpu_cfg ? ds4_engine_create_with_gpu_config(&e, &opt, gpu_cfg)
+                 : ds4_engine_open(&e, &opt);
     if (rc != 0 || !e) {
         fprintf(stderr, "harness: failed to open engine: rc=%d\n", rc);
         return -1;
@@ -304,21 +345,26 @@ static int run_harness_pass(const char *model_path, int backend,
 static int run_logits_comparison(const char *ref_model, int ref_backend,
                                   const char *cand_model, int cand_backend,
                                   const char *prompt_text, int ctx_size,
-                                  int max_steps, float tol) {
+                                  int max_steps, float tol,
+                                  const ds4_gpu_config *ref_gpu_cfg,
+                                  const ds4_gpu_config *cand_gpu_cfg,
+                                  bool cand_tensor_parallel) {
     /* The instance lock uses flock(LOCK_EX) which is not reentrant within
      * the same process.  Open and fully close each engine sequentially:
      * reference first, then candidate. */
     fprintf(stderr, "harness: running reference pass...\n");
     harness_run_t ref_run = {0};
     if (run_harness_pass(ref_model, ref_backend,
-                          prompt_text, ctx_size, max_steps, &ref_run) != 0) {
+                          prompt_text, ctx_size, max_steps,
+                          ref_gpu_cfg, false, &ref_run) != 0) {
         return 1;
     }
 
     fprintf(stderr, "harness: running candidate pass...\n");
     harness_run_t cand_run = {0};
     if (run_harness_pass(cand_model, cand_backend,
-                          prompt_text, ctx_size, max_steps, &cand_run) != 0) {
+                          prompt_text, ctx_size, max_steps,
+                          cand_gpu_cfg, cand_tensor_parallel, &cand_run) != 0) {
         harness_run_cleanup(&ref_run);
         return 1;
     }
@@ -464,6 +510,9 @@ int main(int argc, char **argv) {
         int ctx_size = 1024;
         int max_steps = 16;
         float tol = 1e-3f;
+        const char *ref_devices_arg = NULL, *ref_vram_arg = NULL;
+        const char *cand_devices_arg = NULL, *cand_vram_arg = NULL;
+        bool cand_tensor_parallel = false;
 
         for (int i = 6; i < argc; i++) {
             if (!strcmp(argv[i], "--prompt") && i + 1 < argc) {
@@ -477,15 +526,37 @@ int main(int argc, char **argv) {
                 if (max_steps > MAX_STEPS) max_steps = MAX_STEPS;
             } else if (!strcmp(argv[i], "--tol") && i + 1 < argc) {
                 tol = (float)atof(need_arg(&i, argc, argv, argv[i]));
+            } else if (!strcmp(argv[i], "--ref-gpu-devices") && i + 1 < argc) {
+                ref_devices_arg = need_arg(&i, argc, argv, argv[i]);
+            } else if (!strcmp(argv[i], "--ref-gpu-vram") && i + 1 < argc) {
+                ref_vram_arg = need_arg(&i, argc, argv, argv[i]);
+            } else if (!strcmp(argv[i], "--cand-gpu-devices") && i + 1 < argc) {
+                cand_devices_arg = need_arg(&i, argc, argv, argv[i]);
+            } else if (!strcmp(argv[i], "--cand-gpu-vram") && i + 1 < argc) {
+                cand_vram_arg = need_arg(&i, argc, argv, argv[i]);
+            } else if (!strcmp(argv[i], "--cand-tensor-parallel")) {
+                cand_tensor_parallel = true;
             } else {
                 usage(argv[0]);
             }
         }
 
+        ds4_gpu_config ref_cfg, cand_cfg;
+        bool ref_has_cfg = false, cand_has_cfg = false;
+        parse_pass_gpu_config(ref_devices_arg, ref_vram_arg, &ref_cfg, &ref_has_cfg);
+        parse_pass_gpu_config(cand_devices_arg, cand_vram_arg, &cand_cfg, &cand_has_cfg);
+        if (cand_tensor_parallel && !cand_has_cfg) {
+            fprintf(stderr, "harness: --cand-tensor-parallel requires --cand-gpu-devices\n");
+            return 2;
+        }
+
         return run_logits_comparison(ref_model, ref_be,
                                       cand_model, cand_be,
                                       prompt_text, ctx_size,
-                                      max_steps, tol);
+                                      max_steps, tol,
+                                      ref_has_cfg ? &ref_cfg : NULL,
+                                      cand_has_cfg ? &cand_cfg : NULL,
+                                      cand_tensor_parallel);
 
     } else if (strcmp(mode, "--quality") == 0 ||
                strcmp(mode, "--provenance") == 0) {

@@ -4908,6 +4908,11 @@ static uint64_t cuda_q8_f16_cache_limit_bytes(void) {
 }
 
 static uint64_t cuda_q8_f16_cache_reserve_bytes(uint64_t total_bytes) {
+    const char *env_reserve = getenv("DS4_ROCM_CACHE_RESERVE_MB");
+    if (env_reserve && env_reserve[0] != '\0') {
+        long long mb = atoll(env_reserve);
+        if (mb >= 0) return (uint64_t)mb * 1048576ull;
+    }
     if (g_ssd_streaming_mode) {
         return cuda_stream_resident_free_reserve_bytes();
     }

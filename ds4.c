@@ -575,24 +575,24 @@ static const ds4_shape DS4_SHAPE_MINI_FLASH = {
     .family = DS4_MODEL_FAMILY_DEEPSEEK4,
     .variant = DS4_VARIANT_FLASH,
     .n_layer = 4,
-    .n_embd = 512,
+    .n_embd = 4096,
     .n_vocab = 1000,
     .n_head = 8,
     .n_head_kv = 1,
-    .n_head_dim = 64,
-    .n_value_dim = 64,
+    .n_head_dim = 512,
+    .n_value_dim = 512,
     .n_rot = 64,
     .n_out_group = 1,
     .n_lora_q = 128,
     .n_lora_o = 128,
-    .n_expert = 16,
-    .n_expert_used = 2,
+    .n_expert = 256,
+    .n_expert_used = 6,
     .n_expert_shared = 1,
     .n_ff_exp = 256,
     .n_hash_layer = 0,
     .n_swa = 128,
     .n_indexer_head = 8,
-    .n_indexer_head_dim = 32,
+    .n_indexer_head_dim = 128,
     .n_indexer_top_k = 8,
     .n_hc = 4,
     .n_hc_sinkhorn_iter = 20,
@@ -10472,10 +10472,10 @@ static void layer_grouped_out_one(
         const ds4_model   * model,
         const ds4_layer_weights * layer,
         const float       * heads) {
-    const uint32_t n_groups = 8;
+    const uint32_t n_groups = DS4_N_OUT_GROUP;
     const uint32_t group_heads = DS4_N_HEAD / n_groups;
     const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
-    const uint32_t rank = 1024;
+    const uint32_t rank = DS4_N_LORA_O;
 
     float *low = xcalloc((size_t)n_groups * rank, sizeof(low[0]));
 
@@ -10491,10 +10491,10 @@ static void layer_grouped_out_one_decode_scratch(
         const ds4_layer_weights * layer,
         const float            * heads,
         ds4_cpu_decode_scratch * scratch) {
-    const uint32_t n_groups = 8;
+    const uint32_t n_groups = DS4_N_OUT_GROUP;
     const uint32_t group_heads = DS4_N_HEAD / n_groups;
     const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
-    const uint32_t rank = 1024;
+    const uint32_t rank = DS4_N_LORA_O;
 
     memset(scratch->attn_low, 0, (size_t)n_groups * rank * sizeof(scratch->attn_low[0]));
     matvec_q8_0_grouped_rows_decode_scratch(scratch->attn_low, model, layer->attn_output_a,
@@ -10508,10 +10508,10 @@ static void layer_grouped_out_batch(
         const ds4_layer_weights * layer,
         const float       * heads,
         uint32_t            n_tok) {
-    const uint32_t n_groups = 8;
+    const uint32_t n_groups = DS4_N_OUT_GROUP;
     const uint32_t group_heads = DS4_N_HEAD / n_groups;
     const uint32_t group_dim = DS4_N_HEAD_DIM * group_heads;
-    const uint32_t rank = 1024;
+    const uint32_t rank = DS4_N_LORA_O;
 
     float *low = xcalloc((size_t)n_tok * n_groups * rank, sizeof(low[0]));
 
@@ -29058,6 +29058,10 @@ static bool metal_graph_encode_layer_ffn_batch(
                                                n_tokens,
                                                &g->batch_routed_mid_is_f16,
                                                false) != 0;
+        if (!ok) {
+            fprintf(stderr, "ds4 debug: ds4_gpu_routed_moe_batch_tensor returned 0 (gate_type=%u down_type=%u n_tokens=%u expert_in=%u down_in=%u out=%u)\n",
+                    layer->ffn_gate_exps->type, layer->ffn_down_exps->type, n_tokens, (uint32_t)expert_in_dim, (uint32_t)down_in_dim, (uint32_t)routed_out_dim);
+        }
     }
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_gate_clamped", metal_graph_batch_routed_gate(g),

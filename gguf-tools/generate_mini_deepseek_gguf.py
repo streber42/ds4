@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate a small, real, loadable DeepSeek-V4 Mini Flash GGUF fixture for test harness validation.
 
-Creates a small DeepSeek-architecture GGUF file with 4 layers, 16 experts, hidden dim 512,
-and 1000 vocab items that fits in ~20 MB VRAM and completes forward passes instantly.
+Creates a small DeepSeek-architecture GGUF file with 4 layers, 256 experts, hidden dim 4096
+(matching the real Flash shape's ratios), and 1000 vocab items. Resident weights are under
+1 GiB and forward passes complete in well under a second.
 """
 
 import os
@@ -29,6 +30,8 @@ GGUF_TYPE_UINT64  = 10
 GGML_TYPE_F32  = 0
 GGML_TYPE_F16  = 1
 GGML_TYPE_Q8_0 = 8
+GGML_TYPE_Q2_K = 10
+GGML_TYPE_IQ2_XXS = 16
 
 def pack_str(s: str) -> bytes:
     raw = s.encode("utf-8")
@@ -87,6 +90,12 @@ def calc_tensor_bytes(dims: tuple[int, ...], ggml_type: int) -> int:
     elif ggml_type == GGML_TYPE_Q8_0:
         assert n_elems % 32 == 0
         return (n_elems // 32) * 34
+    elif ggml_type == GGML_TYPE_Q2_K:
+        assert n_elems % 256 == 0
+        return (n_elems // 256) * 84
+    elif ggml_type == GGML_TYPE_IQ2_XXS:
+        assert n_elems % 256 == 0
+        return (n_elems // 256) * 66
     else:
         raise ValueError(f"unsupported ggml_type {ggml_type}")
 
@@ -104,6 +113,12 @@ def generate_tensor_data(n_bytes: int, ggml_type: int) -> bytes:
         n_blocks = n_bytes // 34
         block = struct.pack("<H", 0x3c00) + b"\x01" * 32
         return block * n_blocks
+    elif ggml_type == GGML_TYPE_Q2_K:
+        n_blocks = n_bytes // 84
+        return b"\x00" * (84 * n_blocks)
+    elif ggml_type == GGML_TYPE_IQ2_XXS:
+        n_blocks = n_bytes // 66
+        return b"\x00" * (66 * n_blocks)
     else:
         return b"\x00" * n_bytes
 
@@ -119,24 +134,24 @@ def main():
 
     # Mini DeepSeek-V4 Flash parameters
     n_layer = 4
-    n_embd = 512
+    n_embd = 4096
     n_vocab = 1000
     n_head = 8
     n_head_kv = 1
-    n_head_dim = 64
-    n_value_dim = 64
+    n_head_dim = 512
+    n_value_dim = 512
     n_rot = 64
     n_out_group = 1
     n_lora_q = 128
     n_lora_o = 128
-    n_expert = 16
-    n_expert_used = 2
+    n_expert = 256
+    n_expert_used = 6
     n_expert_shared = 1
     n_ff_exp = 256
     n_hash_layer = 0
     n_swa = 128
     n_indexer_head = 8
-    n_indexer_head_dim = 32
+    n_indexer_head_dim = 128
     n_indexer_top_k = 8
     n_hc = 4
     n_hc_sinkhorn_iter = 20
@@ -151,6 +166,15 @@ def main():
         "</think>",
         "｜DSML｜",
     ]
+    # Printable ASCII (0x21-0x7E) as single-character tokens. ds4's BPE
+    # tokenizer byte-encodes input with the GPT-2 scheme, where this exact
+    # range maps to itself; registering it here lets the per-byte fallback
+    # path turn any letters/digits/punctuation prompt into real multi-token
+    # sequences instead of the empty token list an all-placeholder vocab
+    # would otherwise produce (needed to build prompts long enough to
+    # exercise TP row-split and multi-chunk prefill).
+    for cp in range(0x21, 0x7F):
+        tokens.append(chr(cp))
     # Fill remaining tokens up to n_vocab
     for i in range(len(tokens), n_vocab):
         tokens.append(f"tok_{i}")
@@ -256,9 +280,9 @@ def main():
             (f"blk.{il}.ffn_norm.weight", (n_embd,), GGML_TYPE_F32),
             (f"blk.{il}.ffn_gate_inp.weight", (n_embd, n_expert), GGML_TYPE_F16),
             (f"blk.{il}.ffn_exp_probs_b.bias", (n_expert,), GGML_TYPE_F32),
-            (f"blk.{il}.ffn_gate_exps.weight", (n_embd, n_ff_exp, n_expert), GGML_TYPE_Q8_0),
-            (f"blk.{il}.ffn_up_exps.weight", (n_embd, n_ff_exp, n_expert), GGML_TYPE_Q8_0),
-            (f"blk.{il}.ffn_down_exps.weight", (n_ff_exp, n_embd, n_expert), GGML_TYPE_Q8_0),
+            (f"blk.{il}.ffn_gate_exps.weight", (n_embd, n_ff_exp, n_expert), GGML_TYPE_IQ2_XXS),
+            (f"blk.{il}.ffn_up_exps.weight", (n_embd, n_ff_exp, n_expert), GGML_TYPE_IQ2_XXS),
+            (f"blk.{il}.ffn_down_exps.weight", (n_ff_exp, n_embd, n_expert), GGML_TYPE_Q2_K),
             (f"blk.{il}.ffn_gate_shexp.weight", (n_embd, n_ff_exp), GGML_TYPE_Q8_0),
             (f"blk.{il}.ffn_up_shexp.weight", (n_embd, n_ff_exp), GGML_TYPE_Q8_0),
             (f"blk.{il}.ffn_down_shexp.weight", (n_ff_exp, n_embd), GGML_TYPE_Q8_0),
