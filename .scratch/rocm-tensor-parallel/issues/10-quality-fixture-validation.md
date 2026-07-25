@@ -1,6 +1,6 @@
 # Full quality-fixture validation
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -19,7 +19,7 @@ spread, and it is the last correctness gate before this is treated as production
 ## Acceptance criteria
 
 - [x] The official multi-case quality fixture runs to completion on the tensor-parallel build
-- [ ] Score is equivalent to the reference pipeline path within the fixture's own accepted variance
+- [x] Score is equivalent to the reference pipeline path within the fixture's own accepted variance
 - [x] Any case that regresses is investigated and either fixed or documented with a justification
 - [x] Results recorded in the project's experiment log alongside the reference score
 - [x] Both decode and prefill paths are exercised by the run
