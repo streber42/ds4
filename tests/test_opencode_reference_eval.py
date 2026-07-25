@@ -6,6 +6,12 @@ against the official live OpenCode Go reference API (default: https://opencode.a
 
 Evaluates short QA, code generation, math/reasoning, multi-turn chat, and long prefill prompts.
 Outputs structured JSON and Markdown comparison reports under .scratch/rocm-tensor-parallel/eval-out/.
+
+Pass --disable-thinking to suppress <think>...</think> reasoning blocks. This injects a system
+directive that forbids thinking output, sends `thinking: {"type": "disabled"}` in the API
+payload for endpoints that support it, and evaluates only the direct content answer without
+falling back to the combined content+reasoning text. Use this for concise reference comparisons
+against short-QA and code-generation tasks where reasoning overhead adds noise.
 """
 
 import argparse
@@ -68,6 +74,13 @@ CATEGORY_TOKEN_BUDGETS = {
 SYSTEM_REASONING_DIRECTIVE = {
     "role": "system",
     "content": "You are a concise assistant. Think step-by-step if needed, but state your final answer clearly and concisely after thinking.",
+}
+
+# Used when --disable-thinking is passed.  Explicitly forbids <think> blocks so that responses
+# are short direct answers: easier to compare against a reference endpoint and much faster.
+SYSTEM_NO_THINKING_DIRECTIVE = {
+    "role": "system",
+    "content": "You are a concise assistant. Do NOT use <think> tags or internal reasoning blocks. Output your answer directly and concisely without any preamble.",
 }
 
 
@@ -222,8 +235,14 @@ def post_chat_stream(
     max_tokens: int = 512,
     temperature: float = 0.0,
     timeout: float = 120.0,
+    disable_thinking: bool = False,
 ) -> dict:
-    """Send a chat completion request with SSE streaming and measure TTFT and throughput."""
+    """Send a chat completion request with SSE streaming and measure TTFT and throughput.
+
+    When disable_thinking is True the payload includes ``thinking: {"type": "disabled"}`` for
+    endpoints that understand that field (ds4 / OpenCode).  Servers that don't recognise the
+    field ignore it gracefully, so sending it is always safe.
+    """
     endpoint = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -233,6 +252,9 @@ def post_chat_stream(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if disable_thinking:
+        # Signal to endpoints that support it (ds4 server, some OpenAI-compatible APIs).
+        payload["thinking"] = {"type": "disabled"}
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "curl/7.81.0",
@@ -339,6 +361,11 @@ def run_evaluation(args) -> dict:
     print(f"Benchmark Cases:     {len(BENCHMARK_SUITE)}")
     print("-" * 50)
 
+    disable_thinking = args.disable_thinking
+
+    if disable_thinking:
+        print("[disable-thinking] Substituting no-thinking system directive and sending thinking:disabled in payload.")
+
     case_results = []
     for case in BENCHMARK_SUITE:
         cid = case["id"]
@@ -347,14 +374,20 @@ def run_evaluation(args) -> dict:
         case_max_tokens = case_budget if args.max_tokens == 512 else max(args.max_tokens, case_budget)
         print(f"Running [{cid}] {cname} (max_tokens={case_max_tokens})...", end="", flush=True)
 
+        # Build the messages for this case, optionally swapping the system directive.
+        case_messages = case["messages"]
+        if disable_thinking:
+            case_messages = _swap_system_directive(case_messages, SYSTEM_NO_THINKING_DIRECTIVE)
+
         # 1. Query Local Server
         res_local = post_chat_stream(
             base_url=local_url,
             api_key=local_key,
             model=args.model,
-            messages=case["messages"],
+            messages=case_messages,
             max_tokens=case_max_tokens,
             timeout=args.timeout,
+            disable_thinking=disable_thinking,
         )
 
         # 2. Query OpenCode Reference API (or skip)
@@ -363,9 +396,10 @@ def run_evaluation(args) -> dict:
                 base_url=opencode_url,
                 api_key=opencode_key,
                 model=args.model,
-                messages=case["messages"],
+                messages=case_messages,
                 max_tokens=case_max_tokens,
                 timeout=args.timeout,
+                disable_thinking=disable_thinking,
             )
         else:
             res_ref = {
@@ -381,21 +415,28 @@ def run_evaluation(args) -> dict:
                 "finish_reason": "stop",
             }
 
-        # 3. Calculate Comparison Metrics (Dual Content & Reasoning Matching)
+        # 3. Calculate Comparison Metrics
+        # When thinking is disabled we evaluate only the direct content answer; we do NOT
+        # fall back to the combined content+reasoning text because the whole point is to get
+        # a clean, concise answer without reasoning leaking in.
         local_content = res_local["content"]
         local_reasoning = res_local["reasoning"]
-        local_combined = (local_content + " " + local_reasoning).strip()
 
         ref_content = res_ref["content"]
         ref_reasoning = res_ref["reasoning"]
-        ref_combined = (ref_content + " " + ref_reasoning).strip()
 
-        local_pass = res_local["status"] == "SUCCESS" and (
-            case["expected_check"](local_content) or case["expected_check"](local_combined)
-        )
-        ref_pass = res_ref["status"] in ("SUCCESS", "SKIPPED") and (
-            case["expected_check"](ref_content) or case["expected_check"](ref_combined)
-        )
+        if disable_thinking:
+            local_pass = res_local["status"] == "SUCCESS" and case["expected_check"](local_content)
+            ref_pass = res_ref["status"] in ("SUCCESS", "SKIPPED") and case["expected_check"](ref_content)
+        else:
+            local_combined = (local_content + " " + local_reasoning).strip()
+            ref_combined = (ref_content + " " + ref_reasoning).strip()
+            local_pass = res_local["status"] == "SUCCESS" and (
+                case["expected_check"](local_content) or case["expected_check"](local_combined)
+            )
+            ref_pass = res_ref["status"] in ("SUCCESS", "SKIPPED") and (
+                case["expected_check"](ref_content) or case["expected_check"](ref_combined)
+            )
 
         sim_ratio = difflib.SequenceMatcher(None, res_local["content"].lower(), res_ref["content"].lower()).ratio()
         exact_match = res_local["content"].strip().lower() == res_ref["content"].strip().lower()
@@ -459,6 +500,7 @@ def run_evaluation(args) -> dict:
         "opencode_url": opencode_url,
         "model": args.model,
         "skip_opencode": skip_opencode,
+        "disable_thinking": disable_thinking,
         "total_cases": total_cases,
         "passed_cases": passed_cases,
         "pass_rate_percent": round(pass_rate, 2),
@@ -496,7 +538,10 @@ def run_evaluation(args) -> dict:
     md_lines.append(f"- **Timestamp**: {summary['timestamp']}")
     md_lines.append(f"- **Local Server Endpoint**: `{local_url}`")
     md_lines.append(f"- **OpenCode Reference Endpoint**: `{opencode_url}` (skip={skip_opencode})")
-    md_lines.append(f"- **Model**: `{args.model}`\n")
+    md_lines.append(f"- **Model**: `{args.model}`")
+    if disable_thinking:
+        md_lines.append("- **Thinking Mode**: disabled (`--disable-thinking` — no `<think>` blocks, direct content only)")
+    md_lines.append("")
 
     md_lines.append("## Executive Summary\n")
     md_lines.append("| Metric | Local Server | OpenCode Reference | Ratio / Score |")
@@ -555,6 +600,18 @@ def run_evaluation(args) -> dict:
     return summary
 
 
+def _swap_system_directive(messages: list[dict], new_directive: dict) -> list[dict]:
+    """Return a copy of messages with the first system message replaced by new_directive.
+
+    If there is no system message the directive is prepended.  Non-system messages are
+    preserved in order.  The original list is not mutated.
+    """
+    has_system = any(m.get("role") == "system" for m in messages)
+    if has_system:
+        return [new_directive if m.get("role") == "system" else m for m in messages]
+    return [new_directive] + list(messages)
+
+
 def run_self_tests() -> None:
     """Run unit tests for extract_think_blocks, adaptive token budgets, and dual matching."""
     print("=== Running Self-Tests for Evaluation Harness Reasoning Budget & Formatting ===")
@@ -593,11 +650,48 @@ def run_self_tests() -> None:
     assert dummy_check(comb_text)
     print("[PASS] Dual content & reasoning matching verified.")
 
+    # Test 6: _swap_system_directive replaces first system message
+    orig = [{"role": "system", "content": "old"}, {"role": "user", "content": "hi"}]
+    swapped = _swap_system_directive(orig, SYSTEM_NO_THINKING_DIRECTIVE)
+    assert swapped[0] == SYSTEM_NO_THINKING_DIRECTIVE, "System directive not replaced"
+    assert swapped[1] == orig[1], "User message should be preserved"
+    assert orig[0]["content"] == "old", "Original list must not be mutated"
+    print("[PASS] _swap_system_directive replaces system message without mutating original.")
+
+    # Test 7: _swap_system_directive prepends when no system message present
+    no_sys = [{"role": "user", "content": "hello"}]
+    prepended = _swap_system_directive(no_sys, SYSTEM_NO_THINKING_DIRECTIVE)
+    assert prepended[0] == SYSTEM_NO_THINKING_DIRECTIVE, "Directive should be prepended"
+    assert prepended[1] == no_sys[0], "User message should follow"
+    print("[PASS] _swap_system_directive prepends directive when no system message exists.")
+
+    # Test 8: SYSTEM_NO_THINKING_DIRECTIVE forbids think tags and is concise
+    no_think_content = SYSTEM_NO_THINKING_DIRECTIVE["content"].lower()
+    assert "<think>" in no_think_content or "think" in no_think_content, "Must reference thinking"
+    assert "not" in no_think_content or "do not" in no_think_content or "without" in no_think_content, \
+        "Must prohibit thinking"
+    assert "concise" in no_think_content, "Must instruct concise output"
+    print("[PASS] SYSTEM_NO_THINKING_DIRECTIVE correctly prohibits thinking and requests concise output.")
+
     print("All evaluation harness self-tests PASSED successfully!")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenCode Go reference comparison evaluation harness")
+    parser = argparse.ArgumentParser(
+        description="OpenCode Go reference comparison evaluation harness",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  # Full evaluation against local server only (no OpenCode API key required)
+  python tests/test_opencode_reference_eval.py --skip-opencode
+
+  # Same but suppress <think> blocks for direct-answer comparison
+  python tests/test_opencode_reference_eval.py --skip-opencode --disable-thinking
+
+  # Run harness unit tests (no server needed)
+  python tests/test_opencode_reference_eval.py --self-test
+""",
+    )
     parser.add_argument("--local-url", default="", help="Local server base URL (default: http://localhost:8000/v1)")
     parser.add_argument("--local-api-key", default="", help="Local server API key (default: from LOCAL_API_KEY env or empty)")
     parser.add_argument("--opencode-url", default="", help="OpenCode reference base URL (default: https://opencode.ai/zen/go/v1)")
@@ -608,6 +702,17 @@ def main():
     parser.add_argument("--timeout", type=float, default=120.0, help="Per-request HTTP timeout in seconds")
     parser.add_argument("--max-tokens", type=int, default=512, help="Max output tokens for completion")
     parser.add_argument("--self-test", action="store_true", help="Run harness unit tests and exit")
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help=(
+            "Suppress <think>...</think> reasoning blocks. Injects a system directive that "
+            "forbids thinking output, sends thinking:{type:disabled} in the API payload for "
+            "compatible endpoints, and evaluates only the direct content answer (not the "
+            "combined content+reasoning text). Use for concise reference comparisons where "
+            "reasoning overhead adds noise."
+        ),
+    )
 
     args = parser.parse_args()
     if args.self_test:
