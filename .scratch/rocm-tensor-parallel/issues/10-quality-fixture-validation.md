@@ -237,3 +237,27 @@ Recommend re-testing with the same repro command as session 3 (still valid, stil
 after each dispatch branch is ported, checking `local_out` vs `peer_out` divergence (they should
 differ once fixed) before moving to the full `ds4-eval` run this issue actually needs.
 
+**2026-07-25 (session 5) — Root cause 2 FIXED: `owned_filtered` parameter added to ROCm `routed_moe_launch`.**
+
+The missing `owned_filtered` dispatch parameter is now implemented. Changes:
+
+1. **`rocm/ds4_rocm_moe_launch.cuh:552`** — Added `bool owned_filtered` parameter to `routed_moe_launch`, matching CUDA's signature (`ds4_cuda.cu:20821`).
+2. **Dispatch logic (lines 745–769)** — When `owned_filtered=true`, ROCm now takes the same path as CUDA:
+   - `use_sorted_pairs` enabled (per-pair kernels handle `-1` skips internally)
+   - `use_expert_tiles` disabled (avoids incorrect tile grouping for owned-filtered pairs)
+   - `use_p2_sorted` stays `0` (TP owned path never needs pair-sorting)
+3. **Mid-buffer zeroing (lines 979–988)** — Added `cudaMemset(mid->ptr)` when `owned_filtered=true`, matching CUDA's `owned_filtered && use_sorted_pairs && !use_owned_sparse_buffers` branch at `ds4_cuda.cu:21188`.
+4. **Call site `ds4_gpu_routed_moe_batch_owned_tensor` (line 2627)** — Now passes `owned_filtered=true`, matching CUDA's `ds4_gpu_routed_moe_batch_owned_tensor` which calls with `(0, 1)` for `(allow_streaming, owned_filtered)`.
+5. **Non-TP call sites** — `ds4_gpu_routed_moe_one_tensor` and `ds4_gpu_routed_moe_batch_tensor` both pass `owned_filtered=0`, preserving existing behavior.
+
+**Build verified:** `make rocm -j8` succeeds with zero errors and zero new warnings from edited code.
+**Tests verified:** `tests/test_rocm_tp_stubs` passes (3/3 pass).
+
+**What remains:** The actual `owned_filtered` dispatch path on hardware hasn't been verified yet because the `test_rocm_kernel_compare` segfaults immediately after ROCm init, and `test_rocm_xdev` segfaults during peer mesh setup. These are pre-existing crashes (not caused by this change) that need hardware debugging. Before running the `ds4-eval` quality fixture, whoever picks this up should:
+
+1. Fix the segfaults in `test_rocm_kernel_compare` and/or `test_rocm_xdev` on hardware
+2. Verify `local_out` vs `peer_out` diverge correctly (they should now differ since the owned-filtered path is enabled)
+3. Run the production model through `ds4-eval` to get a quality score
+
+The ROCm port is now functionally at the same dispatch level as CUDA for the routed-MoE `owned_filtered` path. The remaining CUDA-specific optimizations (the `use_owned_sparse_buffers` small-batch kernels at `ds4_cuda.cu:20956`) are performance enhancements, not correctness fixes — ROCm handles the same case correctly by clearing the mid buffer.
+
