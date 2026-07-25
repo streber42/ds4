@@ -1418,6 +1418,25 @@ static int routed_moe_launch(
             ok && iq2_path && n_tokens > 1u &&
             n_expert <= DS4_ROCM_N_EXPERT_USED &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts;
+        /* owned_filtered means selected has -1 slots this rank doesn't own,
+         * and the sorted-pairs down kernels (including
+         * routed_moe_q2_float_down_launch's internal per-token sum over all
+         * n_expert slots) only ever write the slots that ARE owned -- a
+         * skipped slot's row in `down` is left completely untouched.
+         * Without zeroing first, that row keeps whatever this reused
+         * scratch buffer held before (down->ptr doubles as the `xq`
+         * quantize scratch earlier in this same call, and as a previous
+         * layer's down output before that), so the internal sum silently
+         * folds stale/garbage data into every token's routed-MoE output.
+         * Mirrors the mid-buffer zero above for the same reason -- CUDA
+         * doesn't need this because it never reuses one buffer as both xq
+         * scratch and the sorted-pairs down output the way this port does. */
+        if (ok && owned_filtered) {
+            const uint64_t down_bytes_zero =
+                (uint64_t)n_tokens * n_expert * out_dim * sizeof(float);
+            ok = cuda_ok(cudaMemset(down->ptr, 0, (size_t)down_bytes_zero),
+                         "owned routed_moe down clear");
+        }
         if (ok && !use_iq2_q2_float_down) {
             dim3 midq_grid(midq_blocks, pair_count, 1);
             q8_K_quantize_kernel<<<midq_grid, 256>>>(midq, (const float *)mid->ptr, expert_mid_dim, pair_count);

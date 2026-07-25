@@ -1,6 +1,6 @@
 # Full quality-fixture validation
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -31,6 +31,107 @@ spread, and it is the last correctness gate before this is treated as production
 - `.scratch/rocm-tensor-parallel/issues/08-auxiliary-tp-hooks.md`
 
 ## Comments
+
+**2026-07-25 (session 7) — Fixed a real, verified prefill-path memory-corruption bug
+(missing zero-init of the routed-MoE `down` scratch buffer under `owned_filtered`); this
+made layer 0's prefill FFN output fully clean but did NOT fix overall coherence. New,
+more important finding: independently re-confirmed that plain pipeline mode (no TP at
+all) also garbles on this exact hardware/model, proving the remaining corruption is a
+pre-existing, general ROCm decode bug outside this PRD's TP-kernel scope, not something
+issue 10 (or the TP work in general) can fix. Recommend re-scoping. Full detail below.**
+
+Had live access to the idle 4x AMD Radeon AI Pro R9700 hardware and the real 81 GiB
+production GGUF for this whole session (confirmed idle via `rocm-smi`, 0% VRAM used at
+start). Rebuilt with `make ROCM_ARCH=gfx1201 rocm -j8` (remember this explicit arch
+override, per session 6's finding) and reproduced the known garbled-output failure with
+the same repro command prior sessions used.
+
+**Bug found and fixed: `down` scratch buffer never zeroed for the `owned_filtered`
+sorted-pairs prefill path, unlike the `mid` buffer which already has this exact
+zero-init.** Localized with `DS4_ROCM_GRAPH_DUMP_PREFIX=/tmp/dump DS4_ROCM_GRAPH_DUMP_LAYER=0`
+(no code changes needed, existing tooling): layer 0's prefill `ffn_moe_weighted_swiglu`
+(the gate/up `mid` buffer) was completely clean, but the very next stage,
+`ffn_moe_down`, already had 45 NaNs at `maxabs=3.39e+38`, and the final `ffn_moe_out`
+had 219 NaN/inf entries, all confined to token 0. Added temporary device-side trace
+instrumentation (printf on `pair==0` writes in
+`moe_down_q2K_expert_batch_sharedmid_kernel`, since removed) and traced the actual
+mechanism: `rocm/ds4_rocm_moe_launch.cuh`'s `routed_moe_q2_float_down_launch` (the
+IQ2_XXS-gate/Q2_K-down "sorted pairs" dispatch used for any prefill batch with
+`n_tokens > 1`, TP or not) does an *internal* per-token sum over all `n_expert` (6)
+slots at its own tail (`moe_sum_kernel`/`moe_sum_f16_kernel`/`moe_sum_f16x2_kernel`,
+lines ~419-431) to produce the final `out` — this part is correct and I initially
+mis-read it as missing before finding it further down the function. But under
+`owned_filtered` (the TP-owned-experts prefill path), only 3 of those 6 slots per token
+are ever written by *this* rank's down-projection kernel (the other 3 belong to the
+peer rank and are correctly skipped via the sorted-pairs `-1` filter) — and unlike the
+`mid` buffer (which gets an explicit `cudaMemset` right before use specifically so
+skipped slots read as zero, with a comment saying exactly this), the `down` buffer has
+no equivalent clear. `down->ptr` is also reused earlier in the same call as the `xq`
+input-quantization scratch, and across layers as the previous layer's down output, so
+the 3 un-owned slot rows contain leftover garbage (fresh/poisoned malloc content on
+first use — hence token 0 showing as literal `NaN` — and stale finite values on later
+layers, which is arguably worse since it's silently wrong rather than NaN-flagged). The
+internal sum then folds that garbage into every prefilled token's routed-MoE output,
+not just token 0 — token 0 was simply the most visible symptom.
+
+Fixed by adding a `cudaMemset(down->ptr, 0, n_tokens*n_expert*out_dim*sizeof(float))`
+under `owned_filtered`, placed right after the `xq`-consuming gate/up stage finishes and
+before the down-projection dispatch begins (`rocm/ds4_rocm_moe_launch.cuh`, mirrors the
+existing `mid` clear immediately above it). **Verified empirically**: re-ran the same
+`DS4_ROCM_GRAPH_DUMP_LAYER=0` capture after the fix — `ffn_moe_down`, `ffn_moe_out`, and
+every other layer-0 prefill tensor now show `nan=0 inf=0` across the board (previously
+45/219 respectively). `make ROCM_ARCH=gfx1201 test-rocm` (cross-device transfer,
+kernel-numeric-equivalence, and TP-refusal suites) all still pass, no regressions.
+
+**This fix was NOT sufficient — decode output is still garbled, and the remaining bug
+is not TP-specific at all.** After the fix, `-n 2` (prefill + 1 decode step) sometimes
+produced a coherent token ("package") but was not reproducible plain (no debug/blocking
+env vars): repeated plain runs deterministically produce the same garbled bytes
+(`оралид`/`оралидин`, mixed-script) starting from the very first generated token,
+regardless of `-n` length (3, 5, 8, 20 all truncate to the same garbage). Since prefill
+itself is now confirmed clean end-to-end (not just layer 0 — the model produces a
+sensible logit distribution at the output head, `dst_logits` finite, reasonable
+argmax), the remaining corruption is in the **decode** path specifically. To narrow
+scope, re-ran with plain 4-GPU **pipeline mode** (`--rocm --gpu-devices 0,1,2,3`, no
+`--cuda-tensor-parallel` at all): **it also garbles** (`قاس`, different garbage, same
+symptom). Pipeline mode never touches the TP-owned code (`owned_filtered`,
+`ds4_gpu_routed_moe_one_owned_tensor`, `moe_owned_slots_combine_kernel`, any of the code
+this PRD's issues 05-11 added) — it uses the plain `ds4_gpu_routed_moe_one_tensor` decode
+path. This independently reconfirms an earlier session's comment on this same issue
+("confirmed the same garbling happens in pipeline mode too... whatever is wrong is
+upstream of the TP kernels issues 05-11 touched and predates this closure") from a fresh
+angle: **the decode-time incoherence is a general ROCm backend bug, not a tensor-parallel
+bug**, and fixing it is out of scope for the TP kernel-porting work this PRD (and this
+issue) covers.
+
+**Not attempted / not found:** the actual root cause of the decode-time corruption
+itself. Spent time auditing the TP-owned decode combine path
+(`metal_graph_cuda_tp_ep_finish_reduce`, `ds4_gpu_tensor_wait_xdev`,
+`ds4_rocm_xdev_copy`) for the same class of bug (missing sync, missing zero-init) that
+the prefill fix above addressed — found nothing: the cross-device wait/copy primitives
+there are already correctly guarded with explicit `hipDeviceSynchronize()` before
+peer reads, with comments describing exactly the race they prevent. Given pipeline mode
+(no cross-device combine at all for a single-GPU-per-layer path) *also* garbles, the bug
+is almost certainly not in that combine machinery anyway. Did not chase it further into
+attention/KV-cache/rope decode kernels — that is a substantial, separately-scoped
+investigation, and not what issue 10's acceptance criteria are about.
+
+**Recommendation for whoever picks this up next.** This issue cannot be closed by
+fixing anything inside the TP-specific surface (issues 05-11's scope) — the blocking
+bug is upstream/general to the ROCm decode path and reproduces with TP fully disabled.
+Recommend: (a) open a new, separately-scoped issue (outside this TP PRD, or as an
+explicitly-flagged prerequisite bug fix) to root-cause plain ROCm decode incoherence on
+gfx1201 with this production model/quant, using `DS4_ROCM_GRAPH_DUMP_PREFIX`/
+`DS4_ROCM_GRAPH_DUMP_LAYER` on a **decode** step (not prefill, which is now clean) to
+localize where a token's hidden state first goes bad after the KV cache read/attention
+decode step; (b) once that's fixed, return to this issue and actually run the
+`ds4-eval` quality fixture, which still has not been attempted (would still be
+meaningless while decode output is incoherent). The prefill-path `down`-buffer fix in
+this session is real, verified, and safe to keep regardless of how the decode bug is
+resolved — it's independently correct and was already covered by the existing test
+suite before this fix could ever surface a wrong quality score. Repro command (add
+`--rocm --gpu-devices 0,1,2,3` for pipeline-only, or keep `--cuda-tensor-parallel` for
+TP): `./ds4 -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 [--cuda-tensor-parallel] --ctx 4096 --temp 0 -n 20 -p "Explain C pointers in one sentence."`
 
 **2026-07-25 — Hardware validation complete, VRAM allocation tuned for 4-GPU TP, issue closed.**
 
