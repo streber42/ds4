@@ -765,7 +765,7 @@ static int routed_moe_launch(
             (!q4k_path || n_tokens >= 32u) &&
             !disable_resident_iq2_sorted);
         const uint32_t use_expert_tiles =
-            use_sorted_pairs && !owned_filtered;
+            use_sorted_pairs;
         const uint32_t expert_tile_m = 4u;
         const uint32_t write_gate_up = 0u;
         /* owned_filtered means selected is already sparsified to
@@ -913,7 +913,17 @@ static int routed_moe_launch(
             return ok;
         }
         if (ok && use_sorted_pairs) {
-            const uint32_t bucket_count = n_expert;
+            /* Bucket count for the counting-sort must be the number of
+             * distinct experts pairs can select (n_total_expert, e.g. 128
+             * for a TP-resident half), not n_expert (the per-token top-k
+             * count, 6). CUDA's reference (ds4_cuda.cu ~21136-21163) passes
+             * n_total_expert to moe_count_sorted_pairs_kernel/moe_prefix_
+             * sorted_pairs_kernel/moe_scatter_sorted_pairs_kernel; ROCm was
+             * passing n_expert, undersizing counts/offsets/sorted_pairs by
+             * ~20x and causing every out-of-bounds counts[expert] read in
+             * the down-projection kernel (which iterates blockIdx.y over
+             * n_total_expert) to consume garbage scratch memory. */
+            const uint32_t bucket_count = n_total_expert;
             const uint64_t counts_bytes = (uint64_t)bucket_count * sizeof(uint32_t);
             const uint64_t offsets_bytes = (uint64_t)(bucket_count + 1u) * sizeof(uint32_t);
             const uint64_t cursors_bytes = (uint64_t)bucket_count * sizeof(uint32_t);
