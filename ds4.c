@@ -15190,6 +15190,11 @@ typedef struct {
     float directional_steering_attn_scale;
     float directional_steering_ffn_scale;
     bool cuda_tp_decode;
+    /* ROCm TP=4: single-process multi-GPU tensor parallelism with 4 ranks.
+     * When true, every tier holds every layer (no pipeline split) and the
+     * lower-half/upper-half partner model does not apply.  Set in
+     * metal_graph_alloc_raw_cap alongside cuda_tp_decode. */
+    bool rocm_tp4;
     bool cuda_tp_attn;
     bool cuda_tp_attn_peer_read;
     bool cuda_tp_attn_heads;
@@ -16865,6 +16870,18 @@ static bool metal_graph_alloc_raw_cap(
      * was already NULL on entry). */
     g->placement = placement;
     g->cuda_tp_decode = placement && cuda_tensor_parallel;
+    /* ROCm TP=4: 4-GPU single-stage all-replicated.  Identified by the
+     * same signals as engine_rocm_tp4_requested (DS4_ROCM_BUILD + 4 GPUs +
+     * cuda_tensor_parallel + DeepSeek family) — computed inline here
+     * because the graph helper would pull in a header dependency. */
+#if defined(DS4_ROCM_BUILD)
+    g->rocm_tp4 = g->cuda_tp_decode &&
+                  g_n_gpus == 4 &&
+                  g_ds4_shape.family == DS4_MODEL_FAMILY_DEEPSEEK4 &&
+                  DS4_N_EXPERT != 0u && (DS4_N_EXPERT % 4u) == 0u;
+#else
+    g->rocm_tp4 = false;
+#endif
     g->cuda_tp_attn = g->cuda_tp_decode && metal_graph_cuda_tp_attn_requested();
     g->cuda_tp_attn_peer_read = metal_graph_cuda_tp_attn_peer_read_requested();
     g->cuda_tp_attn_heads = g->cuda_tp_decode && metal_graph_cuda_tp_attn_heads_requested();
@@ -16909,7 +16926,8 @@ static bool metal_graph_alloc_raw_cap(
          metal_graph_cuda_greedy_splitkv_fallback_requested()) ||
         (metal_graph_cuda_greedy_vec4_requested() &&
          metal_graph_cuda_greedy_vec4_fallback_requested());
-    if (g->cuda_tp_decode && metal_graph_cuda_tp_partner_tier(0) < 0) {
+    if (g->cuda_tp_decode && !g->rocm_tp4 &&
+        metal_graph_cuda_tp_partner_tier(0) < 0) {
         fprintf(stderr,
                 "ds4: CUDA tensor parallelism requires an even multi-GPU placement; "
                 "have %d GPU tiers\n",
@@ -17026,23 +17044,37 @@ static bool metal_graph_alloc_raw_cap(
         }
     }
     if (g->cuda_tp_decode) {
-        const int half = g_n_gpus / 2;
-        for (int t = half; t < g_n_gpus; t++) {
-            if (used_tier[t]) {
-                fprintf(stderr,
-                        "ds4: CUDA tensor parallelism expects layer homes in lower-half "
-                        "tiers; placement already uses tier %d\n",
-                        t);
-                metal_graph_free(g);
-                return false;
+        if (g->rocm_tp4) {
+            /* TP=4 ROCm: single-stage all-replicated.  Every tier holds
+             * every layer, so activate all tiers for per-tier scratch
+             * allocation.  The lower-half/upper-half partner model does
+             * not apply — placement[] is homogeneous (all tier 0) and the
+             * cache-install step already replicated every tensor to all 4
+             * tiers with appropriate sharding. */
+            for (int t = 0; t < g_n_gpus; t++) used_tier[t] = true;
+            fprintf(stderr,
+                    "ds4: ROCm TP=4 enabled: all %d tiers active "
+                    "(single-stage all-replicated)\n",
+                    g_n_gpus);
+        } else {
+            const int half = g_n_gpus / 2;
+            for (int t = half; t < g_n_gpus; t++) {
+                if (used_tier[t]) {
+                    fprintf(stderr,
+                            "ds4: CUDA tensor parallelism expects layer homes in lower-half "
+                            "tiers; placement already uses tier %d\n",
+                            t);
+                    metal_graph_free(g);
+                    return false;
+                }
             }
+            for (int t = 0; t < half; t++) {
+                if (used_tier[t]) used_tier[t + half] = true;
+            }
+            fprintf(stderr,
+                    "ds4: CUDA decode TP enabled: pairing lower-half tiers with "
+                    "upper-half tiers\n");
         }
-        for (int t = 0; t < half; t++) {
-            if (used_tier[t]) used_tier[t + half] = true;
-        }
-        fprintf(stderr,
-                "ds4: CUDA decode TP enabled: pairing lower-half tiers with "
-                "upper-half tiers\n");
     }
     for (int t = 0; t < DS4_MAX_GPUS; t++) {
         if (!used_tier[t]) continue;
@@ -54731,6 +54763,10 @@ static bool engine_deepseek_routed_expert_tensor(
 static bool engine_cuda_tp_decode_requested(const ds4_engine *e);
 static bool engine_cuda_tp_ep_requested(const ds4_engine *e);
 static bool engine_cuda_tp_output_env_requested(void);
+static bool engine_rocm_tp4_requested(const ds4_engine *e);
+static uint32_t engine_tp4_shard_divisor(const ds4_engine *e,
+                                          const ds4_tensor *t,
+                                          int entry);
 
 /* Compute per-entry byte footprint estimates. Walks the tensor table once
  * and adds each tensor's bytes to its entry bucket. Also adds a per-layer
@@ -54739,6 +54775,7 @@ static bool engine_cuda_tp_output_env_requested(void);
 static int engine_compute_entry_bytes(const ds4_engine *e, size_t *out) {
     const int n_entries = DS4_N_LAYER + 2;
     const bool cuda_tp_ep = engine_cuda_tp_ep_requested(e);
+    const bool rocm_tp4 = engine_rocm_tp4_requested(e);
     for (int i = 0; i < n_entries; i++) out[i] = 0;
 
     for (uint64_t i = 0; i < e->model.n_tensors; i++) {
@@ -54751,6 +54788,24 @@ static int engine_compute_entry_bytes(const ds4_engine *e, size_t *out) {
             /* Output TP stores one vocabulary-row slice per participating
              * tier. Those bytes are reserved per tier after the head tier is
              * known, rather than charging a full output matrix here. */
+            continue;
+        }
+        /* TP=4 ROCm: per-entry bytes are what one rank holds.  Sharded
+         * tensors (routed experts, per-head QKV projections, output head)
+         * count as bytes/4 per rank; replicated tensors count as full bytes.
+         * The divisor is computed via engine_tp4_shard_divisor so placement
+         * and cache install agree on what is sharded. */
+        if (rocm_tp4) {
+            const uint32_t div = engine_tp4_shard_divisor(e, t, entry);
+            if (t->bytes % div != 0) {
+                fprintf(stderr,
+                        "ds4: TP=4 sharded tensor %.*s (%" PRIu64 " bytes) "
+                        "is not evenly divisible by %u; refusing to mis-shard\n",
+                        (int)t->name.len, t->name.ptr ? t->name.ptr : "",
+                        t->bytes, div);
+                return -1;
+            }
+            out[entry] += t->bytes / div;
             continue;
         }
         uint64_t expert_bytes = 0;
@@ -54812,6 +54867,89 @@ static bool engine_cuda_tp_ep_requested(const ds4_engine *e) {
            g_ds4_shape.family == DS4_MODEL_FAMILY_DEEPSEEK4 &&
            DS4_N_EXPERT != 0u && (DS4_N_EXPERT & 1u) == 0u;
 #endif
+}
+
+/* ROCm TP=4 detection.
+ *
+ * The ROCm build's tensor-parallel path is a single-process multi-GPU design:
+ * one engine controls all 4 GPUs, each GPU acting as a rank.  This is
+ * distinct from the upstream CUDA TP=2 path, which uses two separate engine
+ * instances (leader/worker processes, one per GPU) coordinated over a TCP
+ * control socket.  The ROCm path uses ds4_rocm_xdev's peer-copy primitives
+ * for all inter-rank communication and requires exactly 4 GPUs.
+ *
+ * Returns true only when all of:
+ *   - ROCm build (DS4_ROCM_BUILD defined)
+ *   - cuda_tensor_parallel requested
+ *   - exactly 4 GPUs configured
+ *   - DeepSeek-V4-Flash family (the only model TP=4 is validated against)
+ *   - N_EXPERT divisible by 4 (so the routed-expert split is exact)
+ *
+ * The n_gpus == 4 check is strict: TP=4 does not scale to other GPU counts.
+ * A 2-GPU ROCm configuration falls through to the existing TP=2 CUDA-style
+ * path.  This keeps the two paths parallel rather than entangled. */
+static bool engine_rocm_tp4_requested(const ds4_engine *e) {
+#if defined(DS4_ROCM_BUILD) && !(defined(__APPLE__) && !defined(DS4_TEST_HOOKS))
+    return e && e->cuda_tensor_parallel &&
+           e->gpu_cfg.n_gpus == 4 &&
+           g_ds4_shape.family == DS4_MODEL_FAMILY_DEEPSEEK4 &&
+           DS4_N_EXPERT != 0u && (DS4_N_EXPERT % 4u) == 0u;
+#else
+    (void)e;
+    return false;
+#endif
+}
+
+/* TP=4 per-tensor shard divisor.
+ *
+ * Returns 4 for tensors that are sharded across the 4 ranks (each rank loads
+ * exactly 1/4 of the bytes), 1 for replicated tensors (each rank loads the
+ * full bytes).  Used by both the per-entry byte computation and the cache
+ * install so the two agree on what is sharded.
+ *
+ * Sharded tensors (identified per the issue-28 policy):
+ *   - Routed MoE expert weights (gate/up/down) — sharded by expert count.
+ *     Each expert is a fixed-size matrix; the 256 experts are divided into
+ *     four contiguous groups of 64.
+ *   - Attention per-head projections (q_b, output / output_a) — sharded by
+ *     head count.  The q_a / kv_a / compressor tensors are replicated
+ *     because MLA's compressed KV is a single latent, not per-head.
+ *   - Output head (vocabulary projection) — sharded by vocab row.
+ *
+ * Everything else is replicated: RMS norms, MLA compressor, shared expert,
+ * embedding, dense FFN (if applicable), and the low-rank Q/KV stages.
+ *
+ * Returns 1 (replicated) for anything not in the sharded set, including
+ * tensors from unsupported model families (the TP=4 gate above already
+ * refuses non-DeepSeek models). */
+static uint32_t engine_tp4_shard_divisor(
+        const ds4_engine *e,
+        const ds4_tensor *t,
+        int               entry)
+{
+    if (!e || !t) return 1;
+
+    /* Routed MoE expert tensors: sharded by expert count. */
+    uint64_t expert_bytes = 0;
+    if (entry >= 1 && entry <= (int)DS4_N_LAYER &&
+        engine_deepseek_routed_expert_tensor(e, t, entry, &expert_bytes)) {
+        return 4;
+    }
+
+    /* Output head (vocabulary projection): sharded by vocab row. */
+    if (entry == (int)DS4_N_LAYER + 1 && t == e->weights.output) {
+        return 4;
+    }
+
+    /* Per-head attention projections within transformer layers. */
+    if (entry >= 1 && entry <= (int)DS4_N_LAYER) {
+        const ds4_layer_weights *layer = &e->weights.layer[entry - 1];
+        if (t == layer->attn_q_b)        return 4;
+        if (t == layer->attn_output)     return 4; /* single-matrix output (GLM-style) */
+        if (t == layer->attn_output_a)   return 4; /* low-rank A stage (Flash-style) */
+    }
+
+    return 1;
 }
 
 static bool engine_cuda_tp_output_env_requested(void) {
@@ -54935,6 +55073,65 @@ static void engine_adjust_output_head_for_cuda_tp(ds4_engine *e,
                 target + half);
         e->placement[head_entry] = target;
     }
+}
+
+/* TP=4 ROCm placement: single-stage all-replicated.
+ *
+ * Unlike the pipeline-split placement (CUDA TP=2 / EP) where different
+ * layers live on different GPU pairs, TP=4 places every entry on every
+ * GPU.  The placement array records tier 0 as the canonical "home" for
+ * each entry — the actual replication to all 4 tiers happens in
+ * engine_install_per_device_caches, mirroring how CUDA TP=2's cache
+ * install replicates each layer to its partner tier.
+ *
+ * The per-entry byte counts passed in already account for sharding (see
+ * engine_compute_entry_bytes TP=4 branch: sharded tensors are reported
+ * as bytes/4, replicated as full bytes).  The placement function's only
+ * job is to verify that the per-rank footprint fits in the smallest GPU
+ * budget, since every rank holds the same set of data.
+ *
+ * Returns 0 and fills placement[0..n_entries-1] with 0 on success.
+ * Returns -1 and leaves placement untouched on any failure (null args,
+ * wrong GPU count, entry too large for smallest budget). */
+static int engine_compute_tp4_placement(
+        const size_t                *entry_bytes,
+        int                          n_entries,
+        const ds4_layer_pack_config *pcfg,
+        int                         *placement)
+{
+    if (!entry_bytes || !pcfg || !placement ||
+        n_entries != (int)DS4_N_LAYER + 2 ||
+        pcfg->n_gpus != 4) {
+        return -1;
+    }
+
+    /* Find the smallest per-tier budget; TP=4 replicates identically on
+     * every tier, so the tightest budget is the binding constraint. */
+    size_t min_budget = pcfg->gpu_budget_bytes[0];
+    for (int d = 1; d < 4; d++) {
+        if (pcfg->gpu_budget_bytes[d] < min_budget) {
+            min_budget = pcfg->gpu_budget_bytes[d];
+        }
+    }
+    if (min_budget == 0) {
+        fprintf(stderr,
+                "ds4: TP=4 placement refused: smallest GPU budget is 0\n");
+        return -1;
+    }
+
+    for (int e = 0; e < n_entries; e++) {
+        if (entry_bytes[e] > min_budget) {
+            fprintf(stderr,
+                    "ds4: TP=4 placement refused: entry %d does not fit "
+                    "smallest tier budget (need %.2f GiB, have %.2f GiB)\n",
+                    e,
+                    (double)entry_bytes[e] / 1073741824.0,
+                    (double)min_budget / 1073741824.0);
+            return -1;
+        }
+        placement[e] = 0; /* canonical home; replicated to all 4 tiers */
+    }
+    return 0;
 }
 
 static int engine_compute_cuda_ep_placement(
@@ -55094,19 +55291,30 @@ static int engine_classify_multi_tier(ds4_engine *e, const ds4_gpu_config *cfg) 
     }
 
     const bool cuda_tp_ep = engine_cuda_tp_ep_requested(e);
+    const bool rocm_tp4 = engine_rocm_tp4_requested(e);
     if (cuda_tp_ep && engine_reserve_cuda_ep_output_shards(e, &pcfg) != 0) {
         return -1;
     }
-    const int placement_rc = cuda_tp_ep
-        ? engine_compute_cuda_ep_placement(entry_bytes, DS4_N_LAYER + 2,
-                                           &pcfg, e->placement)
-        : ds4_compute_layer_placement(entry_bytes, DS4_N_LAYER + 2, &pcfg,
-                                      e->placement);
+    /* Placement selection: TP=4 ROCm uses its own all-replicated placement
+     * that assigns every entry to tier 0 as a canonical home (replication
+     * to all 4 tiers happens in cache install).  The existing CUDA EP
+     * placement (pipeline-split, 2 pipeline stages) and plain layer-pack
+     * placement cover the TP=2 and non-TP cases respectively. */
+    const int placement_rc = rocm_tp4
+        ? engine_compute_tp4_placement(entry_bytes, DS4_N_LAYER + 2,
+                                       &pcfg, e->placement)
+        : (cuda_tp_ep
+            ? engine_compute_cuda_ep_placement(entry_bytes, DS4_N_LAYER + 2,
+                                               &pcfg, e->placement)
+            : ds4_compute_layer_placement(entry_bytes, DS4_N_LAYER + 2, &pcfg,
+                                          e->placement));
     if (placement_rc != 0) {
         return -1;
     }
     e->n_placement_entries = DS4_N_LAYER + 2;
-    engine_adjust_output_head_for_cuda_tp(e, entry_bytes);
+    if (!rocm_tp4) {
+        engine_adjust_output_head_for_cuda_tp(e, entry_bytes);
+    }
 
     int first_tier = e->placement[0];
     int multi_tier = 0;
@@ -55118,6 +55326,13 @@ static int engine_classify_multi_tier(ds4_engine *e, const ds4_gpu_config *cfg) 
             if (e->placement[i] == DS4_LAYER_PACK_CPU) { multi_tier = 1; break; }
         }
     }
+    /* TP=4 ROCm places every entry on tier 0 as a canonical home but
+     * replicates to all 4 tiers at cache-install time.  The placement
+     * array itself is homogeneous (all zeros), so the above detection
+     * would incorrectly classify this as single-tier.  Force multi_tier=1
+     * so engine_install_gpu_placement and the per-device cache install
+     * actually run — without them the other 3 GPUs get nothing loaded. */
+    if (rocm_tp4) multi_tier = 1;
     e->multi_tier = multi_tier;
     return 0;
 }
@@ -55181,6 +55396,7 @@ static int engine_install_per_device_caches(ds4_engine *e) {
     int rc = -1;
     const bool cuda_tp_decode = engine_cuda_tp_decode_requested(e);
     const bool cuda_tp_ep = engine_cuda_tp_ep_requested(e);
+    const bool rocm_tp4 = engine_rocm_tp4_requested(e);
     const int tp_half = cuda_tp_decode ? e->gpu_cfg.n_gpus / 2 : 0;
     const bool cuda_tp_output =
         cuda_tp_decode && metal_graph_cuda_tp_output_requested();
@@ -55192,6 +55408,47 @@ static int engine_install_per_device_caches(ds4_engine *e) {
                                                     e->gpu_cfg.n_gpus,
                                                     output_tp_tiers)
         : 0;
+    if (rocm_tp4) {
+        /* TP=4 ROCm: every tensor is replicated to all 4 tiers.  Sharded
+         * tensors (per engine_tp4_shard_divisor) contribute only their
+         * rank's 1/4 slice; replicated tensors contribute the full bytes.
+         * The rank's slice is always a contiguous byte range starting at
+         * abs_offset + rank * (bytes / 4), which lines up with the expert,
+         * head, and vocab-row partitioning in the sharding policy (all of
+         * which are contiguous in the GGUF layout). */
+        fprintf(stderr,
+                "ds4: ROCm TP=4 placement: all 4 tiers hold every layer, "
+                "sharded tensors split 4-way per rank\n");
+        for (uint64_t i = 0; i < e->model.n_tensors; i++) {
+            const ds4_tensor *t = &e->model.tensors[i];
+            if (t->bytes == 0) continue;
+            int entry = tensor_to_entry(t, DS4_N_LAYER);
+            if (entry < 0 || entry >= e->n_placement_entries) entry = 0;
+            const uint32_t div = engine_tp4_shard_divisor(e, t, entry);
+            if (t->bytes % div != 0) {
+                fprintf(stderr,
+                        "ds4: TP=4 cache install: tensor %.*s (%" PRIu64
+                        " bytes) not divisible by shard divisor %u\n",
+                        (int)t->name.len, t->name.ptr ? t->name.ptr : "",
+                        t->bytes, div);
+                goto cleanup;
+            }
+            const uint64_t shard_bytes = t->bytes / div;
+            for (int tier = 0; tier < 4; tier++) {
+                const uint64_t shard_offset =
+                    t->abs_offset + (uint64_t)tier * shard_bytes;
+                const int phys = g_gpu[tier].device_id;
+                if (engine_append_device_cache_span(per_dev_ranges, per_dev_n,
+                                                    per_dev_cap,
+                                                    tier, phys,
+                                                    shard_offset,
+                                                    shard_bytes) != 0) {
+                    goto cleanup;
+                }
+            }
+        }
+        goto install;
+    }
     if (cuda_tp_ep && !metal_graph_cuda_tp_moe_requested()) {
         fprintf(stderr,
                 "ds4: CUDA tensor parallelism requires routed MoE TP, but it is disabled\n");
@@ -55320,6 +55577,7 @@ static int engine_install_per_device_caches(ds4_engine *e) {
         }
     }
 
+install:
     for (int d = 0; d < e->gpu_cfg.n_gpus; d++) {
         if (per_dev_n[d] == 0) continue;
         const int physical_device = g_gpu[d].device_id;
@@ -55429,11 +55687,22 @@ static int engine_install_dspark_support_cache(ds4_engine *e) {
     int exec_tier = e->placement[DS4_N_LAYER + 1];
     if (exec_tier < 0 || exec_tier >= e->gpu_cfg.n_gpus) exec_tier = 0;
     const bool tp_decode = e->cuda_tensor_parallel;
+    const bool rocm_tp4 = engine_rocm_tp4_requested(e);
     const int tp_half = e->gpu_cfg.n_gpus / 2;
-    if (tp_decode && e->gpu_cfg.n_gpus >= 2 && exec_tier < tp_half) {
+    /* TP=4 ROCm has no home/partner distinction: every tier holds every
+     * layer with the same sharded footprint, so just pick the tier with
+     * the most free VRAM.  The TP=2 path below (which pushes exec_tier
+     * into the upper-half partner tiers) would bias toward tier 2 on a
+     * 4-GPU run, leaving tier 0/1/3 under-utilized for support weights. */
+    if (rocm_tp4) {
+        uint64_t best_free = ds4_gpu_tier_free_vram(exec_tier);
+        for (int t = 0; t < e->gpu_cfg.n_gpus; t++) {
+            const uint64_t f = ds4_gpu_tier_free_vram(t);
+            if (f > best_free) { best_free = f; exec_tier = t; }
+        }
+    } else if (tp_decode && e->gpu_cfg.n_gpus >= 2 && exec_tier < tp_half) {
         exec_tier += tp_half;
-    }
-    if (tp_decode && e->gpu_cfg.n_gpus >= 2) {
+    } else if (tp_decode && e->gpu_cfg.n_gpus >= 2) {
         /* Prefer the partner tier with the most free VRAM so the support
          * weights stay local to the executor. */
         uint64_t best_free = ds4_gpu_tier_free_vram(exec_tier);
@@ -56173,10 +56442,22 @@ static int ds4_engine_open_internal(ds4_engine **out,
      * reference this ROCm-only symbol; see ds4_rocm_xdev.h for the
      * implementation. Must run before engine_classify_multi_tier, which
      * picks the TP-sharded vs. plain layer-split placement based on
-     * e->cuda_tensor_parallel. */
+     * e->cuda_tensor_parallel.
+     *
+     * For TP=4 ROCm, the transport model is all-to-all (any rank may
+     * all-reduce with any other rank via ds4_rocm_xdev_allreduce_f32).
+     * The half-pair probe used for TP=2 only checks 2 of the 12 ordered
+     * pairs, which would miss failures in the other 10.  Instead, TP=4
+     * trusts the global mesh init (ds4_rocm_xdev_init_global_mesh) that
+     * runs during engine_install_gpu_placement -- it establishes peer
+     * access in both directions for every pair, and falls back to the
+     * host-staging bounce buffer (proven correct and ~13.5 GB/s) when
+     * direct peer access is unavailable.  The all-reduce primitive has
+     * its own standalone tests (tests/test_rocm_xdev.cu), so this probe
+     * is skipped for TP=4. */
     extern bool ds4_rocm_xdev_tp_transport_probe(const int *device_ids,
                                                   int n_devices, int half);
-    if (e->cuda_tensor_parallel && gpu_cfg) {
+    if (e->cuda_tensor_parallel && gpu_cfg && gpu_cfg->n_gpus != 4) {
         const int half = gpu_cfg->n_gpus / 2;
         if (!ds4_rocm_xdev_tp_transport_probe(gpu_cfg->device_indices,
                                                gpu_cfg->n_gpus, half)) {
