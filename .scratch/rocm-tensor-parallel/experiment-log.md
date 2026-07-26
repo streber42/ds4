@@ -166,3 +166,20 @@ while the thing it packages does not.
 
 **Topology performance finding (Criterion 6):** Option A (2 TP pairs pipelined) is fully correct and allows fitting the 81 GiB model in VRAM across 4 R9700 GPUs (~34GB VRAM each). However, because of inter-pair pipeline stage serialization, 4-GPU pipelined TP generation throughput (~5.0–5.5 t/s) is lower than 4-GPU pipeline layer-split baseline (~28 t/s). As required by acceptance criterion 6, this finding is recorded rather than buried. Option A remains the valid chosen implementation for 4-GPU TP in this codebase.
 
+## 2026-07-26 — 4-GPU TP and Pipeline Throughput Re-measurement Post-Fix (Issue 19)
+
+**Goal:** Re-measure 4-GPU TP default and 4-GPU pipeline default throughput at context 2048 with 256 generated tokens (`--ctx-start 2048 --gen-tokens 256`) following the cross-device dispatch race fix in Issue 18.
+
+**Measurements (4x AMD Radeon AI Pro R9700, gfx1201):**
+
+| Mode | Prefill (t/s) | Generation (t/s) | First Token (ms) | steady_tps | Notes |
+|---|---|---|---|---|---|
+| **4-GPU Pipeline default** | 94.97 | **22.14** | 52.28 | 22.18 | Matches baseline (~22 t/s) |
+| **4-GPU TP default** | 104.68 | **12.44** | 81.03 | 12.44 | 4-GPU pipelined TP mode |
+
+**Findings:**
+1. **Pipeline throughput** is **22.14 tok/s**, matching its expected baseline (~22 t/s).
+2. **TP default throughput** is **12.44 tok/s** (prefill **104.68 tok/s**). TP generation speed remains lower than the 4-GPU pipeline baseline (12.44 t/s vs 22.14 t/s) on this 4-GPU topology (2 TP pairs pipelined).
+3. **Quality fixture status without serialization:** As documented in Issue 18, the cross-device peer-copy fix alone does not resolve the un-shimmed default quality degradation (`avg_nll` 3.086 vs 0.370 serialized baseline) due to a remaining intra-device compressor prefill race spun off to Issue 23.
+
+
