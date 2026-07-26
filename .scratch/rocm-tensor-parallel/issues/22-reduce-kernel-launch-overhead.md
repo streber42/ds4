@@ -1,6 +1,6 @@
 # 22 — Reduce kernel launch overhead
 
-Status: ready-for-human
+Status: ready-for-agent
 
 **What to build:** Profile data shows each decode token fires ~2000 kernel dispatches across 4 GPUs (529 per GPU). Many of these are micro-kernels (5-15μs) where the HIP launch overhead (~5-10μs per dispatch) is comparable to the kernel execution time. Opportunities include fusing sequences like RMS norm + attention QKV projection, or quantize + MoE gate sequence.
 
