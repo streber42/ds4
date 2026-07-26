@@ -1,6 +1,6 @@
 # 18 — Fix cross-device dispatch race (no more `AMD_SERIALIZE_KERNEL=3`)
 
-Status: ready-for-human
+Status: closed
 
 **What to build:** TP and pipeline produce correct multi-GPU output without `AMD_SERIALIZE_KERNEL=3` or `HIP_LAUNCH_BLOCKING=1`. The quality fixture scores match the serialized baseline on a default un-shimmed run.
 
@@ -104,3 +104,15 @@ Quality fixture repro: `make ROCM_ARCH=gfx1201 rocm-quality -j8` then `env -u
 AMD_SERIALIZE_KERNEL -u HIP_LAUNCH_BLOCKING ./gguf-tools/quality-testing/score_official $M
 gguf-tools/quality-testing/data/flash/manifest.tsv /tmp/out.tsv 4096 --gpu-devices 0,1,2,3
 [--cuda-tensor-parallel]`.
+
+**2026-07-26 — Closed as scoped, by human decision.** This issue's specific diagnosis
+(cross-device peer-copy dispatch race) and its fix are correct and verified — AC1 is met and
+stays checked. AC2-4 (quality fixture matching serialized baseline, throughput, no regression)
+are not met and are out of scope for this issue: the measurement above shows they depend on a
+separate, still-unlocated same-device race, not on anything this issue's fix touches. Rather
+than keep 18 open chasing a bug it was never actually about, the remaining work is spun off to
+`.scratch/rocm-tensor-parallel/issues/23-fix-same-device-compressor-prefill-race.md`, which
+picks up directly from issue 10 session 3's localization inside
+`ds4_gpu_compressor_prefill_tensor`. Issue 19's re-measurement should be understood as blocked
+on issue 23, not on this issue, for the quality/throughput criteria specifically (the xdev fix
+itself is already in and doesn't need re-verification).
