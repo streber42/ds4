@@ -1,6 +1,6 @@
 # 26 — TP=4 sharding policy
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -23,13 +23,13 @@ This is a pure function with no GPU code and no model dependency. It can be test
 
 ## Acceptance criteria
 
-- [ ] `ds4_tp_compute_shard_config()` implemented (or equivalent function in the sharding module)
-- [ ] Complete partition: union of all rank shards covers every head/expert/vocab row exactly once
-- [ ] No gaps, no overlaps: verified programmatically for tp_world=4
-- [ ] Even division verified: 128/4=32 heads, 256/4=64 experts per rank
-- [ ] Degenerate case: tp_world=1 → single rank owns everything
-- [ ] Boundary case: tp_world does not divide evenly → returns error (not silent mis-shard)
-- [ ] Unit test added and passing (existing test scaffold or new standalone test)
+- [x] `ds4_tp_compute_shard_config()` implemented (or equivalent function in the sharding module)
+- [x] Complete partition: union of all rank shards covers every head/expert/vocab row exactly once
+- [x] No gaps, no overlaps: verified programmatically for tp_world=4
+- [x] Even division verified: 128/4=32 heads, 256/4=64 experts per rank
+- [x] Degenerate case: tp_world=1 → single rank owns everything
+- [x] Boundary case: tp_world does not divide evenly → returns error (not silent mis-shard)
+- [x] Unit test added and passing (existing test scaffold or new standalone test)
 
 ## Blocked by
 

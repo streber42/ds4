@@ -15,6 +15,15 @@
  *   6. validation: ds4_tp_shard_valid rejects invalid configurations.
  *   7. two-rank exact: the two-rank (Flash) configuration matches the
  *      constants used by the engine (n_expert=256, n_head=64, n_vocab=129280).
+ *  10. monotonic ownership: higher ranks always start higher.
+ *  11. TP=4 aggregate config (Flash shape): ds4_tp_compute_shard_config()
+ *      returns 32 heads, 64 experts, 32320 vocab, 1024 embd per rank and
+ *      produces complete partitions across all four dimensions.
+ *  12. TP=4 aggregate config (Pro shape): 32 heads, 96 experts, 32320 vocab,
+ *      1792 embd per rank.
+ *  13. TP=1 degenerate config: single rank owns every dimension fully.
+ *  14. TP=4 strict-even division: every uneven-division variant returns -1.
+ *  15. TP=4 invalid inputs: rank/world==0/rank>=world/zero dims all rejected.
  */
 
 #include "../ds4_tp_shard.h"
@@ -350,6 +359,195 @@ static void test_monotonic_ownership(void) {
     }
 }
 
+/* ── Test 11: TP=4 aggregate config — Flash-shape model ──
+ *
+ * Exercises ds4_tp_compute_shard_config() with the shape the issue
+ * specifies (n_head=128, n_expert=256, n_vocab=129280, n_embd=4096).
+ * Each rank should own 32 heads, 64 experts, 32320 vocab rows, and
+ * 1024 embd columns.  Also verifies complete partition for all four
+ * dimensions, including the new embd dimension. */
+static void test_tp4_shard_config_flash(void) {
+    fprintf(stderr, "RUN: test_tp4_shard_config_flash\n");
+
+    const uint32_t n_head   = 128;
+    const uint32_t n_expert = 256;
+    const uint32_t n_vocab  = 129280;
+    const uint32_t n_embd   = 4096;
+    const uint32_t nranks   = 4;
+
+    /* Expected per-rank counts (all even). */
+    const uint32_t exp_heads   = 32;   /* 128 / 4 */
+    const uint32_t exp_experts = 64;   /* 256 / 4 */
+    const uint32_t exp_vocab   = 32320; /* 129280 / 4 */
+    const uint32_t exp_embd    = 1024; /* 4096 / 4 */
+
+    for (uint32_t r = 0; r < nranks; r++) {
+        ds4_tp_shard_config cfg;
+        int rc = ds4_tp_compute_shard_config(
+            nranks, r, n_head, n_expert, n_vocab, n_embd, &cfg);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u config ok", r);
+        CHECK(rc == 0, msg);
+
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u heads count", r);
+        CHECK(cfg.heads.count == exp_heads, msg);
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u heads start", r);
+        CHECK(cfg.heads.start == r * exp_heads, msg);
+
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u experts count", r);
+        CHECK(cfg.experts.count == exp_experts, msg);
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u experts start", r);
+        CHECK(cfg.experts.start == r * exp_experts, msg);
+
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u vocab count", r);
+        CHECK(cfg.vocab.count == exp_vocab, msg);
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u vocab start", r);
+        CHECK(cfg.vocab.start == r * exp_vocab, msg);
+
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u embd count", r);
+        CHECK(cfg.embd.count == exp_embd, msg);
+        snprintf(msg, sizeof(msg), "flash tp=4: rank %u embd start", r);
+        CHECK(cfg.embd.start == r * exp_embd, msg);
+    }
+
+    /* Complete partition for every dimension including embd. */
+    check_complete_partition(nranks, n_head,   ds4_tp_shard_heads,     "heads(tp=4 flash)");
+    check_complete_partition(nranks, n_expert, ds4_tp_shard_experts,   "experts(tp=4 flash)");
+    check_complete_partition(nranks, n_vocab,  ds4_tp_shard_vocab_rows, "vocab(tp=4 flash)");
+    check_complete_partition(nranks, n_embd,   ds4_tp_shard_embd_cols, "embd(tp=4 flash)");
+}
+
+/* ── Test 12: TP=4 aggregate config — Pro-shape model ── */
+static void test_tp4_shard_config_pro(void) {
+    fprintf(stderr, "RUN: test_tp4_shard_config_pro\n");
+
+    const uint32_t n_head   = 128;
+    const uint32_t n_expert = 384;
+    const uint32_t n_vocab  = 129280;
+    const uint32_t n_embd   = 7168;
+    const uint32_t nranks   = 4;
+
+    const uint32_t exp_heads   = 32;
+    const uint32_t exp_experts = 96;   /* 384 / 4 */
+    const uint32_t exp_vocab   = 32320;
+    const uint32_t exp_embd    = 1792; /* 7168 / 4 */
+
+    for (uint32_t r = 0; r < nranks; r++) {
+        ds4_tp_shard_config cfg;
+        int rc = ds4_tp_compute_shard_config(
+            nranks, r, n_head, n_expert, n_vocab, n_embd, &cfg);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "pro tp=4: rank %u config ok", r);
+        CHECK(rc == 0, msg);
+        snprintf(msg, sizeof(msg), "pro tp=4: rank %u experts=%u expected=%u",
+                 r, cfg.experts.count, exp_experts);
+        CHECK(cfg.experts.count == exp_experts, msg);
+        snprintf(msg, sizeof(msg), "pro tp=4: rank %u heads=%u expected=%u",
+                 r, cfg.heads.count, exp_heads);
+        CHECK(cfg.heads.count == exp_heads, msg);
+        snprintf(msg, sizeof(msg), "pro tp=4: rank %u vocab=%u expected=%u",
+                 r, cfg.vocab.count, exp_vocab);
+        CHECK(cfg.vocab.count == exp_vocab, msg);
+        snprintf(msg, sizeof(msg), "pro tp=4: rank %u embd=%u expected=%u",
+                 r, cfg.embd.count, exp_embd);
+        CHECK(cfg.embd.count == exp_embd, msg);
+    }
+}
+
+/* ── Test 13: TP=1 degenerate — single rank owns everything ──
+ *
+ * The issue explicitly calls out tp_world==1 as the degenerate case:
+ * every dimension must have start==0 and count==N. */
+static void test_tp1_shard_config_degenerate(void) {
+    fprintf(stderr, "RUN: test_tp1_shard_config_degenerate\n");
+
+    const uint32_t n_head   = 128;
+    const uint32_t n_expert = 256;
+    const uint32_t n_vocab  = 129280;
+    const uint32_t n_embd   = 4096;
+
+    ds4_tp_shard_config cfg;
+    int rc = ds4_tp_compute_shard_config(
+        1, 0, n_head, n_expert, n_vocab, n_embd, &cfg);
+    CHECK(rc == 0, "tp=1: config ok");
+
+    CHECK(cfg.heads.start == 0 && cfg.heads.count == n_head,
+          "tp=1: full head ownership");
+    CHECK(cfg.experts.start == 0 && cfg.experts.count == n_expert,
+          "tp=1: full expert ownership");
+    CHECK(cfg.vocab.start == 0 && cfg.vocab.count == n_vocab,
+          "tp=1: full vocab ownership");
+    CHECK(cfg.embd.start == 0 && cfg.embd.count == n_embd,
+          "tp=1: full embd ownership");
+}
+
+/* ── Test 14: TP=4 strict-even division rejects uneven dimensions ──
+ *
+ * The issue's boundary case: when any dimension does not divide evenly
+ * by tp_world, ds4_tp_compute_shard_config() must return -1 (not
+ * silently mis-shard).  Tests each of the four dimensions independently,
+ * plus the NULL-out sentinel. */
+static void test_tp4_shard_config_uneven_division_error(void) {
+    fprintf(stderr, "RUN: test_tp4_shard_config_uneven_division_error\n");
+
+    ds4_tp_shard_config cfg;
+
+    /* n_head not divisible by 4 (129 / 4 = 32 remainder 1). */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 129, 256, 129280, 4096, &cfg) == -1,
+          "tp=4: n_head=129 rejected (not divisible by 4)");
+
+    /* n_expert not divisible by 4 (257 / 4 = 64 remainder 1). */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 257, 129280, 4096, &cfg) == -1,
+          "tp=4: n_expert=257 rejected (not divisible by 4)");
+
+    /* n_vocab not divisible by 4 (129281 / 4 = 32320 remainder 1). */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 256, 129281, 4096, &cfg) == -1,
+          "tp=4: n_vocab=129281 rejected (not divisible by 4)");
+
+    /* n_embd not divisible by 4 (4097 / 4 = 1024 remainder 1). */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 256, 129280, 4097, &cfg) == -1,
+          "tp=4: n_embd=4097 rejected (not divisible by 4)");
+
+    /* NULL out pointer. */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 256, 129280, 4096, NULL) == -1,
+          "tp=4: NULL out pointer rejected");
+}
+
+/* ── Test 15: TP=4 invalid rank / world combinations ── */
+static void test_tp4_shard_config_invalid_inputs(void) {
+    fprintf(stderr, "RUN: test_tp4_shard_config_invalid_inputs\n");
+
+    ds4_tp_shard_config cfg;
+
+    /* tp_world == 0. */
+    CHECK(ds4_tp_compute_shard_config(0, 0, 128, 256, 129280, 4096, &cfg) == -1,
+          "tp=4: world=0 rejected");
+
+    /* tp_rank == tp_world (off the end). */
+    CHECK(ds4_tp_compute_shard_config(4, 4, 128, 256, 129280, 4096, &cfg) == -1,
+          "tp=4: rank==world rejected");
+
+    /* tp_rank > tp_world. */
+    CHECK(ds4_tp_compute_shard_config(4, 5, 128, 256, 129280, 4096, &cfg) == -1,
+          "tp=4: rank>world rejected");
+
+    /* n_head == 0. */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 0, 256, 129280, 4096, &cfg) == -1,
+          "tp=4: n_head=0 rejected");
+
+    /* n_expert == 0. */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 0, 129280, 4096, &cfg) == -1,
+          "tp=4: n_expert=0 rejected");
+
+    /* n_vocab == 0. */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 256, 0, 4096, &cfg) == -1,
+          "tp=4: n_vocab=0 rejected");
+
+    /* n_embd == 0. */
+    CHECK(ds4_tp_compute_shard_config(4, 0, 128, 256, 129280, 0, &cfg) == -1,
+          "tp=4: n_embd=0 rejected");
+}
+
 int main(void) {
     test_two_rank_partition_flash();
     test_uneven_expert_division();
@@ -361,6 +559,11 @@ int main(void) {
     test_two_rank_head_matches_engine_convention();
     test_two_rank_vocab_matches_engine_convention();
     test_monotonic_ownership();
+    test_tp4_shard_config_flash();
+    test_tp4_shard_config_pro();
+    test_tp1_shard_config_degenerate();
+    test_tp4_shard_config_uneven_division_error();
+    test_tp4_shard_config_invalid_inputs();
 
     fprintf(stderr, "\ntest_tp_sharding: %d/%d checks passed (%d failed)\n",
             g_checks - g_failures, g_checks, g_failures);
