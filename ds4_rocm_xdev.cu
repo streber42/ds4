@@ -339,6 +339,146 @@ extern "C" int ds4_rocm_xdev_wait_producer(int dst_dev, int src_dev) {
     return hipStreamWaitEvent(0, producer_ready, 0) == hipSuccess;
 }
 
+/* All-reduce staging cache. A single lazy-grown device buffer per
+ * participating device, so an N-way all-reduce uses one allocation instead
+ * of N. The buffer is keyed on (device, capacity); when a call needs more
+ * capacity than the cached buffer holds, the old buffer is freed and a new,
+ * larger one is installed. Protected by g_xdev_mutex (shared with the mesh
+ * and host-staging buffer). */
+#define DS4_ROCM_XDEV_ALLREDUCE_MAX_STAGES 16
+static struct {
+    int device;
+    float *buf;
+    size_t cap; /* float count */
+} g_xdev_allreduce_stage[DS4_ROCM_XDEV_ALLREDUCE_MAX_STAGES];
+static int g_xdev_allreduce_stage_count = 0;
+
+static float *rocm_xdev_allreduce_get_stage(int device, size_t count) {
+    pthread_mutex_lock(&g_xdev_mutex);
+    /* Find an existing stage for this device. */
+    for (int i = 0; i < g_xdev_allreduce_stage_count; i++) {
+        if (g_xdev_allreduce_stage[i].device == device) {
+            if (g_xdev_allreduce_stage[i].cap >= count) {
+                float *b = g_xdev_allreduce_stage[i].buf;
+                pthread_mutex_unlock(&g_xdev_mutex);
+                return b;
+            }
+            /* Grow: free the too-small buffer and fall through to realloc. */
+            (void)hipSetDevice(device);
+            (void)hipFree(g_xdev_allreduce_stage[i].buf);
+            g_xdev_allreduce_stage[i].buf = NULL;
+            g_xdev_allreduce_stage[i].cap = 0;
+            float *nb = NULL;
+            (void)hipSetDevice(device);
+            if (hipMalloc(&nb, count * sizeof(float)) != hipSuccess) {
+                pthread_mutex_unlock(&g_xdev_mutex);
+                return NULL;
+            }
+            g_xdev_allreduce_stage[i].buf = nb;
+            g_xdev_allreduce_stage[i].cap = count;
+            pthread_mutex_unlock(&g_xdev_mutex);
+            return nb;
+        }
+    }
+    /* No existing stage for this device -- add one. */
+    if (g_xdev_allreduce_stage_count >= DS4_ROCM_XDEV_ALLREDUCE_MAX_STAGES) {
+        pthread_mutex_unlock(&g_xdev_mutex);
+        return NULL;
+    }
+    int idx = g_xdev_allreduce_stage_count++;
+    g_xdev_allreduce_stage[idx].device = device;
+    g_xdev_allreduce_stage[idx].buf = NULL;
+    g_xdev_allreduce_stage[idx].cap = 0;
+    (void)hipSetDevice(device);
+    float *nb = NULL;
+    if (hipMalloc(&nb, count * sizeof(float)) != hipSuccess) {
+        g_xdev_allreduce_stage_count--;
+        pthread_mutex_unlock(&g_xdev_mutex);
+        return NULL;
+    }
+    g_xdev_allreduce_stage[idx].buf = nb;
+    g_xdev_allreduce_stage[idx].cap = count;
+    pthread_mutex_unlock(&g_xdev_mutex);
+    return nb;
+}
+
+/* Zero kernel used by all-reduce to initialize the result buffer. */
+__global__ static void rocm_xdev_zero_f32_kernel(float *dst, size_t count) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) {
+        dst[idx] = 0.0f;
+    }
+}
+
+extern "C" int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
+                                            int my_dev, float *result_ptr,
+                                            const float *my_partial,
+                                            const int *peer_devs,
+                                            const float *const *peer_partials,
+                                            int n_peers,
+                                            size_t count, hipStream_t stream) {
+    if (!result_ptr || !my_partial || count == 0) return 1;
+    if (n_peers < 0) return 0;
+    if (n_peers > 0 && (!peer_devs || !peer_partials)) return 0;
+
+    /* Result = 0, then accumulate every contribution (local + peers) into it.
+     * The zero is required because accumulate_f32 adds into the destination;
+     * without zeroing, leftover bits from a previous call would corrupt the
+     * sum. */
+    (void)hipSetDevice(my_dev);
+    int threads = 256;
+    int blocks = (int)((count + threads - 1) / threads);
+    rocm_xdev_zero_f32_kernel<<<blocks, threads, 0, stream>>>(result_ptr, count);
+    if (hipGetLastError() != hipSuccess) return 0;
+
+    /* Local partial: same-device accumulate avoids any copy. */
+    {
+        int t = 256;
+        int b = (int)((count + t - 1) / t);
+        rocm_xdev_accumulate_f32_kernel<<<b, t, 0, stream>>>(result_ptr, my_partial, count);
+        if (hipGetLastError() != hipSuccess) return 0;
+    }
+
+    if (n_peers == 0) {
+        if (!stream) (void)hipDeviceSynchronize();
+        return 1;
+    }
+
+    /* One cached staging buffer on my_dev for peer partials -- avoids N
+     * malloc/free cycles per collective call. The buffer grows on demand
+     * and persists across calls targeting the same device. */
+    float *stage = rocm_xdev_allreduce_get_stage(my_dev, count);
+    if (!stage) return 0;
+
+    for (int p = 0; p < n_peers; p++) {
+        int peer_dev = peer_devs[p];
+        const float *peer_buf = peer_partials[p];
+        if (!peer_buf) return 0;
+
+        /* Ordering: peer's compute kernel wrote peer_buf on peer_dev's default
+         * stream; the copy below is enqueued on my_dev's stream (or the
+         * supplied one). Without the explicit happens-before edge the copy
+         * can race ahead and read stale / partial data -- the same hazard
+         * ds4_rocm_xdev_copy's direct-peer path already guards against. */
+        if (!ds4_rocm_xdev_wait_producer(my_dev, peer_dev)) return 0;
+
+        size_t bytes = count * sizeof(float);
+        if (!ds4_rocm_xdev_copy(mesh, my_dev, stage, peer_dev, (void *)peer_buf, bytes, stream)) {
+            return 0;
+        }
+
+        /* Accumulate the staged peer partial into the running result. */
+        (void)hipSetDevice(my_dev);
+        int t = 256;
+        int b = (int)((count + t - 1) / t);
+        rocm_xdev_accumulate_f32_kernel<<<b, t, 0, stream>>>(result_ptr, stage, count);
+        if (hipGetLastError() != hipSuccess) return 0;
+    }
+
+    if (!stream) (void)hipDeviceSynchronize();
+    return 1;
+}
+
 extern "C" int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices) {
     if (g_global_mesh_initialized) {
         ds4_rocm_xdev_destroy_mesh(&g_global_mesh);

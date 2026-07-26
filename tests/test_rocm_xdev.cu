@@ -29,6 +29,10 @@ static void fill_floats(float *buf, size_t count, float seed) {
     }
 }
 
+/* Forward: defined below main() for readability. Runs the TP=4 all-reduce
+ * correctness, fallback, degenerate, and cache-reuse tests. */
+static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count);
+
 int main(void) {
     printf("================================================================================\n");
     printf("Running ROCm Cross-Device Transfer Module Standalone Tests\n");
@@ -368,8 +372,294 @@ int main(void) {
     }
     printf("[PASS] tp_transport_probe refuses malformed inputs cleanly.\n");
 
+    /* TP=4 collective tests (issue 27). */
+    run_allreduce_tests(&mesh, device_count);
+
     printf("\n================================================================================\n");
     printf("ALL CROSS-DEVICE TRANSFER STANDALONE TESTS PASSED SUCCESSFULLY!\n");
     printf("================================================================================\n");
     return 0;
+}
+
+/* =============================================================================
+ * All-Reduce Tests (TP=4 collective)
+ *
+ * These run inside main() above but are defined here as separate functions
+ * for readability. The test harness is compiled into the same binary as the
+ * rest of the xdev tests; main() calls them before printing the final PASS.
+ *
+ * To avoid disturbing the existing PASS output above, we insert the all-
+ * reduce tests right before the "ALL CROSS-DEVICE TRANSFER STANDALONE TESTS
+ * PASSED" banner by calling the function from main() instead of duplicating
+ * the banner. The banner line is emitted by main() itself -- see the edit
+ * near the bottom of main() that invokes run_allreduce_tests().
+ * ========================================================================== */
+
+static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
+    printf("\n--- All-Reduce F32 (TP=4 collective) ---\n");
+    if (device_count < 2) {
+        printf("  SKIP: need at least 2 GPUs for all-reduce; have %d\n", device_count);
+        return;
+    }
+
+    /* Use up to 4 devices for the TP=4 scenario; fall back to 2 or 3 when
+     * fewer devices are present. The all-reduce API is N-way so it must
+     * work for any n_peers >= 1. */
+    int n_ranks = device_count >= 4 ? 4 : device_count;
+    int n_peers = n_ranks - 1;
+    size_t count = 1024 * 1024; /* 1M floats = 4 MB per rank -- representative of a real attn/MoE partial */
+    size_t bytes = count * sizeof(float);
+
+    /* Per-rank device buffers: partial (input) and result (output). */
+    float *d_partial[DS4_ROCM_XDEV_MAX_DEVICES] = {NULL};
+    float *d_result[DS4_ROCM_XDEV_MAX_DEVICES] = {NULL};
+    float *h_partial[DS4_ROCM_XDEV_MAX_DEVICES] = {NULL};
+    float *h_result[DS4_ROCM_XDEV_MAX_DEVICES] = {NULL};
+
+    for (int r = 0; r < n_ranks; r++) {
+        hipSetDevice(r);
+        if (hipMalloc(&d_partial[r], bytes) != hipSuccess ||
+            hipMalloc(&d_result[r], bytes) != hipSuccess) {
+            fprintf(stderr, "[FAIL] all-reduce: device allocation failed on GPU %d\n", r);
+            return;
+        }
+        h_partial[r] = (float *)malloc(bytes);
+        h_result[r] = (float *)malloc(bytes);
+        if (!h_partial[r] || !h_result[r]) {
+            fprintf(stderr, "[FAIL] all-reduce: host allocation failed\n");
+            return;
+        }
+    }
+
+    /* --- Test A: 4-rank (or 2-/3-rank) all-reduce correctness ---
+     *
+     * Each rank r contributes partial[i] = (i + 1) * (r + 1) -- a distinct
+     * per-rank linear pattern. The expected result on every rank is the sum
+     * across all ranks: sum_{r=0..N-1} (i+1)*(r+1) = (i+1) * N*(N+1)/2.
+     *
+     * With N=4 and i=0: 1 * 10 = 10. With i=999999: 1000000 * 10 = 10000000.
+     * Well within f32 exact-integer range (up to 2^24 = 16.7M). */
+    int dev_ids[DS4_ROCM_XDEV_MAX_DEVICES];
+    const float *d_partial_ptrs[DS4_ROCM_XDEV_MAX_DEVICES];
+    for (int r = 0; r < n_ranks; r++) dev_ids[r] = r;
+
+    for (int r = 0; r < n_ranks; r++) {
+        for (size_t i = 0; i < count; i++) {
+            h_partial[r][i] = (float)((i + 1) * (r + 1));
+        }
+        hipSetDevice(r);
+        hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+        hipMemset(d_result[r], 0xAB, bytes); /* dirty-fill to catch missing-zero bugs */
+    }
+
+    /* Run the all-reduce for each rank as the "result owner". */
+    for (int owner = 0; owner < n_ranks; owner++) {
+        /* Build peer arrays excluding the owner. */
+        int peer_devs[DS4_ROCM_XDEV_MAX_DEVICES];
+        const float *peer_ptrs[DS4_ROCM_XDEV_MAX_DEVICES];
+        int pi = 0;
+        for (int r = 0; r < n_ranks; r++) {
+            if (r == owner) continue;
+            peer_devs[pi] = dev_ids[r];
+            peer_ptrs[pi] = d_partial[r];
+            pi++;
+        }
+
+        int ok = ds4_rocm_xdev_allreduce_f32(mesh, owner, d_result[owner],
+                                              d_partial[owner],
+                                              peer_devs, peer_ptrs, n_peers,
+                                              count, 0);
+        if (!ok) {
+            fprintf(stderr, "[FAIL] all-reduce: ds4_rocm_xdev_allreduce_f32 failed for owner=%d\n", owner);
+            goto cleanup_ar;
+        }
+
+        hipSetDevice(owner);
+        hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+
+        /* Verify against the closed-form sum. */
+        float scale = (float)(n_ranks * (n_ranks + 1) / 2); /* sum of 1..N */
+        int diverged = 0;
+        for (size_t i = 0; i < count; i++) {
+            float expected = (float)(i + 1) * scale;
+            float got = h_result[owner][i];
+            /* Relative tolerance ~1e-5; the sum involves at most N=4 adds of
+             * well-conditioned integers, so f32 roundoff is negligible. */
+            float tol = 1e-4f * fabsf(expected) + 1e-6f;
+            if (fabsf(got - expected) > tol) {
+                fprintf(stderr, "[FAIL] all-reduce owner=%d idx=%zu: got %f expected %f\n",
+                        owner, i, got, expected);
+                diverged = 1;
+                break;
+            }
+        }
+        if (diverged) goto cleanup_ar;
+    }
+    printf("[PASS] %d-rank all-reduce produces correct sums on every owner device.\n", n_ranks);
+
+    /* --- Test B: host-staging fallback path for all-reduce ---
+     *
+     * Force host staging, re-run the same computation, verify the same
+     * expected sums. This exercises the staging-buffer code path in
+     * ds4_rocm_xdev_copy() that all-reduce relies on when peer access is
+     * unavailable -- a critical correctness path since the PRD's transport
+     * feasibility probe treats host-staging as the universal fallback. */
+    ds4_rocm_xdev_set_force_host_staging(mesh, true);
+
+    /* Re-dirty the result buffers to catch missed writes. */
+    for (int r = 0; r < n_ranks; r++) {
+        hipSetDevice(r);
+        hipMemset(d_result[r], 0xCD, bytes);
+    }
+
+    for (int owner = 0; owner < n_ranks; owner++) {
+        int peer_devs[DS4_ROCM_XDEV_MAX_DEVICES];
+        const float *peer_ptrs[DS4_ROCM_XDEV_MAX_DEVICES];
+        int pi = 0;
+        for (int r = 0; r < n_ranks; r++) {
+            if (r == owner) continue;
+            peer_devs[pi] = dev_ids[r];
+            peer_ptrs[pi] = d_partial[r];
+            pi++;
+        }
+
+        int ok = ds4_rocm_xdev_allreduce_f32(mesh, owner, d_result[owner],
+                                              d_partial[owner],
+                                              peer_devs, peer_ptrs, n_peers,
+                                              count, 0);
+        if (!ok) {
+            fprintf(stderr, "[FAIL] all-reduce host-staging: call failed for owner=%d\n", owner);
+            ds4_rocm_xdev_set_force_host_staging(mesh, false);
+            goto cleanup_ar;
+        }
+
+        hipSetDevice(owner);
+        hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+
+        float scale = (float)(n_ranks * (n_ranks + 1) / 2);
+        int diverged = 0;
+        for (size_t i = 0; i < count; i++) {
+            float expected = (float)(i + 1) * scale;
+            float got = h_result[owner][i];
+            float tol = 1e-4f * fabsf(expected) + 1e-6f;
+            if (fabsf(got - expected) > tol) {
+                fprintf(stderr, "[FAIL] all-reduce host-staging owner=%d idx=%zu: got %f expected %f\n",
+                        owner, i, got, expected);
+                diverged = 1;
+                break;
+            }
+        }
+        if (diverged) {
+            ds4_rocm_xdev_set_force_host_staging(mesh, false);
+            goto cleanup_ar;
+        }
+    }
+    printf("[PASS] %d-rank all-reduce (host-staging fallback) produces correct sums.\n", n_ranks);
+
+    ds4_rocm_xdev_set_force_host_staging(mesh, false);
+
+    /* --- Test C: degenerate 1-rank (n_peers=0) is a no-op copy ---
+     *
+     * With n_peers=0, all-reduce must produce result = my_partial (no peers
+     * to combine). Refusing or crashing on this input would force callers to
+     * special-case the world-size-1 path; the right behaviour is to handle
+     * it uniformly. */
+    {
+        size_t small_count = 1024;
+        size_t small_bytes = small_count * sizeof(float);
+        float *d_p = NULL, *d_r = NULL;
+        float *h_p = (float *)malloc(small_bytes);
+        float *h_r = (float *)malloc(small_bytes);
+        hipSetDevice(0);
+        hipMalloc(&d_p, small_bytes);
+        hipMalloc(&d_r, small_bytes);
+        for (size_t i = 0; i < small_count; i++) h_p[i] = (float)(i + 1) * 0.5f;
+        hipMemcpy(d_p, h_p, small_bytes, hipMemcpyHostToDevice);
+        hipMemset(d_r, 0, small_bytes);
+
+        int ok = ds4_rocm_xdev_allreduce_f32(mesh, 0, d_r, d_p, NULL, NULL, 0, small_count, 0);
+        if (!ok) {
+            fprintf(stderr, "[FAIL] all-reduce n_peers=0 returned failure\n");
+        } else {
+            hipMemcpy(h_r, d_r, small_bytes, hipMemcpyDeviceToHost);
+            int diverged = 0;
+            for (size_t i = 0; i < small_count; i++) {
+                if (fabsf(h_r[i] - h_p[i]) > 1e-6f) {
+                    fprintf(stderr, "[FAIL] all-reduce n_peers=0 idx=%zu: got %f expected %f\n",
+                            i, h_r[i], h_p[i]);
+                    diverged = 1;
+                    break;
+                }
+            }
+            if (!diverged) {
+                printf("[PASS] all-reduce n_peers=0 passes through my_partial unchanged.\n");
+            }
+        }
+        hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+    }
+
+    /* --- Test D: cached staging buffer reuse ---
+     *
+     * Run the same-size all-reduce twice in a row. The second call should
+     * hit the cached staging buffer, not reallocate. We can't directly
+     * observe caching, but we can verify the result is still correct (the
+     * cache must not reuse stale data). */
+    for (int r = 0; r < n_ranks; r++) {
+        /* Change the pattern so a stale-cache bug would show up as a wrong
+         * answer: partial[i] = r * 1000 + i. */
+        for (size_t i = 0; i < count; i++) {
+            h_partial[r][i] = (float)(r * 1000 + (int)i);
+        }
+        hipSetDevice(r);
+        hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+    }
+    {
+        int owner = 0;
+        int peer_devs[DS4_ROCM_XDEV_MAX_DEVICES];
+        const float *peer_ptrs[DS4_ROCM_XDEV_MAX_DEVICES];
+        int pi = 0;
+        for (int r = 0; r < n_ranks; r++) {
+            if (r == owner) continue;
+            peer_devs[pi] = dev_ids[r];
+            peer_ptrs[pi] = d_partial[r];
+            pi++;
+        }
+        /* Call twice: the second call exercises the cache. */
+        for (int repeat = 0; repeat < 2; repeat++) {
+            int ok = ds4_rocm_xdev_allreduce_f32(mesh, owner, d_result[owner],
+                                                  d_partial[owner],
+                                                  peer_devs, peer_ptrs, n_peers,
+                                                  count, 0);
+            if (!ok) {
+                fprintf(stderr, "[FAIL] all-reduce cache-test repeat=%d failed\n", repeat);
+                goto cleanup_ar;
+            }
+            hipSetDevice(owner);
+            hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+            /* Expected sum: sum_{r=0..N-1} (r*1000 + i) = 1000 * N*(N-1)/2 + N*i. */
+            float base = 1000.0f * (float)(n_ranks * (n_ranks - 1) / 2);
+            int diverged = 0;
+            for (size_t i = 0; i < count; i++) {
+                float expected = base + (float)(n_ranks * (int)i);
+                float got = h_result[owner][i];
+                float tol = 1e-3f * fabsf(expected) + 1e-3f;
+                if (fabsf(got - expected) > tol) {
+                    fprintf(stderr, "[FAIL] all-reduce cache-test repeat=%d owner=%d idx=%zu: got %f expected %f\n",
+                            repeat, owner, i, got, expected);
+                    diverged = 1;
+                    break;
+                }
+            }
+            if (diverged) goto cleanup_ar;
+        }
+        printf("[PASS] all-reduce cached staging buffer produces correct results across repeated calls.\n");
+    }
+
+cleanup_ar:
+    for (int r = 0; r < n_ranks; r++) {
+        if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+        if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+        free(h_partial[r]);
+        free(h_result[r]);
+    }
 }

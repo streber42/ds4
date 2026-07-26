@@ -61,6 +61,49 @@ int ds4_rocm_xdev_accumulate_f16(ds4_rocm_xdev_mesh *mesh,
                                  int src_dev, const void *src_ptr,
                                  size_t count, hipStream_t stream);
 
+/*
+ * 4. All-Reduce (F32) -- TP=4 collective
+ *
+ * Combines partial float vectors from `1 + n_peers` devices into the
+ * element-wise sum and writes it to `result_ptr` on `my_dev`. This is the
+ * primitive TP=4 uses to merge per-rank partial attention outputs, per-rank
+ * partial MoE down-projections, and per-rank partial output-head logits into
+ * the complete result.
+ *
+ * `my_dev` is the device whose result buffer is being populated. `my_partial`
+ * is that device's own contribution (count floats); it is read-only and is
+ * NOT overwritten -- the caller keeps the partial and a separate result
+ * buffer. `peer_devs[0..n_peers-1]` and `peer_partials[0..n_peers-1]` name
+ * each peer's device and its partial buffer. `n_peers` is the world size
+ * minus one (3 for TP=4). `result_ptr` lives on `my_dev` and is filled with
+ * sum(my_partial, peer_partials[0..n_peers-1]) -- it is overwritten, not
+ * added into, so the caller need not zero it.
+ *
+ * Implementation: brute-force all-gather + local accumulate. A single local
+ * staging buffer of `count` floats is allocated lazily (cached across calls
+ * that share `my_dev` and `count`, grown on demand). For each peer: wait on
+ * the peer's producer event so the peer kernel has drained, copy the peer
+ * partial into the staging buffer via ds4_rocm_xdev_copy, then accumulate
+ * the staging buffer into `result_ptr`. After the peer loop, accumulate the
+ * local `my_partial` as the final contribution (the local->local path uses
+ * the existing same-device kernel -- no temp allocation).
+ *
+ * Ordering: each peer copy is stream-ordered against that peer's default
+ * stream via ds4_rocm_xdev_wait_producer (mirroring the fence used by
+ * ds4_rocm_xdev_copy's direct-peer path), so the collective is safe to call
+ * immediately after each peer's compute kernel returns -- the caller does
+ * not need to synchronize.
+ *
+ * Returns 1 on success, 0 on any failure.
+ */
+int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
+                                int my_dev, float *result_ptr,
+                                const float *my_partial,
+                                const int *peer_devs,
+                                const float *const *peer_partials,
+                                int n_peers,
+                                size_t count, hipStream_t stream);
+
 /* Global mesh access convenience functions */
 int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices);
 ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);

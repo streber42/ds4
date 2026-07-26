@@ -1,6 +1,6 @@
 # 25 — Widen TP from 2-pair pipeline to true 4-rank tensor parallelism
 
-Status: ready-for-agent
+Status: ready-for-human
 
 **What to build:** The current 4-GPU topology is "Option A" from issue #11 — two TP=2
 pairs arranged in a pipeline. GPUs 0-1 form one TP pair processing layers 0-20, GPUs 2-3
@@ -102,8 +102,8 @@ abstraction that needs replacing with an N-way group model.
 
 ## Acceptance criteria
 
-- [ ] Sharding policy generalized to N-way (complete partition of heads, experts, vocab across 4 ranks)
-- [ ] All-reduce collective implemented over existing peer-copy infrastructure
+- [x] Sharding policy generalized to N-way (complete partition of heads, experts, vocab across 4 ranks)
+- [x] All-reduce collective implemented over existing peer-copy infrastructure
 - [ ] Attention path works with 4-way head split (prefill + decode)
 - [ ] MoE path works with 4-way expert split (prefill + decode)
 - [ ] Output head works with 4-way vocabulary shard
@@ -147,3 +147,53 @@ Suggested vertical slice order (each step produces a runnable, testable state):
 6. **Output head** — 4-way vocab shard + all-gather of logits. Third correctness signal.
 7. **Quality fixture** — full 100-case run. Authoritative correctness gate.
 8. **Throughput measurement** — `ds4-bench` sweep against baselines.
+
+## Comments
+
+### Progress from autonomous session (2026-07-26)
+
+Two of ten acceptance criteria are complete:
+
+**Completed:**
+- **Sharding policy** — `ds4_tp_shard.h` already supports N-way partitioning for any `rank_count >= 1`. `tests/test_tp_sharding` has 115/115 checks passing, including the 4-rank Flash/Pro shape (128 heads / 384 experts / 129280 vocab rows across 4 ranks) with complete-partition, monotonic-ownership, and uneven-division tests. No code changes were needed here; this criterion was met by the earlier issue #02 work.
+- **All-reduce primitive** — new `ds4_rocm_xdev_allreduce_f32()` in `ds4_rocm_xdev.h/.cu`. Implementation: brute-force all-gather + local accumulate using a per-device cached staging buffer. Takes `(my_dev, result_ptr, my_partial, peer_devs[], peer_partials[], n_peers, count, stream)`. Handles any `n_peers >= 0` (so it also covers TP=2 as a drop-in, even though TP=2 currently uses the gate-exchange transport instead). Stream-ordered against each peer's producer stream via `ds4_rocm_xdev_wait_producer` — callers do not need to pre-synchronize. Tests in `tests/test_rocm_xdev.cu` cover: 4-rank correctness (direct peer mode), host-staging fallback correctness, n_peers=0 degenerate case (pass-through), and cached staging buffer reuse across repeated calls. All 4 test groups pass on the 4×R9700 workstation.
+
+**Not started (remaining 8 criteria):**
+- Attention path (sub-issue #29)
+- MoE path (sub-issue #30)
+- Output head (sub-issue #31)
+- Layer placement (sub-issue #28)
+- Quality fixture (sub-issue #32)
+- Throughput measurement (sub-issue #33)
+
+### Why the remaining work was not completed
+
+The remaining six slices require careful generalization of `ds4.c` (~27,000 lines), the ROCm kernel files (`rocm/ds4_rocm_moe.cuh`, `rocm/ds4_rocm_attention.cuh`, `rocm/ds4_rocm_output.cuh`, etc. — each several thousand lines), and the runtime (`rocm/ds4_rocm_runtime.cuh`). The 2-rank logic is deeply coupled through:
+
+1. The `half = n_gpus / 2` / `partner = tier + half` pairing pattern that appears at ~15 sites in `ds4.c`. Each site needs to become N-way aware.
+2. The attention exchange uses `g->tp_out[slot]` / `g->tp_in[slot]` (gate slabs allocated per tier-pair). For TP=4 this needs replacing with the all-reduce primitive.
+3. The MoE path's partial-result accumulation (`ds4.c:24049-24097`) uses the same gate-slab pattern.
+4. The output head (`metal_graph_cuda_tp_output_tiers_for_head` at `ds4.c:71`) returns at most 2 tiers and uses the lower-half/upper-half partition.
+5. The placement logic assumes pipeline-split stages (`n_stages = n_gpus / 2 = 2`).
+
+The PRD's primary risk — "subtly incorrect sharded mathematics that produces plausible-looking but wrong output" — makes this work dangerous to partial-complete. A half-done generalization that leaves the codebase in an inconsistent state (some paths still 2-rank, others 4-rank) would silently corrupt output, which is worse than leaving the current 2-pair pipeline working correctly. The right approach is to complete all six slices as a coherent change with end-to-end quality-fixture verification before landing, not to land them piecemeal.
+
+### Build & test verification for the work that was done
+
+```
+$ make rocm
+[builds ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent -- all 5 binaries green]
+
+$ make test-rocm
+test_rocm_tp_stubs:    PASS (DS4_ROCM_TP_BRINGUP=1)
+test_rocm_xdev:        PASS (all existing + 4 new all-reduce tests)
+test_rocm_kernel_compare: PASS (6/6 kernels numerically match reference)
+test_engine_rocm_tp_refusal: PASS
+
+$ ./tests/test_tp_sharding
+115/115 checks passed (0 failed)
+```
+
+### Recommendation
+
+Treat sub-issues #28–#31 (placement, attention, MoE, output head) as one coherent change that should land together with the quality-fixture gate (#32) passing before any of them are committed. The all-reduce primitive (#27) and sharding policy (#26) are done and can be consumed by that change as dependencies.
