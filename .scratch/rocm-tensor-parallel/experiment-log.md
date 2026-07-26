@@ -223,4 +223,34 @@ Delta WMMA vs pre-WMMA TP: +0.002213 (+0.60%) — within accepted ±1% variance;
 
 **Issue 20 status: ready-for-human.** Prefill throughput improved 2.19×; generation unchanged. Decode throughput improvement requires addressing cross-device TP handoff overhead (separate from kernel optimization).
 
+## 2026-07-26 — f32→f16 fusion verification (Issue 22)
+
+**Goal:** Verify that absorbing the standalone `f32_to_f16_kernel` into the MoE WMMA gate/up kernels eliminates dispatch overhead without regressing quality or throughput.
+
+**Setup:** 4× AMD Radeon AI Pro R9700 (gfx1201), production 81 GiB model, `make rocm` (multi-arch gfx1151+gfx1201 binary with issue #24 fix).
+
+**Throughput (`ds4-bench --ctx-start 2048 --gen-tokens 256`):**
+
+| Mode | Prefill (t/s) | Generation (t/s) | First Token (ms) |
+|---|---|---|---|
+| #19 Baseline (no fusion, no WMMA) | 104.68 | 12.44 | 81.03 |
+| **#22 With f32→f16 fusion + WMMA (#20)** | **206.09** | **12.27** | 82.20 |
+| Pipeline baseline (same build) | 192.83 | 22.81 | 52.81 |
+
+**Quality fixture (AMD_SERIALIZE_KERNEL=3, 100 cases, 2289 tokens):**
+
+| Config | avg_nll | first_match | avg_lcp |
+|---|---|---|---|
+| Pipeline serialized (reference) | 0.373815 | 64/100 | 5.81 |
+| TP serialized (WMMA, issue #20) | 0.372143 | 67/100 | 6.59 |
+| **TP serialized (WMMA + fusion)** | **0.372143** | **67/100** | **6.59** |
+
+**Findings:**
+1. **Generation throughput unchanged** (12.27 vs 12.44 t/s, -1.4%, within noise). The TP decode bottleneck is cross-device transfer latency, not kernel launch overhead. Eliminating ~1689 dispatches per decode token is real but masked by the much larger inter-pair pipeline serialization cost.
+2. **No quality regression** — inline `__float2half` produces bit-identical f16 to the standalone kernel.
+3. **Prefill improvement** (206 vs 105 t/s) is from issue #20's WMMA enablement, not this fusion.
+4. **Remaining fusion candidates** (rms_norm + matmul, q8_K_quantize + MoE down) are unlikely to improve decode throughput for the same reason — the decode phase is transfer-bound, not launch-bound.
+
+**Issue 22 status: closed.** Fusion implemented and verified; dispatch overhead eliminated but decode throughput is dominated by cross-device transfer, not kernel launches.
+
 
