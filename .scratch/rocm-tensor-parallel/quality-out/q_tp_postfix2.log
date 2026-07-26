@@ -1,0 +1,46 @@
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-20 + embedding  (22.1 / 27.8 GB)
+  GPU1: layers 21-42 + output head  (22.1 / 27.8 GB)
+  GPU2: (no transformer layers)  (0.0 / 27.8 GB)
+  GPU3: (no transformer layers)  (0.0 / 27.8 GB)
+ds4: per-tier graph scratch reserved: 2.00 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: CUDA decode TP half-resident routed experts enabled ([0,128) home, [128,256) partner); other layer tensors remain replicated
+ds4: CUDA output TP stores one vocabulary shard per tier (4 ways)
+ds4: CUDA tier 0 (device 0) selective weights: 22.09 GiB in 642 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 22.13 GiB in 687 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 21.10 GiB in 641 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 22.13 GiB in 683 ranges
+ds4: CUDA routed MoE expert ownership enabled (half-resident decode and prefill)
+ds4: CUDA decode TP enabled: pairing lower-half tiers with upper-half tiers
+ds4: ROCm loading model tensors into device cache
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=5.97 GiB free=4.05 GiB reserve=4.00 GiB total=31.86 GiB)
+case_000 cases=1 prompt=17 target=24 avg_nll=3.340865 lcp=0 api_target_mae=3.340865 api_top_coverage=100/120 api_top1=0.625 api_topn=0.280 api_pair=0.882
+case_001 cases=2 prompt=18 target=24 avg_nll=3.045318 lcp=0 api_target_mae=3.045318 api_top_coverage=100/120 api_top1=0.625 api_topn=0.200 api_pair=0.908
+case_002 cases=3 prompt=19 target=24 avg_nll=2.494409 lcp=0 api_target_mae=2.494409 api_top_coverage=96/120 api_top1=0.625 api_topn=0.229 api_pair=0.958
+case_003 cases=4 prompt=19 target=24 avg_nll=2.307938 lcp=0 api_target_mae=2.307938 api_top_coverage=97/120 api_top1=0.750 api_topn=0.216 api_pair=0.945
+case_004 cases=5 prompt=15 target=24 avg_nll=2.279303 lcp=0 api_target_mae=2.279303 api_top_coverage=97/120 api_top1=0.625 api_topn=0.237 api_pair=0.973
+case_005 cases=6 prompt=14 target=24 avg_nll=3.617724 lcp=0 api_target_mae=3.617724 api_top_coverage=96/120 api_top1=0.625 api_topn=0.208 api_pair=0.875
+case_006 cases=7 prompt=18 target=24 avg_nll=2.864063 lcp=0 api_target_mae=2.864063 api_top_coverage=98/120 api_top1=0.667 api_topn=0.235 api_pair=0.919
+case_007 cases=8 prompt=14 target=24 avg_nll=3.497656 lcp=0 api_target_mae=3.497656 api_top_coverage=119/120 api_top1=0.583 api_topn=0.555 api_pair=0.726
+case_008 cases=9 prompt=20 target=24 avg_nll=1.544245 lcp=0 api_target_mae=1.544245 api_top_coverage=97/120 api_top1=0.708 api_topn=0.237 api_pair=0.973
+case_009 cases=10 prompt=17 target=24 avg_nll=2.945674 lcp=0 api_target_mae=2.945674 api_top_coverage=106/120 api_top1=0.667 api_topn=0.340 api_pair=0.854
+case_010 cases=11 prompt=26 target=24 avg_nll=5.281746 lcp=0 api_target_mae=5.281746 api_top_coverage=96/120 api_top1=0.542 api_topn=0.198 api_pair=0.819
+case_011 cases=12 prompt=21 target=24 avg_nll=2.974752 lcp=0 api_target_mae=2.974752 api_top_coverage=98/120 api_top1=0.708 api_topn=0.204 api_pair=0.946
+case_012 cases=13 prompt=22 target=24 avg_nll=4.117641 lcp=0 api_target_mae=4.117641 api_top_coverage=100/120 api_top1=0.667 api_topn=0.220 api_pair=0.855
+case_013 cases=14 prompt=22 target=24 avg_nll=4.029151 lcp=0 api_target_mae=4.029151 api_top_coverage=97/120 api_top1=0.625 api_topn=0.196 api_pair=0.918
+case_014 cases=15 prompt=21 target=24 avg_nll=4.295245 lcp=0 api_target_mae=4.295245 api_top_coverage=98/120 api_top1=0.458 api_topn=0.173 api_pair=0.878
+case_015 cases=16 prompt=22 target=24 avg_nll=3.667080 lcp=0 api_target_mae=3.667080 api_top_coverage=96/120 api_top1=0.708 api_topn=0.188 api_pair=0.889
+case_016 cases=17 prompt=19 target=24 avg_nll=2.452156 lcp=0 api_target_mae=2.452156 api_top_coverage=97/120 api_top1=0.750 api_topn=0.216 api_pair=0.945
+case_017 cases=18 prompt=26 target=24 avg_nll=3.940116 lcp=0 api_target_mae=3.940116 api_top_coverage=96/120 api_top1=0.542 api_topn=0.219 api_pair=0.903
+case_018 cases=19 prompt=25 target=24 avg_nll=4.142038 lcp=0 api_target_mae=4.142038 api_top_coverage=115/120 api_top1=0.583 api_topn=0.435 api_pair=0.879
+case_019 cases=20 prompt=19 target=24 avg_nll=4.265727 lcp=0 api_target_mae=4.265727 api_top_coverage=98/120 api_top1=0.667 api_topn=0.194 api_pair=0.892

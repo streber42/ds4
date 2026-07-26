@@ -1,0 +1,124 @@
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-12 + embedding  (25.0 / 25.8 GB)
+  GPU1: layers 13-25  (24.1 / 25.8 GB)
+  GPU2: layers 26-38  (24.1 / 25.8 GB)
+  GPU3: layers 39-42 + output head  (7.9 / 25.8 GB)
+ds4: per-tier graph scratch reserved: 3.99 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: CUDA tier 0 (device 0) selective weights: 24.93 GiB in 393 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.95 GiB in 400 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.98 GiB in 406 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 7.90 GiB in 129 ranges
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=2.51 GiB reserve=4.00 GiB total=31.86 GiB)
+ds4: ROCm loading model tensors into device cache
+case_000 cases=1 prompt=17 target=24 avg_nll=1.274704 lcp=0 api_target_mae=1.274704 api_top_coverage=100/120 api_top1=0.708 api_topn=0.300 api_pair=0.934
+case_001 cases=2 prompt=18 target=24 avg_nll=1.428864 lcp=0 api_target_mae=1.428864 api_top_coverage=100/120 api_top1=0.708 api_topn=0.220 api_pair=0.947
+case_002 cases=3 prompt=19 target=24 avg_nll=1.144565 lcp=0 api_target_mae=1.144565 api_top_coverage=96/120 api_top1=0.708 api_topn=0.240 api_pair=0.986
+case_003 cases=4 prompt=19 target=24 avg_nll=1.058948 lcp=0 api_target_mae=1.058948 api_top_coverage=97/120 api_top1=0.708 api_topn=0.237 api_pair=0.973
+case_004 cases=5 prompt=15 target=24 avg_nll=1.347876 lcp=0 api_target_mae=1.347876 api_top_coverage=97/120 api_top1=0.667 api_topn=0.247 api_pair=0.986
+case_005 cases=6 prompt=14 target=24 avg_nll=0.852492 lcp=0 api_target_mae=0.852492 api_top_coverage=96/120 api_top1=0.833 api_topn=0.250 api_pair=0.958
+case_006 cases=7 prompt=18 target=24 avg_nll=1.188357 lcp=0 api_target_mae=1.188357 api_top_coverage=98/120 api_top1=0.667 api_topn=0.245 api_pair=0.973
+case_007 cases=8 prompt=14 target=24 avg_nll=1.510946 lcp=0 api_target_mae=1.510946 api_top_coverage=119/120 api_top1=0.750 api_topn=0.630 api_pair=0.863
+case_008 cases=9 prompt=20 target=24 avg_nll=1.185449 lcp=0 api_target_mae=1.185449 api_top_coverage=97/120 api_top1=0.750 api_topn=0.237 api_pair=0.973
+case_009 cases=10 prompt=17 target=24 avg_nll=1.622242 lcp=0 api_target_mae=1.622242 api_top_coverage=106/120 api_top1=0.708 api_topn=0.283 api_pair=0.902
+case_010 cases=11 prompt=26 target=24 avg_nll=0.930749 lcp=0 api_target_mae=0.930749 api_top_coverage=96/120 api_top1=0.875 api_topn=0.240 api_pair=0.972
+case_011 cases=12 prompt=21 target=24 avg_nll=1.021143 lcp=0 api_target_mae=1.021143 api_top_coverage=98/120 api_top1=0.792 api_topn=0.245 api_pair=0.959
+case_012 cases=13 prompt=22 target=24 avg_nll=1.401458 lcp=0 api_target_mae=1.401458 api_top_coverage=100/120 api_top1=0.667 api_topn=0.220 api_pair=0.974
+case_013 cases=14 prompt=22 target=24 avg_nll=1.599833 lcp=0 api_target_mae=1.599833 api_top_coverage=97/120 api_top1=0.792 api_topn=0.237 api_pair=0.973
+case_014 cases=15 prompt=21 target=24 avg_nll=2.245290 lcp=0 api_target_mae=2.245290 api_top_coverage=98/120 api_top1=0.625 api_topn=0.194 api_pair=0.959
+case_015 cases=16 prompt=22 target=24 avg_nll=1.049997 lcp=0 api_target_mae=1.049997 api_top_coverage=96/120 api_top1=0.792 api_topn=0.229 api_pair=0.972
+case_016 cases=17 prompt=19 target=24 avg_nll=0.874220 lcp=0 api_target_mae=0.874220 api_top_coverage=97/120 api_top1=0.833 api_topn=0.247 api_pair=0.973
+case_017 cases=18 prompt=26 target=24 avg_nll=1.682081 lcp=0 api_target_mae=1.682081 api_top_coverage=96/120 api_top1=0.667 api_topn=0.229 api_pair=0.958
+case_018 cases=19 prompt=25 target=24 avg_nll=1.147673 lcp=0 api_target_mae=1.147673 api_top_coverage=115/120 api_top1=0.792 api_topn=0.574 api_pair=0.923
+case_019 cases=20 prompt=19 target=24 avg_nll=1.404488 lcp=0 api_target_mae=1.404488 api_top_coverage=98/120 api_top1=0.750 api_topn=0.235 api_pair=0.973
+case_020 cases=21 prompt=18 target=24 avg_nll=1.110037 lcp=0 api_target_mae=1.110037 api_top_coverage=96/120 api_top1=0.750 api_topn=0.229 api_pair=0.972
+case_021 cases=22 prompt=18 target=24 avg_nll=0.646509 lcp=0 api_target_mae=0.646509 api_top_coverage=96/120 api_top1=0.833 api_topn=0.250 api_pair=0.958
+case_022 cases=23 prompt=16 target=24 avg_nll=1.280040 lcp=0 api_target_mae=1.280040 api_top_coverage=100/120 api_top1=0.667 api_topn=0.250 api_pair=0.947
+case_023 cases=24 prompt=14 target=24 avg_nll=1.100949 lcp=0 api_target_mae=1.100949 api_top_coverage=114/120 api_top1=0.708 api_topn=0.526 api_pair=0.935
+case_024 cases=25 prompt=15 target=24 avg_nll=1.107797 lcp=0 api_target_mae=1.107797 api_top_coverage=102/120 api_top1=0.792 api_topn=0.235 api_pair=0.962
+case_025 cases=26 prompt=20 target=24 avg_nll=1.118225 lcp=0 api_target_mae=1.118225 api_top_coverage=97/120 api_top1=0.792 api_topn=0.227 api_pair=0.945
+case_026 cases=27 prompt=17 target=24 avg_nll=1.370009 lcp=0 api_target_mae=1.370009 api_top_coverage=98/120 api_top1=0.667 api_topn=0.224 api_pair=0.986
+case_027 cases=28 prompt=14 target=24 avg_nll=1.568385 lcp=0 api_target_mae=1.568385 api_top_coverage=97/120 api_top1=0.542 api_topn=0.237 api_pair=0.986
+case_028 cases=29 prompt=16 target=24 avg_nll=1.511183 lcp=0 api_target_mae=1.511183 api_top_coverage=97/120 api_top1=0.583 api_topn=0.237 api_pair=0.986
+case_029 cases=30 prompt=18 target=24 avg_nll=1.788822 lcp=0 api_target_mae=1.788822 api_top_coverage=119/120 api_top1=0.583 api_topn=0.571 api_pair=0.789
+case_030 cases=31 prompt=23 target=24 avg_nll=1.122507 lcp=0 api_target_mae=1.122507 api_top_coverage=97/120 api_top1=0.792 api_topn=0.216 api_pair=0.986
+case_031 cases=32 prompt=22 target=24 avg_nll=1.170394 lcp=0 api_target_mae=1.170394 api_top_coverage=97/120 api_top1=0.833 api_topn=0.227 api_pair=0.959
+case_032 cases=33 prompt=18 target=24 avg_nll=1.319248 lcp=0 api_target_mae=1.319248 api_top_coverage=97/120 api_top1=0.750 api_topn=0.237 api_pair=0.959
+case_033 cases=34 prompt=15 target=24 avg_nll=1.093252 lcp=0 api_target_mae=1.093252 api_top_coverage=97/120 api_top1=0.708 api_topn=0.227 api_pair=0.986
+case_034 cases=35 prompt=22 target=24 avg_nll=1.297510 lcp=0 api_target_mae=1.297510 api_top_coverage=97/120 api_top1=0.792 api_topn=0.247 api_pair=0.986
+case_035 cases=36 prompt=23 target=24 avg_nll=1.347776 lcp=0 api_target_mae=1.347776 api_top_coverage=96/120 api_top1=0.708 api_topn=0.229 api_pair=0.972
+case_036 cases=37 prompt=21 target=24 avg_nll=1.262388 lcp=0 api_target_mae=1.262388 api_top_coverage=96/120 api_top1=0.708 api_topn=0.250 api_pair=0.972
+case_037 cases=38 prompt=18 target=24 avg_nll=1.571599 lcp=0 api_target_mae=1.571599 api_top_coverage=97/120 api_top1=0.583 api_topn=0.227 api_pair=0.986
+case_038 cases=39 prompt=26 target=24 avg_nll=1.055830 lcp=0 api_target_mae=1.055830 api_top_coverage=97/120 api_top1=0.708 api_topn=0.247 api_pair=0.959
+case_039 cases=40 prompt=23 target=24 avg_nll=1.377770 lcp=0 api_target_mae=1.377770 api_top_coverage=99/120 api_top1=0.750 api_topn=0.242 api_pair=0.947
+case_040 cases=41 prompt=21 target=24 avg_nll=1.365804 lcp=0 api_target_mae=1.365804 api_top_coverage=99/120 api_top1=0.750 api_topn=0.232 api_pair=0.987
+case_041 cases=42 prompt=15 target=24 avg_nll=1.229045 lcp=0 api_target_mae=1.229045 api_top_coverage=101/120 api_top1=0.625 api_topn=0.248 api_pair=0.961
+case_042 cases=43 prompt=14 target=24 avg_nll=1.694542 lcp=0 api_target_mae=1.694542 api_top_coverage=100/120 api_top1=0.625 api_topn=0.230 api_pair=0.961
+case_043 cases=44 prompt=18 target=24 avg_nll=0.767369 lcp=0 api_target_mae=0.767369 api_top_coverage=100/120 api_top1=0.833 api_topn=0.260 api_pair=0.961
+case_044 cases=45 prompt=20 target=24 avg_nll=1.062372 lcp=0 api_target_mae=1.062372 api_top_coverage=98/120 api_top1=0.833 api_topn=0.235 api_pair=0.973
+case_045 cases=46 prompt=18 target=24 avg_nll=1.281669 lcp=0 api_target_mae=1.281669 api_top_coverage=100/120 api_top1=0.625 api_topn=0.230 api_pair=0.974
+case_046 cases=47 prompt=19 target=24 avg_nll=0.754198 lcp=0 api_target_mae=0.754198 api_top_coverage=99/120 api_top1=0.792 api_topn=0.232 api_pair=0.962
+case_047 cases=48 prompt=16 target=24 avg_nll=1.382369 lcp=0 api_target_mae=1.382369 api_top_coverage=100/120 api_top1=0.792 api_topn=0.230 api_pair=0.961
+case_048 cases=49 prompt=18 target=24 avg_nll=1.443399 lcp=0 api_target_mae=1.443399 api_top_coverage=96/120 api_top1=0.625 api_topn=0.219 api_pair=0.958
+case_049 cases=50 prompt=18 target=24 avg_nll=1.386057 lcp=0 api_target_mae=1.386057 api_top_coverage=96/120 api_top1=0.542 api_topn=0.240 api_pair=0.986
+case_050 cases=51 prompt=27 target=24 avg_nll=1.821992 lcp=0 api_target_mae=1.821992 api_top_coverage=97/120 api_top1=0.625 api_topn=0.216 api_pair=0.973
+case_051 cases=52 prompt=21 target=24 avg_nll=0.985938 lcp=0 api_target_mae=0.985938 api_top_coverage=120/120 api_top1=0.792 api_topn=0.592 api_pair=0.938
+case_052 cases=53 prompt=19 target=24 avg_nll=1.414186 lcp=0 api_target_mae=1.414186 api_top_coverage=119/120 api_top1=0.667 api_topn=0.639 api_pair=0.908
+case_053 cases=54 prompt=22 target=24 avg_nll=1.445200 lcp=0 api_target_mae=1.445200 api_top_coverage=120/120 api_top1=0.750 api_topn=0.558 api_pair=0.896
+case_054 cases=55 prompt=24 target=24 avg_nll=1.268447 lcp=0 api_target_mae=1.268447 api_top_coverage=96/120 api_top1=0.792 api_topn=0.229 api_pair=0.972
+case_055 cases=56 prompt=25 target=24 avg_nll=1.609539 lcp=0 api_target_mae=1.609539 api_top_coverage=96/120 api_top1=0.708 api_topn=0.260 api_pair=0.958
+case_056 cases=57 prompt=18 target=24 avg_nll=1.622597 lcp=0 api_target_mae=1.622597 api_top_coverage=97/120 api_top1=0.625 api_topn=0.216 api_pair=0.945
+case_057 cases=58 prompt=22 target=24 avg_nll=1.426230 lcp=0 api_target_mae=1.426230 api_top_coverage=98/120 api_top1=0.667 api_topn=0.235 api_pair=0.932
+case_058 cases=59 prompt=25 target=24 avg_nll=1.556228 lcp=0 api_target_mae=1.556228 api_top_coverage=97/120 api_top1=0.792 api_topn=0.227 api_pair=0.945
+case_059 cases=60 prompt=23 target=24 avg_nll=1.864163 lcp=0 api_target_mae=1.864163 api_top_coverage=96/120 api_top1=0.667 api_topn=0.229 api_pair=0.958
+case_060 cases=61 prompt=17 target=24 avg_nll=0.660934 lcp=0 api_target_mae=0.660934 api_top_coverage=97/120 api_top1=0.875 api_topn=0.247 api_pair=0.973
+case_061 cases=62 prompt=16 target=24 avg_nll=1.293511 lcp=0 api_target_mae=1.293511 api_top_coverage=97/120 api_top1=0.750 api_topn=0.268 api_pair=0.959
+case_062 cases=63 prompt=14 target=24 avg_nll=0.798532 lcp=0 api_target_mae=0.798532 api_top_coverage=97/120 api_top1=0.792 api_topn=0.247 api_pair=1.000
+case_063 cases=64 prompt=15 target=24 avg_nll=0.985820 lcp=0 api_target_mae=0.985820 api_top_coverage=97/120 api_top1=0.833 api_topn=0.227 api_pair=0.986
+case_064 cases=65 prompt=12 target=24 avg_nll=1.137543 lcp=0 api_target_mae=1.137543 api_top_coverage=97/120 api_top1=0.625 api_topn=0.258 api_pair=0.973
+case_065 cases=66 prompt=15 target=24 avg_nll=1.181721 lcp=0 api_target_mae=1.181721 api_top_coverage=97/120 api_top1=0.750 api_topn=0.227 api_pair=1.000
+case_066 cases=67 prompt=16 target=24 avg_nll=1.556578 lcp=0 api_target_mae=1.556578 api_top_coverage=99/120 api_top1=0.667 api_topn=0.232 api_pair=0.960
+case_067 cases=68 prompt=17 target=24 avg_nll=1.164507 lcp=0 api_target_mae=1.164507 api_top_coverage=98/120 api_top1=0.708 api_topn=0.245 api_pair=0.973
+case_068 cases=69 prompt=17 target=24 avg_nll=1.898534 lcp=0 api_target_mae=1.898534 api_top_coverage=99/120 api_top1=0.625 api_topn=0.202 api_pair=0.987
+case_069 cases=70 prompt=18 target=24 avg_nll=1.264614 lcp=0 api_target_mae=1.264614 api_top_coverage=99/120 api_top1=0.708 api_topn=0.232 api_pair=0.947
+case_070 cases=71 prompt=24 target=24 avg_nll=0.785128 lcp=0 api_target_mae=0.785128 api_top_coverage=97/120 api_top1=0.833 api_topn=0.237 api_pair=0.973
+case_071 cases=72 prompt=24 target=24 avg_nll=1.439994 lcp=0 api_target_mae=1.439994 api_top_coverage=97/120 api_top1=0.750 api_topn=0.237 api_pair=0.932
+case_072 cases=73 prompt=17 target=24 avg_nll=0.982397 lcp=0 api_target_mae=0.982397 api_top_coverage=97/120 api_top1=0.792 api_topn=0.258 api_pair=0.986
+case_073 cases=74 prompt=15 target=24 avg_nll=0.958432 lcp=0 api_target_mae=0.958432 api_top_coverage=97/120 api_top1=0.792 api_topn=0.237 api_pair=1.000
+case_074 cases=75 prompt=15 target=24 avg_nll=1.486522 lcp=0 api_target_mae=1.486522 api_top_coverage=96/120 api_top1=0.792 api_topn=0.240 api_pair=0.958
+case_075 cases=76 prompt=16 target=24 avg_nll=1.633206 lcp=0 api_target_mae=1.633206 api_top_coverage=97/120 api_top1=0.667 api_topn=0.206 api_pair=0.932
+case_076 cases=77 prompt=22 target=24 avg_nll=0.766128 lcp=0 api_target_mae=0.766128 api_top_coverage=97/120 api_top1=0.833 api_topn=0.258 api_pair=1.000
+case_077 cases=78 prompt=24 target=24 avg_nll=0.964995 lcp=0 api_target_mae=0.964995 api_top_coverage=96/120 api_top1=0.833 api_topn=0.260 api_pair=0.972
+case_078 cases=79 prompt=28 target=24 avg_nll=1.530593 lcp=0 api_target_mae=1.530593 api_top_coverage=97/120 api_top1=0.667 api_topn=0.216 api_pair=0.973
+case_079 cases=80 prompt=20 target=24 avg_nll=1.753223 lcp=0 api_target_mae=1.753223 api_top_coverage=99/120 api_top1=0.750 api_topn=0.202 api_pair=0.973
+case_080 cases=81 prompt=13 target=24 avg_nll=1.657762 lcp=0 api_target_mae=1.657762 api_top_coverage=119/120 api_top1=0.417 api_topn=0.622 api_pair=0.776
+case_081 cases=82 prompt=13 target=24 avg_nll=1.658354 lcp=0 api_target_mae=1.658354 api_top_coverage=99/120 api_top1=0.708 api_topn=0.222 api_pair=0.947
+case_082 cases=83 prompt=16 target=24 avg_nll=1.421844 lcp=0 api_target_mae=1.421844 api_top_coverage=97/120 api_top1=0.750 api_topn=0.227 api_pair=0.932
+case_083 cases=84 prompt=19 target=17 avg_nll=1.115367 lcp=0 api_target_mae=1.115367 api_top_coverage=68/85 api_top1=0.941 api_topn=0.235 api_pair=0.961
+case_084 cases=85 prompt=23 target=11 avg_nll=2.072499 lcp=0 api_target_mae=2.072499 api_top_coverage=45/55 api_top1=0.818 api_topn=0.200 api_pair=0.941
+case_085 cases=86 prompt=18 target=24 avg_nll=0.702066 lcp=0 api_target_mae=0.702066 api_top_coverage=97/120 api_top1=0.833 api_topn=0.237 api_pair=0.973
+case_086 cases=87 prompt=16 target=24 avg_nll=1.646206 lcp=0 api_target_mae=1.646206 api_top_coverage=96/120 api_top1=0.708 api_topn=0.250 api_pair=0.958
+case_087 cases=88 prompt=12 target=24 avg_nll=1.201148 lcp=0 api_target_mae=1.201148 api_top_coverage=97/120 api_top1=0.750 api_topn=0.258 api_pair=1.000
+case_088 cases=89 prompt=14 target=24 avg_nll=1.226472 lcp=0 api_target_mae=1.226472 api_top_coverage=97/120 api_top1=0.708 api_topn=0.247 api_pair=0.986
+case_089 cases=90 prompt=12 target=24 avg_nll=0.829032 lcp=0 api_target_mae=0.829032 api_top_coverage=98/120 api_top1=0.833 api_topn=0.235 api_pair=0.986
+case_090 cases=91 prompt=17 target=24 avg_nll=1.107136 lcp=0 api_target_mae=1.107136 api_top_coverage=96/120 api_top1=0.667 api_topn=0.260 api_pair=0.958
+case_091 cases=92 prompt=14 target=24 avg_nll=1.475379 lcp=0 api_target_mae=1.475379 api_top_coverage=96/120 api_top1=0.667 api_topn=0.250 api_pair=0.958
+case_092 cases=93 prompt=15 target=24 avg_nll=0.627124 lcp=0 api_target_mae=0.627124 api_top_coverage=97/120 api_top1=0.917 api_topn=0.237 api_pair=0.986
+case_093 cases=94 prompt=17 target=24 avg_nll=1.419144 lcp=0 api_target_mae=1.419144 api_top_coverage=99/120 api_top1=0.708 api_topn=0.222 api_pair=0.960
+case_094 cases=95 prompt=16 target=1 avg_nll=14.563380 lcp=0 api_target_mae=14.563380 api_top_coverage=5/5 api_top1=0.000 api_topn=0.000 api_pair=0.250
+case_095 cases=96 prompt=17 target=13 avg_nll=0.638392 lcp=0 api_target_mae=0.638392 api_top_coverage=52/65 api_top1=0.923 api_topn=0.250 api_pair=0.949
+case_096 cases=97 prompt=15 target=6 avg_nll=2.080365 lcp=0 api_target_mae=2.080365 api_top_coverage=24/30 api_top1=0.667 api_topn=0.292 api_pair=0.833
+case_097 cases=98 prompt=22 target=10 avg_nll=1.657246 lcp=0 api_target_mae=1.657246 api_top_coverage=49/50 api_top1=0.900 api_topn=0.469 api_pair=0.974
+case_098 cases=99 prompt=20 target=8 avg_nll=2.682194 lcp=0 api_target_mae=2.682194 api_top_coverage=38/40 api_top1=0.625 api_topn=0.395 api_pair=0.833
+case_099 cases=100 prompt=22 target=15 avg_nll=1.501419 lcp=0 api_target_mae=1.501419 api_top_coverage=60/75 api_top1=0.733 api_topn=0.250 api_pair=0.933
+summary cases=100 tokens=2289 avg_nll=1.295131272 first_match=0 avg_lcp=0.000
+api_summary ref_tokens=2289 target_tokens=2289 target_mae=1.295131272 target_mean_delta=-1.295131272 top_items=11445 top_mapped=9484 top_coverage=0.828658803 top1_match=1671/2289 top1_rate=0.730013106 topn_hit=2600/9484 topn_recall=0.274145930 top_logprob_count=9484 top_mae=7573.302317161 top_mean_delta=7572.677147299 pair_agree=6891/7207 pair_rate=0.956153739
