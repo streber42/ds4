@@ -1071,14 +1071,14 @@ static int routed_moe_launch(
             iq2_gate_hot_threshold == iq2_down_hot_threshold && (out_dim & 1u) == 0u &&
             !g_quality_mode;
         half *iq2_hot_mid_h = use_iq2_hot_f16_mid ? (half *)gate->ptr : NULL;
-        const int use_iq2_x_f16 = use_iq2_gate_wmma && iq2_gate_hot_count != 0u &&
-            up->bytes >= (uint64_t)n_tokens * expert_in_dim * sizeof(half);
-        half *iq2_x_h = use_iq2_x_f16 ? (half *)up->ptr : NULL;
-        if (ok && use_iq2_x_f16) {
-            const uint64_t xh_count = (uint64_t)n_tokens * expert_in_dim;
-            f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(iq2_x_h, (const float *)x->ptr, xh_count);
-            ok = cuda_ok(cudaGetLastError(), "routed_moe iq2 gate x f16 launch");
-        }
+        /* Fuse f32-to-f16 into the IQ2 WMMA gate/up kernels instead of a
+         * separate pre-conversion launch.  The WMMA kernels already support
+         * float input and convert f32→f16 on-the-fly during shared-memory
+         * load, eliminating ~1689 f32_to_f16_kernel dispatches per decode
+         * token (issue 22).  Removing the separate conversion also saves
+         * the f16 write+read bandwidth. */
+        const int use_iq2_x_f16 = 0;
+        half *iq2_x_h = NULL;
         int split_gateup_done = 0;
         if (ok && split_selected) {
             const int split_supported =
@@ -1360,24 +1360,10 @@ static int routed_moe_launch(
                                     iq2_gate_hot_count);
                     const size_t shmem_n2 = (mt * bm * bk + 4u * bk * bn) * sizeof(half) +
                                             (4u * mt * bm * bn) * sizeof(float);
-                    if (use_iq2_hot_f16_mid && use_iq2_x_f16) {
-                        (void)hipFuncSetAttribute((const void *)(moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,true,true>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_n2);
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,true,true><<<grid, block, shmem_n2>>>(
-                                NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_hot_f16_mid) {
+                    if (use_iq2_hot_f16_mid) {
                         (void)hipFuncSetAttribute((const void *)(moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,true>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_n2);
                         moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,true><<<grid, block, shmem_n2>>>(
                                 NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, NULL,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_x_f16) {
-                        (void)hipFuncSetAttribute((const void *)(moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,false,true>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_n2);
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<4,16,16,16,false,true><<<grid, block, shmem_n2>>>(
-                                (float *)mid->ptr, NULL, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
                                 (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
                                 iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
                                 gate_expert_bytes, gate_row_bytes, clamp);
@@ -1397,24 +1383,10 @@ static int routed_moe_launch(
                                     iq2_gate_hot_count);
                     const size_t shmem_n2 = (mt * bm * bk + 4u * bk * bn) * sizeof(half) +
                                             (4u * mt * bm * bn) * sizeof(float);
-                    if (use_iq2_hot_f16_mid && use_iq2_x_f16) {
-                        (void)hipFuncSetAttribute((const void *)(moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,true,true>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_n2);
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,true,true><<<grid, block, shmem_n2>>>(
-                                NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_hot_f16_mid) {
+                    if (use_iq2_hot_f16_mid) {
                         (void)hipFuncSetAttribute((const void *)(moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,true>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_n2);
                         moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,true><<<grid, block, shmem_n2>>>(
                                 NULL, iq2_hot_mid_h, gate_w, up_w, (const float *)x->ptr, NULL,
-                                (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
-                                iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
-                                gate_expert_bytes, gate_row_bytes, clamp);
-                    } else if (use_iq2_x_f16) {
-                        (void)hipFuncSetAttribute((const void *)(moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,false,true>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_n2);
-                        moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel<8,16,16,16,false,true><<<grid, block, shmem_n2>>>(
-                                (float *)mid->ptr, NULL, gate_w, up_w, (const float *)x->ptr, iq2_x_h,
                                 (const float *)weights->ptr, sorted_counts, sorted_offsets, sorted_pairs,
                                 iq2_gate_hot_dev, iq2_gate_hot_count, expert_in_dim, expert_mid_dim,
                                 gate_expert_bytes, gate_row_bytes, clamp);
@@ -1888,12 +1860,11 @@ static int routed_moe_launch(
                     bucket_count);
             ok = cuda_ok(cudaGetLastError(), "routed_moe q2 expert scatter launch");
         }
-        if (ok && moe_wmma_hot) {
-            const uint64_t xh_count = (uint64_t)n_tokens * expert_in_dim;
-            f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(wmma_x_h, (const float *)x->ptr, xh_count);
-            ok = cuda_ok(cudaGetLastError(), "routed_moe q2 wmma x f16 launch");
-        }
         if (!ok) return 0;
+        /* Fuse f32-to-f16 into the Q2K WMMA gate/up kernels by using the
+         * float-input template variants (X_F16=false).  The WMMA kernels
+         * convert f32→f16 on-the-fly during shared-memory load, eliminating
+         * the pre-conversion launch and the f16 write+read bandwidth. */
 
         uint32_t wmma_f16_hot_count = 0u, wmma_f16_hot_max = 0u;
         uint32_t wmma_f16_low_count = 0u, wmma_f16_low_max = 0u;
@@ -1944,7 +1915,7 @@ static int routed_moe_launch(
             if (!cuda_ok(cudaMemcpy(wmma_gate_f16_low_dev, h_f16_low,
                                     wmma_f16_low_count * sizeof(uint32_t), cudaMemcpyHostToDevice),
                          "routed_moe q2 wmma f16-low hot copy")) return 0;
-            moe_gate_up_mid_q2K_hotlist_wmma_n2_kernel<4,16,16,16,true,true><<<grid, block, shmem_n2>>>(
+            moe_gate_up_mid_q2K_hotlist_wmma_n2_kernel<4,16,16,16,true><<<grid, block, shmem_n2>>>(
                     NULL, wmma_mid_h, gate_w, up_w, (const float *)x->ptr, wmma_x_h, (const float *)weights->ptr,
                     counts, offsets, sorted_pairs, wmma_gate_f16_low_dev, wmma_f16_low_count,
                     expert_in_dim, expert_mid_dim, gate_expert_bytes, gate_row_bytes, n_expert, clamp);
@@ -1961,7 +1932,7 @@ static int routed_moe_launch(
             if (!cuda_ok(cudaMemcpy(wmma_gate_hot_dev, h_f16_hot,
                                     wmma_f16_hot_count * sizeof(uint32_t), cudaMemcpyHostToDevice),
                          "routed_moe q2 wmma f16-mid hot copy")) return 0;
-            moe_gate_up_mid_q2K_hotlist_wmma_n2_kernel<8,16,16,16,true,true><<<grid, block, shmem_n2>>>(
+            moe_gate_up_mid_q2K_hotlist_wmma_n2_kernel<8,16,16,16,true><<<grid, block, shmem_n2>>>(
                     NULL, wmma_mid_h, gate_w, up_w, (const float *)x->ptr, wmma_x_h, (const float *)weights->ptr,
                     counts, offsets, sorted_pairs, wmma_gate_hot_dev, wmma_f16_hot_count,
                     expert_in_dim, expert_mid_dim, gate_expert_bytes, gate_row_bytes, n_expert, clamp);
