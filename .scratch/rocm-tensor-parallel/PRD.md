@@ -2,6 +2,10 @@
 
 Status: ready-for-agent
 
+**Proof of concept published:** tag `tp-poc-v1` captures the current state of this port —
+what works, what does not, current throughput, and how to reproduce. See
+[`POC.md`](POC.md).
+
 ## Problem Statement
 
 I run DeepSeek-V4-Flash (an 80 GiB IQ2/Q2_K quant) locally on a workstation with four AMD
