@@ -16882,6 +16882,13 @@ static bool metal_graph_alloc_raw_cap(
 #else
     g->rocm_tp4 = false;
 #endif
+    /* ROCm TP=4: set tp_world and tp_rank for the attention/MoE/output-head
+     * sharding logic.  Each tier is a rank; tp_rank is set per-call based on
+     * active_tier in the decode loop. */
+    if (g->rocm_tp4) {
+        g->tp_world = 4;
+        /* tp_rank will be set dynamically based on active_tier during decode */
+    }
     g->cuda_tp_attn = g->cuda_tp_decode && metal_graph_cuda_tp_attn_requested();
     g->cuda_tp_attn_peer_read = metal_graph_cuda_tp_attn_peer_read_requested();
     g->cuda_tp_attn_heads = g->cuda_tp_decode && metal_graph_cuda_tp_attn_heads_requested();
@@ -21667,6 +21674,11 @@ static bool metal_graph_encode_decode_layer_phase(
         const int this_tier = g->placement[il + 1];
         if (!metal_graph_set_active_tier_decode(g, this_tier)) return false;
     }
+    /* ROCm TP=4: set tp_rank to the active tier so the sharding logic
+     * (head split, expert split, etc.) uses the correct rank. */
+    if (g->rocm_tp4) {
+        g->tp_rank = (uint32_t)g->active_tier;
+    }
     const uint64_t hc_dim = (uint64_t)DS4_N_HC * DS4_N_EMBD;
     const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
     const uint64_t q_rank = layer->attn_q_a->dim[1];
@@ -21696,9 +21708,11 @@ static bool metal_graph_encode_decode_layer_phase(
     const int cuda_tp_home_tier = g->active_tier;
     const int cuda_tp_partner_tier = g->cuda_tp_decode
         ? metal_graph_cuda_tp_partner_tier(cuda_tp_home_tier) : -1;
-    const bool tp_split_attn = g->tp_world == 2;
+    /* TP=2 and TP=4 both split attention heads across ranks.  tp_world is
+     * 2 for CUDA TP=2, 4 for ROCm TP=4, 0 otherwise. */
+    const bool tp_split_attn = g->tp_world >= 2;
     const uint32_t tp_heads = tp_split_attn ?
-        (uint32_t)DS4_N_HEAD / 2u : (uint32_t)DS4_N_HEAD;
+        (uint32_t)DS4_N_HEAD / g->tp_world : (uint32_t)DS4_N_HEAD;
     const uint32_t tp_head0 = tp_split_attn ? g->tp_rank * tp_heads : 0;
 
     bool ok = true;
@@ -22685,7 +22699,7 @@ static bool metal_graph_encode_decode_layer_phase(
         ok = false;
     }
     if (ok && cuda_tp_attn) {
-        const uint32_t tp_groups = n_groups / 2u;
+        const uint32_t tp_groups = n_groups / g->tp_world;
         const uint64_t tp_heads_bytes = (uint64_t)tp_groups * group_dim * sizeof(float);
         const uint64_t tp_heads_off = (uint64_t)tp_groups * group_dim * sizeof(float);
         const bool cuda_tp_attn_peer_read =
@@ -22834,7 +22848,7 @@ static bool metal_graph_encode_decode_layer_phase(
         /* Group-sliced attention output: this rank computes its half of the
          * output groups and the matching k-window of the expand projection,
          * leaving a partial block output in the gate slot. */
-        const uint32_t tp_groups = n_groups / 2;
+        const uint32_t tp_groups = n_groups / g->tp_world;
         ok = metal_graph_attention_output_dense_quant_tp(
                 g->tp_out[il * DS4_TP_GATES_PER_LAYER + DS4_TP_GATE_ATTN],
                 metal_graph_attn_low(g),
