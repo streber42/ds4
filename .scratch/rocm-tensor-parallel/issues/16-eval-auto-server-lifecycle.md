@@ -1,6 +1,6 @@
 # Automated local server lifecycle management for evaluation harness
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
