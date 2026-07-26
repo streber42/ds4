@@ -39,7 +39,7 @@ CORE_OBJS = ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_cuda.o ds4_layer_pack
 CPU_CORE_OBJS = ds4_cpu.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
-ROCM_ARCH ?= gfx1151
+ROCM_ARCH ?= gfx1151,gfx1201
 ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH)
 ROCM_LDLIBS ?= -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
 DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
@@ -105,8 +105,8 @@ help:
 	@echo "  make cuda-spark          Build CUDA for DGX Spark / GB10"
 	@echo "  make cuda-generic        Build CUDA for a generic local CUDA GPU"
 	@echo "  make cuda CUDA_ARCH=sm_N Build CUDA with an explicit nvcc -arch value"
-	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151"
-	@echo "  make rocm                Alias for make strix-halo"
+	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151 only"
+	@echo "  make rocm                Build ROCm for gfx1151 + gfx1201 (multi-arch)"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
 	@echo "  make test                Build and run tests"
 	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
@@ -129,12 +129,18 @@ cuda:
 
 strix-halo:
 	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent \
+		ROCM_ARCH=gfx1151 \
 		CORE_OBJS="ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o" \
 		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD" \
 		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
 		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
 
-rocm: strix-halo
+rocm:
+	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent \
+		CORE_OBJS="ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o" \
+		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD" \
+		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
+		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
 
 # Quality fixture scorer built against the ROCm backend, so the multi-case
 # fixture can be run on the pipeline / tensor-parallel build rather than only

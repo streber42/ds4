@@ -6105,6 +6105,15 @@ extern "C" void ds4_rocm_activate_tier_blas(int tier) {
     g_blas_active_tier = tier;
 }
 
+/* Arch-mismatch probe: a tiny __global__ used only by ds4_gpu_init() to
+ * confirm the binary carries a code object for the active GPU.  HIP
+ * segfaults inside libamdhip64 on the first kernel launch when the binary
+ * has no compatible code object for the device (e.g. built for gfx1151,
+ * running on gfx1201).  hipFuncGetAttributes returns a clean error instead
+ * of crashing, so we use it here to fail loudly at init with a hint about
+ * which ROCM_ARCH to rebuild with. */
+__global__ static void ds4_rocm_arch_probe_kernel(void) { }
+
 extern "C" int ds4_gpu_init(void) {
     int dev = g_gpu[0].device_id;
     if (!cuda_ok(cudaSetDevice(dev), "set device")) return 0;
@@ -6112,6 +6121,31 @@ extern "C" int ds4_gpu_init(void) {
     if (cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "backend initialized on %s (sm_%d%d)\n",
                 prop.name, prop.major, prop.minor);
+    }
+    /* Confirm the binary has a code object for this GPU before we proceed.
+     * Without this, a mismatch between ROCM_ARCH and the active device
+     * would crash with a segfault on the first real kernel launch. */
+    {
+        hipFuncAttributes probe_attr;
+        hipError_t probe_err = hipFuncGetAttributes(&probe_attr,
+            (const void *)&ds4_rocm_arch_probe_kernel);
+        if (probe_err != hipSuccess) {
+            const char *arch_name = (prop.gcnArchName[0] != '\0')
+                ? prop.gcnArchName : "unknown";
+            fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "kernel code-object probe failed on %s "
+                    "(%s): %s\n"
+                DS4_GPU_LOG_PREFIX "this binary was not compiled for the "
+                    "active GPU architecture.\n"
+                DS4_GPU_LOG_PREFIX "rebuild with a matching ROCM_ARCH, "
+                    "for example: make rocm ROCM_ARCH=%s\n",
+                prop.name,
+                arch_name,
+                hipGetErrorString(probe_err),
+                arch_name);
+            (void)cudaGetLastError();
+            return 0;
+        }
     }
     /* Populate and select tier 0's handles through the same per-tier path
      * every later ds4_gpu_set_current_device(tier) switch uses (see
