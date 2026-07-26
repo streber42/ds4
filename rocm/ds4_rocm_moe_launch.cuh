@@ -10,6 +10,22 @@ static int routed_moe_align256_checked(uint64_t v, uint64_t *out) {
     return 1;
 }
 
+/* WMMA hot-path kernels for IQ2 batch MoE.  Enabled unconditionally after
+ * profiling confirmed ~5× per-layer speedup on gfx1201 (issue 20).  Set
+ * DS4_ROCM_MOE_WMMA=0 to force the scalar tile8 path for debugging. */
+static int ds4_rocm_moe_wmma_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *env = getenv("DS4_ROCM_MOE_WMMA");
+        if (env != NULL && (env[0] == '0' && env[1] == '\0')) {
+            enabled = 0;
+        } else {
+            enabled = 1;
+        }
+    }
+    return enabled;
+}
+
 enum {
     DS4_ROCM_MOE_DECODE_PROFILE_GATE_RESIDENT_START = 0,
     DS4_ROCM_MOE_DECODE_PROFILE_GATE_RESIDENT_END,
@@ -237,7 +253,7 @@ static int routed_moe_q2_float_down_launch(
     uint32_t hot_count = 0u;
     uint32_t hot_max = 0u;
     const uint32_t hot_threshold = 8u;
-    const int use_wmma_hot = 0;
+    const int use_wmma_hot = ds4_rocm_moe_wmma_enabled();
     uint32_t h_hot[DS4_ROCM_MAX_N_EXPERT] = {0};
     if (use_wmma_hot) {
         for (uint32_t e = 0; e < n_total_expert; e++) {
@@ -1028,7 +1044,7 @@ static int routed_moe_launch(
         const uint32_t iq2_gate_hot_threshold = 8u;
         const uint32_t iq2_down_hot_threshold = 8u;
         uint32_t h_iq2_gate_hot[DS4_ROCM_MAX_N_EXPERT] = {0};
-        const uint32_t use_iq2_gate_wmma = 0;
+        const uint32_t use_iq2_gate_wmma = (uint32_t)ds4_rocm_moe_wmma_enabled() && sorted_counts != NULL;
         if (use_iq2_gate_wmma) {
             uint32_t h_counts[DS4_ROCM_MAX_N_EXPERT] = {0};
             if (!cuda_ok(cudaMemcpy(h_counts, sorted_counts, n_total_expert * sizeof(uint32_t), cudaMemcpyDeviceToHost),
@@ -1330,7 +1346,8 @@ static int routed_moe_launch(
                         clamp);
                 }
             }
-            ok = cuda_ok(cudaDeviceSynchronize(), "routed_moe gate/up launch");
+            // Sync removed after #18 dispatch-race fix: stream ordering
+            // guarantees gate/up kernels finish before mid quantize starts.
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
             if (ok && use_iq2_gate_wmma && iq2_gate_hot_count != 0u && iq2_gate_hot_max != 0u) {
                 constexpr uint32_t bm = 16u, bn = 16u, bk = 16u;

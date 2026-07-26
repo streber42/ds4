@@ -97,6 +97,7 @@
 #define cublasCreate hipblasCreate
 #define cublasDestroy hipblasDestroy
 #define cublasSetMathMode hipblasSetMathMode
+#define cublasSetStream hipblasSetStream
 #define cublasSgemm hipblasSgemm
 #define cublasSgemmStridedBatched hipblasSgemmStridedBatched
 #define cublasGemmEx hipblasGemmEx

@@ -4732,6 +4732,11 @@ extern "C" int ds4_gpu_lookup_cache_device(uint64_t source_offset, uint64_t byte
     return d;
 }
 
+static inline int ds4_tensor_device_idx(const ds4_gpu_tensor *t) {
+    if (!t) return -1;
+    return t->device_id >= 0 ? t->device_id : t->owner;
+}
+
 static const char *cuda_resolve_weight_ptr(const void *model_map,
                                              uint64_t offset,
                                              uint64_t bytes,
@@ -5435,10 +5440,29 @@ static void cuda_q8_f16_warmup_attention_output_b_gemm(const __half *out_b_f16_t
     if (st == CUBLAS_STATUS_SUCCESS) (void)cudaDeviceSynchronize();
 }
 
-static int cuda_ok(cudaError_t err, const char *what) {
-    if (err == cudaSuccess) return 1;
-    fprintf(stderr, DS4_GPU_LOG_PREFIX "%s failed: %s\n", what, cudaGetErrorString(err));
+static int ds4dbg_sync_match(const char *what) {
+    const char *sync_pattern = getenv("DS4DBG_SYNC");
+    if (!sync_pattern || !what) return 0;
+    if (strcmp(sync_pattern, "*") == 0) return 1;
+    char buf[512];
+    strncpy(buf, sync_pattern, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, "|", &save); tok; tok = strtok_r(NULL, "|", &save)) {
+        if (strstr(what, tok) != NULL) return 1;
+    }
     return 0;
+}
+
+static int cuda_ok(cudaError_t err, const char *what) {
+    if (err != cudaSuccess) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "%s failed: %s\n", what, cudaGetErrorString(err));
+        return 0;
+    }
+    if (ds4dbg_sync_match(what)) {
+        cudaDeviceSynchronize();
+    }
+    return 1;
 }
 
 static double cuda_wall_sec(void) {
@@ -6042,9 +6066,14 @@ static void cuda_model_range_release_all(void) {
 }
 
 static int cublas_ok(cublasStatus_t st, const char *what) {
-    if (st == CUBLAS_STATUS_SUCCESS) return 1;
-    fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " %s failed: status %d\n", what, (int)st);
-    return 0;
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "ds4: " DS4_GPU_BLAS_NAME " %s failed: status %d\n", what, (int)st);
+        return 0;
+    }
+    if (ds4dbg_sync_match(what)) {
+        cudaDeviceSynchronize();
+    }
+    return 1;
 }
 
 /* See the comment by g_cublas_by_tier's declaration above. */
@@ -6057,11 +6086,13 @@ extern "C" void ds4_rocm_activate_tier_blas(int tier) {
                     ? CUBLAS_DEFAULT_MATH
                     : CUBLAS_TF32_TENSOR_OP_MATH;
             (void)cublasSetMathMode(g_cublas_by_tier[tier], math_mode);
+            (void)cublasSetStream(g_cublas_by_tier[tier], NULL);
             g_cublas_ready_by_tier[tier] = 1;
         }
     }
     g_cublas = g_cublas_by_tier[tier];
     g_cublas_ready = g_cublas_ready_by_tier[tier];
+    if (g_cublas_ready) (void)cublasSetStream(g_cublas, NULL);
 #ifdef __HIP_PLATFORM_AMD__
     if (!g_hipblaslt_ready_by_tier[tier]) {
         if (hipblaslt_ok(hipblasLtCreate(&g_hipblaslt_by_tier[tier]), "create tier handle")) {

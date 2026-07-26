@@ -428,7 +428,9 @@ extern "C" int ds4_gpu_rms_norm_weight_tensor(ds4_gpu_tensor *out, const ds4_gpu
         !cuda_model_range_fits(model_size, weight_offset, weight_bytes) ||
         !cuda_tensor_has_f32(out, n) || !cuda_tensor_has_f32(x, n)) return 0;
     if (n == 0u) return 1;
-    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "rms_weight");
+    const int logical_tier = ds4_tensor_device_idx(out);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    const char *wptr = cuda_resolve_weight_ptr(model_map, weight_offset, weight_bytes, logical_tier, "rms_weight");
     if (!wptr) return 0;
     const float *w = (const float *)wptr;
     rms_norm_weight_kernel<<<1, 256>>>((float *)out->ptr, (const float *)x->ptr, w, n, 1, eps);
@@ -441,7 +443,9 @@ extern "C" int ds4_gpu_rms_norm_weight_rows_tensor(ds4_gpu_tensor *out, const ds
         !cuda_tensor_has_elems2(out, n, rows, sizeof(float)) ||
         !cuda_tensor_has_elems2(x, n, rows, sizeof(float))) return 0;
     if (n == 0u || rows == 0u) return 1;
-    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "rms_weight");
+    const int logical_tier = ds4_tensor_device_idx(out);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    const char *wptr = cuda_resolve_weight_ptr(model_map, weight_offset, weight_bytes, logical_tier, "rms_weight");
     if (!wptr) return 0;
     const float *w = (const float *)wptr;
     rms_norm_weight_kernel<<<rows, 256>>>((float *)out->ptr, (const float *)x->ptr, w, n, rows, eps);
@@ -602,6 +606,8 @@ extern "C" int ds4_gpu_attn_q_b_f16_head_rms_rope_tail_tensor(
 
 static int cuda_rope_tail_stride_tensor(ds4_gpu_tensor *x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim, uint32_t n_rot, uint32_t pos0, uint32_t pos_stride, uint32_t n_ctx_orig, bool inverse, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow) {
     if (!x || n_rot > head_dim || (n_rot & 1) || x->bytes < (uint64_t)n_tok * n_head * head_dim * sizeof(float)) return 0;
+    const int logical_tier = ds4_tensor_device_idx(x);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
     uint32_t pairs = n_tok * n_head * (n_rot / 2);
     rope_tail_kernel<<<(pairs + 255) / 256, 256>>>((float *)x->ptr, n_tok, n_head, head_dim, n_rot, pos0, pos_stride, n_ctx_orig, inverse ? 1 : 0, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
     return cuda_ok(cudaGetLastError(), "rope_tail launch");

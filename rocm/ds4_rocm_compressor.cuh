@@ -178,6 +178,56 @@ static uint64_t cuda_tensor_2d_bytes(uint32_t type, uint64_t width, uint64_t row
     return 0;
 }
 
+/* ── Same-device ordering barrier ─────────────────────────────────────────
+ * gfx1201's hardware scheduler can reorder kernel launches on the default
+ * stream around a CPU-side hipStreamSynchronize(0) call (which is a host-side
+ * wait, not a GPU-side ordering edge).  Using an explicit event record+wait
+ * on the default stream creates a real GPU-side happens-before barrier that
+ * the HWS cannot reorder past —‑ the same pattern as g_shared_gate_up_ready_event
+ * in ds4_rocm_shared_expert.cuh and the xdev producer events in ds4_rocm_xdev.cu.
+ */
+#define DS4_ROCM_COMPRESSOR_MAX_DEVICES 64
+static hipEvent_t g_compressor_barrier_event[DS4_ROCM_COMPRESSOR_MAX_DEVICES];
+static bool      g_compressor_barrier_ready[DS4_ROCM_COMPRESSOR_MAX_DEVICES];
+
+static int cuda_compressor_barrier(int device_id) {
+    if (device_id < 0 || device_id >= DS4_ROCM_COMPRESSOR_MAX_DEVICES) return 0;
+    if (!g_compressor_barrier_ready[device_id]) {
+        hipError_t err = hipEventCreateWithFlags(
+                &g_compressor_barrier_event[device_id], hipEventDisableTiming);
+        if (err != hipSuccess) {
+            fprintf(stderr, DS4_GPU_LOG_PREFIX
+                    "compressor barrier event create failed (dev=%d): %s\n",
+                    device_id, hipGetErrorString(err));
+            (void)hipGetLastError();
+            return 0;
+        }
+        g_compressor_barrier_ready[device_id] = true;
+    }
+    /* GPU-side ordering edge: all prior work on the default stream must
+     * complete before the event is signaled, and all future work on the
+     * default stream must wait for the signal.  This is a fire-and-forget
+     * barrier‑‑the event is not reused until the next call records it
+     * again, so there is no stale-event hazard. */
+    hipError_t err = hipEventRecord(g_compressor_barrier_event[device_id], 0);
+    if (err != hipSuccess) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX
+                "compressor barrier event record failed (dev=%d): %s\n",
+                device_id, hipGetErrorString(err));
+        (void)hipGetLastError();
+        return 0;
+    }
+    err = hipStreamWaitEvent(0, g_compressor_barrier_event[device_id], 0);
+    if (err != hipSuccess) {
+        fprintf(stderr, DS4_GPU_LOG_PREFIX
+                "compressor barrier stream wait failed (dev=%d): %s\n",
+                device_id, hipGetErrorString(err));
+        (void)hipGetLastError();
+        return 0;
+    }
+    return 1;
+}
+
 static int cuda_ape_type_supported(uint32_t type) {
     return type == 0u || type == 1u || type == 8u;
 }
@@ -218,7 +268,9 @@ extern "C" int ds4_gpu_compressor_store_batch_tensor(
         !cuda_tensor_has_bytes(state_kv, state_bytes) || !cuda_tensor_has_bytes(state_score, state_bytes)) {
         return 0;
     }
-    const char *ape = cuda_model_range_ptr(model_map, ape_offset, ape_bytes, "compressor_ape");
+    const int logical_tier = ds4_tensor_device_idx(state_kv);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    const char *ape = cuda_resolve_weight_ptr(model_map, ape_offset, ape_bytes, logical_tier, "compressor_ape");
     if (!ape) return 0;
     uint64_t n = (uint64_t)n_tokens * width;
     compressor_store_kernel<<<(n + 255) / 256, 256>>>(
@@ -285,6 +337,13 @@ extern "C" int ds4_gpu_compressor_update_tensor(
         (emit && !cuda_tensor_has_bytes(comp_cache, comp_bytes))) {
         return 0;
     }
+    const int logical_tier = ds4_tensor_device_idx(state_kv);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    /* Ordering barrier before reading state_kv/state_score.  The previous
+     * decode step's store/shift kernel wrote these via an earlier call —‑ on
+     * gfx1201 that write may not be visible without an explicit GPU-side edge
+     * even though both calls share the default stream. */
+    if (!cuda_compressor_barrier(logical_tier >= 0 ? logical_tier : 0)) return 0;
     if (!state_already_stored) {
         if (!ds4_gpu_compressor_store_batch_tensor(kv_cur, sc_cur, state_kv, state_score,
                                                      model_map, model_size, ape_offset, ape_type,
@@ -374,8 +433,20 @@ extern "C" int ds4_gpu_compressor_prefill_tensor(
         (n_comp && !cuda_tensor_has_bytes(comp_cache, comp_bytes))) {
         return 0;
     }
-    const char *ape = cuda_model_range_ptr(model_map, ape_offset, ape_bytes, "compressor_ape");
+    const int logical_tier = ds4_tensor_device_idx(state_kv);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    const char *ape = cuda_resolve_weight_ptr(model_map, ape_offset, ape_bytes, logical_tier, "compressor_ape");
     if (!ape) return 0;
+
+    /* GPU-side ordering barrier: replace the CPU-side hipStreamSynchronize(0)
+     * with an event record+wait pair on the current device's default stream.
+     * On gfx1201 the HWS can reorder around a host-side sync; an explicit
+     * event record+stream-wait creates a real device-side happens-before edge
+     * that the hardware scheduler must respect.  Without this edge, a previous
+     * layer's shared‑expert (or other) kernel or an async cross-device transfer
+     * may still be in flight when the memset and kernels below begin, corrupting
+     * the output compressed‑KV buffers that depend on clean state_kv/state_score. */
+    if (!cuda_compressor_barrier(logical_tier >= 0 ? logical_tier : 0)) return 0;
 
     uint64_t state_n = (uint64_t)state_rows * width;
     if (!cuda_ok(cudaMemsetAsync(state_kv->ptr, 0, (size_t)(state_n * sizeof(float))),
@@ -482,8 +553,15 @@ extern "C" int ds4_gpu_compressor_prefill_ratio4_replay_tensor(
         !cuda_tensor_has_bytes(comp_cache, comp_bytes)) {
         return 0;
     }
-    const char *ape = cuda_model_range_ptr(model_map, ape_offset, ape_bytes, "compressor_ape");
+    const int logical_tier = ds4_tensor_device_idx(state_kv);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    const char *ape = cuda_resolve_weight_ptr(model_map, ape_offset, ape_bytes, logical_tier, "compressor_ape");
     if (!ape) return 0;
+    /* Same-device ordering barrier before reading state_kv/state_score in the
+     * replay pool kernel —‑ these state buffers were written by a prior call
+     * (the initial prefill's set_rows) that may not yet be visible on gfx1201
+     * without an explicit GPU-side ordering edge. */
+    if (!cuda_compressor_barrier(logical_tier >= 0 ? logical_tier : 0)) return 0;
     dim3 grid((head_dim + 255) / 256, n_comp, 1);
     compressor_prefill_pool_kernel<<<grid, 256>>>(
             (float *)comp_cache->ptr,
@@ -543,8 +621,15 @@ extern "C" int ds4_gpu_compressor_prefill_state_ratio4_tensor(
         !cuda_tensor_has_bytes(state_kv, state_bytes) || !cuda_tensor_has_bytes(state_score, state_bytes)) {
         return 0;
     }
-    const char *ape = cuda_model_range_ptr(model_map, ape_offset, ape_bytes, "compressor_ape");
+    const int logical_tier = ds4_tensor_device_idx(state_kv);
+    if (logical_tier >= 0 && logical_tier < g_n_gpus) (void)ds4_gpu_set_current_device(logical_tier);
+    const char *ape = cuda_resolve_weight_ptr(model_map, ape_offset, ape_bytes, logical_tier, "compressor_ape");
     if (!ape) return 0;
+    /* Ordering barrier before the state memset —‑ ensures any prior work on
+     * this device's default stream (e.g. the compressor prefill's rms/rope/
+     * quantize chain) has completed before we clear state buffers for the
+     * next chunk. */
+    if (!cuda_compressor_barrier(logical_tier >= 0 ? logical_tier : 0)) return 0;
     uint64_t state_n = (uint64_t)state_rows * width;
     if (!cuda_ok(cudaMemsetAsync(state_kv->ptr, 0, (size_t)(state_n * sizeof(float))),
                  "compressor state kv zero")) return 0;

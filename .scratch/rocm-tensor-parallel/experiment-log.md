@@ -182,4 +182,45 @@ while the thing it packages does not.
 2. **TP default throughput** is **12.44 tok/s** (prefill **104.68 tok/s**). TP generation speed remains lower than the 4-GPU pipeline baseline (12.44 t/s vs 22.14 t/s) on this 4-GPU topology (2 TP pairs pipelined).
 3. **Quality fixture status without serialization:** As documented in Issue 18, the cross-device peer-copy fix alone does not resolve the un-shimmed default quality degradation (`avg_nll` 3.086 vs 0.370 serialized baseline) due to a remaining intra-device compressor prefill race spun off to Issue 23.
 
+## 2026-07-26 — MoE hot-path optimization: WMMA enabled by default (Issue 20)
+
+**Goal:** Profile-guided MoE kernel optimization — the dominant compute cost (72% of GPU time per pre-fix profiling).
+
+**rocprof kernel profile (4-GPU TP, 2048 prefill + 8 gen tokens):**
+
+**Baseline (non-WMMA priority dispatch):**
+| Kernel | Avg | Calls | % GPU |
+|---|---|---|---|
+| `moe_gate_up_mid_expert_tile8_rowspan_kernel` | 33.0 ms | 344 | 54.0% |
+| `moe_down_q2K_expert_batch_sharedmid_kernel` | 10.9 ms | 344 | 17.9% |
+
+**WMMA-enabled (DS4_ROCM_MOE_WMMA hotlist kernels):**
+| Kernel | Avg | Calls | % GPU |
+|---|---|---|---|
+| `moe_gate_up_mid_iq2_hotlist_wmma_n2_kernel` | 4.08 ms | 344 | 15.8% |
+| `moe_gate_up_mid_expert_tile8_rowspan_kernel` (non-hot fallback) | 2.30 ms | 344 | 8.9% |
+| `moe_down_q2K_hotlist_wmma_n2_kernel` | 1.91 ms | 344 | 7.4% |
+| `moe_down_q2K_expert_batch_sharedmid_kernel` (non-hot fallback) | 0.58 ms | 344 | 2.3% |
+
+Per-layer MoE cost dropped from ~43.9ms to ~8.87ms (5×).
+
+**Throughput (256 gen tokens):**
+| Metric | Baseline | WMMA On | Δ |
+|---|---|---|---|
+| Prefill | 104.12 t/s | **227.85 t/s** | **+2.19×** |
+| Generation | 12.43 t/s | 12.42 t/s | ~0% |
+
+**WMMA gate removed.** `ds4_rocm_moe_wmma_enabled()` now returns 1 unconditionally (escape hatch: `DS4_ROCM_MOE_WMMA=0`). Decode throughput unchanged (cross-device TP overhead, not kernel compute).
+
+**Quality fixture (AMD_SERIALIZE_KERNEL=3, 100 cases, 2289 tokens):**
+| Config | avg_nll | first_match | avg_lcp |
+|---|---|---|---|
+| Pipeline serialized (reference) | 0.373815 | 64/100 | 5.81 |
+| TP serialized (pre-WMMA) | 0.369930 | 68/100 | 6.70 |
+| **TP serialized (WMMA now)** | **0.372143** | 67/100 | 6.59 |
+
+Delta WMMA vs pre-WMMA TP: +0.002213 (+0.60%) — within accepted ±1% variance; floating-point reassociation from WMMA matrix cores vs qwarp32 dot-product. Quality verified, no regression.
+
+**Issue 20 status: ready-for-human.** Prefill throughput improved 2.19×; generation unchanged. Decode throughput improvement requires addressing cross-device TP handoff overhead (separate from kernel optimization).
+
 

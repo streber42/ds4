@@ -334,7 +334,8 @@ static int cuda_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *mode
                                          in_dim, out_dim, x, n_tok, label ? label : "shared_expert")) {
         return 1;
     }
-    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0");
+    const int logical_tier = ds4_tensor_device_idx(out);
+    const char *wptr = cuda_resolve_weight_ptr(model_map, weight_offset, weight_bytes, logical_tier, "q8_0");
     if (!wptr) return 0;
     if (n_tok == 1 && !cuda_q8_prequant_decode_enabled()) {
         const bool extended_sharedx =
@@ -886,7 +887,8 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         !cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "f16");
+    const int logical_tier = ds4_tensor_device_idx(out);
+    const char *wptr = cuda_resolve_weight_ptr(model_map, weight_offset, weight_bytes, logical_tier, "f16");
     if (!wptr) return 0;
     const __half *w = (const __half *)wptr;
     const int ordered_decode = n_tok == 1u;
@@ -977,8 +979,9 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
         out1->bytes < out_dim * sizeof(float)) {
         return 0;
     }
-    const __half *w0 = (const __half *)cuda_model_range_ptr(model_map, weight0_offset, weight_bytes, "f16_pair0");
-    const __half *w1 = (const __half *)cuda_model_range_ptr(model_map, weight1_offset, weight_bytes, "f16_pair1");
+    const int logical_tier = ds4_tensor_device_idx(out0);
+    const __half *w0 = (const __half *)cuda_resolve_weight_ptr(model_map, weight0_offset, weight_bytes, logical_tier, "f16_pair0");
+    const __half *w1 = (const __half *)cuda_resolve_weight_ptr(model_map, weight1_offset, weight_bytes, logical_tier, "f16_pair1");
     if (!w0 || !w1) return 0;
     if (!g_quality_mode && !cuda_runtime_config()->graph_dump) {
         if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
