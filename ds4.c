@@ -23512,8 +23512,10 @@ static bool metal_graph_encode_decode_layer_phase(
         }
     }
     /* Real TP split slices the shared expert by intermediate lanes, which
-     * needs the unfused gate/up/swiglu/down sequence. */
+     * needs the unfused gate/up/swiglu/down sequence.
+     * ROCm TP=4: shared expert is NOT split; only rank 0 computes it. */
     const bool tp_split_shared = g->tp_world == 2;
+    const bool rocm_tp4_moe = g->rocm_tp4;
     const bool q4_selected_shared_overlap =
         metal_graph_use_q4_selected_shared_overlap(g) &&
         metal_graph_decode_q4_selected_slots_expected(g,
@@ -23905,7 +23907,43 @@ static bool metal_graph_encode_decode_layer_phase(
     const bool tp_fold_ffn = tp_split_shared &&
                              !keep_ffn_out &&
                              !metal_graph_directional_steering_ffn_enabled(g);
-    if (ok && !tp_fold_ffn && !cuda_tp_moe) ok = ds4_gpu_routed_moe_one_tensor(metal_graph_routed_out(g),
+    /* ROCm TP=4: each rank computes only its owned 64 experts.
+     * Uses ds4_gpu_routed_moe_one_owned_tensor which filters the router's
+     * top-6 selected experts by the rank's ownership range [rank*64, rank*64+64).
+     * This is the expert-parallel split: the full 256 experts are distributed
+     * 64/64/64/64 across the 4 ranks. */
+    const uint32_t tp4_experts_per_rank = DS4_N_EXPERT / 4u;
+    const uint32_t tp4_owned_base = g->tp_rank * tp4_experts_per_rank;
+    if (ok && rocm_tp4_moe) {
+        ok = ds4_gpu_routed_moe_one_owned_tensor(
+                metal_graph_routed_out(g),
+                metal_graph_routed_gate(g),
+                metal_graph_routed_up(g),
+                metal_graph_routed_mid(g),
+                metal_graph_routed_down(g),
+                model->map, model->size,
+                layer->ffn_gate_exps->abs_offset,
+                layer->ffn_up_exps->abs_offset,
+                layer->ffn_down_exps->abs_offset,
+                layer->ffn_gate_exps->type,
+                layer->ffn_down_exps->type,
+                gate_expert_bytes, gate_row_bytes,
+                down_expert_bytes, down_row_bytes,
+                (uint32_t)expert_in_dim,
+                (uint32_t)down_in_dim,
+                (uint32_t)routed_out_dim,
+                metal_graph_router_selected(g),
+                metal_graph_router_weights(g),
+                DS4_N_EXPERT,
+                DS4_N_EXPERT_USED,
+                tp4_owned_base,
+                tp4_experts_per_rank,
+                DS4_SWIGLU_CLAMP_EXP,
+                metal_graph_ffn_norm(g),
+                NULL,
+                false,
+                NULL) != 0;
+    } else if (ok && !tp_fold_ffn && !cuda_tp_moe) ok = ds4_gpu_routed_moe_one_tensor(metal_graph_routed_out(g),
                                                  metal_graph_routed_gate(g),
                                                  metal_graph_routed_up(g),
                                                  metal_graph_routed_mid(g),
@@ -23949,7 +23987,15 @@ static bool metal_graph_encode_decode_layer_phase(
         phase == METAL_DECODE_LAYER_FROM_QA_KV_RAW_TO_SHARED_MID) {
         return ok;
     }
-    if (ok && tp_split_shared) {
+    /* ROCm TP=4: shared expert is replicated but only rank 0 computes it.
+     * Ranks 1-3 contribute zero for the shared part to avoid 4× over-counting
+     * after the all-reduce sums all partials. */
+    if (ok && rocm_tp4_moe && g->tp_rank != 0) {
+        /* Non-zero ranks: zero out shared_out so the all-reduce produces
+         * exactly 1× shared expert + all routed experts. */
+        ok = ds4_gpu_tensor_fill_f32(metal_graph_shared_out(g), 0.0f,
+                                      (uint64_t)DS4_N_EMBD) != 0;
+    } else if (ok && tp_split_shared) {
         /* Shared expert lane slice: the fused gate/up/swiglu kernel covers
          * this rank's half of the intermediate (row slicing is pure offset
          * math), compact at the buffer base; the down k-slice below turns
@@ -24210,6 +24256,85 @@ static bool metal_graph_encode_decode_layer_phase(
                 tp_ffn_a = first;
                 tp_ffn_b = second;
             }
+        }
+    } else if (ok && rocm_tp4_moe) {
+        /* ROCm TP=4: each rank's partial = shared_out (full on rank 0, zero on ranks 1-3)
+         * + routed_out (owned 64 experts). The four partials are all-reduced to produce
+         * the canonical sum: 1× shared expert + all 256 routed experts.
+         *
+         * NOTE: This code assumes the decode loop iterates over all 4 tiers per layer,
+         * computing each tier's partial before calling all-reduce. Without that iteration
+         * (see issue #29), only tier 0's partial is computed, and the all-reduce sums
+         * tier 0's partial with zeros from the other 3 tiers. */
+        const int home_tier = g->active_tier;
+
+        /* Store this tier's partial in per-tier buffers for the all-reduce. */
+        if (ok) {
+            ok = ds4_gpu_add_tensor(g->shared_out_by_tier[home_tier],
+                                     metal_graph_shared_out(g),
+                                     metal_graph_routed_out(g),
+                                     DS4_N_EMBD) != 0;
+        }
+
+        /* All-reduce: sum all 4 tiers' partials into routed_out on the home tier.
+         * The all-reduce primitive collects partials from peer devices and sums them. */
+        if (ok) {
+            /* ROCm-only symbols: declared locally to avoid pulling ds4_rocm_xdev.h
+             * into non-ROCm builds. See ds4_rocm_xdev.h for the implementations. */
+            typedef struct ds4_rocm_xdev_mesh ds4_rocm_xdev_mesh;
+            extern ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
+            extern int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
+                                                    int my_dev, float *result_ptr,
+                                                    const float *my_partial,
+                                                    const int *peer_devs,
+                                                    const float *const *peer_partials,
+                                                    int n_peers,
+                                                    size_t count, void *stream);
+
+            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+            if (!mesh) {
+                fprintf(stderr, "ds4: TP=4 MoE all-reduce: no xdev mesh\n");
+                ok = false;
+            } else {
+                /* Build peer device/buffer arrays for the 3 other tiers. */
+                int peer_devs[3];
+                const float *peer_partials[3];
+                int n_peers = 0;
+                for (int t = 0; t < 4; t++) {
+                    if (t == home_tier) continue;
+                    peer_devs[n_peers] = t;
+                    peer_partials[n_peers] = (const float *)g->shared_out_by_tier[t]->ptr;
+                    n_peers++;
+                }
+
+                /* Get the physical device ID for the home tier. */
+                int my_dev = home_tier;  /* tier index == device index for TP=4 */
+
+                /* All-reduce: result = sum of all 4 partials. */
+                int ar_ok = ds4_rocm_xdev_allreduce_f32(
+                        mesh,
+                        my_dev,
+                        (float *)metal_graph_routed_out(g)->ptr,  /* result */
+                        (const float *)g->shared_out_by_tier[home_tier]->ptr,  /* my partial */
+                        peer_devs,
+                        peer_partials,
+                        n_peers,
+                        (size_t)DS4_N_EMBD,
+                        NULL);  /* default stream */
+                if (!ar_ok) {
+                    fprintf(stderr, "ds4: TP=4 MoE all-reduce failed for tier %d\n", home_tier);
+                    ok = false;
+                }
+            }
+        }
+
+        /* After all-reduce, routed_out contains the full FFN output (shared + all routed).
+         * For keep_ffn_out or directional steering, copy to ffn_out. */
+        if (ok && keep_ffn_out) {
+            ok = metal_graph_ensure_ffn_out(g) &&
+                 ds4_gpu_tensor_copy(metal_graph_ffn_out(g), 0,
+                                      metal_graph_routed_out(g), 0,
+                                      (uint64_t)DS4_N_EMBD * sizeof(float)) != 0;
         }
     }
     if (ok && keep_ffn_out) {
