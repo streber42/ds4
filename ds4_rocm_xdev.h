@@ -66,6 +66,16 @@ int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices);
 ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
 
 /*
+ * Fence a producer device against a consumer that will read its memory
+ * directly via a peer-mapped pointer (no explicit xdev copy). Records an
+ * event on src_dev's producer (default) stream and makes dst_dev's default
+ * stream wait on it -- the same stream-ordered happens-before edge
+ * ds4_rocm_xdev_copy uses internally, exposed here for callers (e.g.
+ * ds4_gpu_tensor_wait_xdev) that only need the ordering, not a copy.
+ */
+int ds4_rocm_xdev_wait_producer(int dst_dev, int src_dev);
+
+/*
  * Tensor-parallel transport reachability.
  *
  * Tensor parallelism needs to move data between `half` home/partner tier

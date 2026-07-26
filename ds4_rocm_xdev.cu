@@ -12,6 +12,37 @@ static ds4_rocm_xdev_mesh g_global_mesh = {};
 static bool g_global_mesh_initialized = false;
 static pthread_mutex_t g_xdev_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Every producer kernel in this codebase launches on its device's default
+ * (null) stream, so "has src_dev's writer drained" is really "has src_dev's
+ * default stream reached this point". One persistent, lazily-created event
+ * per physical device publishes that point; the peer-copy stream then waits
+ * on it via hipStreamWaitEvent, which is a real stream-ordered dependency
+ * edge rather than the device-wide hipDeviceSynchronize() flush that
+ * gfx1201's hardware scheduler can reorder past. Mirrors the
+ * g_shared_gate_up_ready_event pattern in ds4_rocm_shared_expert.cuh. */
+#define DS4_ROCM_XDEV_MAX_PHYSICAL_DEVICES 64
+static pthread_mutex_t g_xdev_event_mutex = PTHREAD_MUTEX_INITIALIZER;
+static hipEvent_t g_xdev_producer_event[DS4_ROCM_XDEV_MAX_PHYSICAL_DEVICES];
+static bool g_xdev_producer_event_ready[DS4_ROCM_XDEV_MAX_PHYSICAL_DEVICES];
+
+static hipEvent_t rocm_xdev_producer_event(int device_id) {
+    if (device_id < 0 || device_id >= DS4_ROCM_XDEV_MAX_PHYSICAL_DEVICES) return NULL;
+    if (!g_xdev_producer_event_ready[device_id]) {
+        pthread_mutex_lock(&g_xdev_event_mutex);
+        if (!g_xdev_producer_event_ready[device_id]) {
+            int cur_dev = 0;
+            (void)hipGetDevice(&cur_dev);
+            (void)hipSetDevice(device_id);
+            if (hipEventCreateWithFlags(&g_xdev_producer_event[device_id], hipEventDisableTiming) == hipSuccess) {
+                g_xdev_producer_event_ready[device_id] = true;
+            }
+            (void)hipSetDevice(cur_dev);
+        }
+        pthread_mutex_unlock(&g_xdev_event_mutex);
+    }
+    return g_xdev_producer_event_ready[device_id] ? g_xdev_producer_event[device_id] : NULL;
+}
+
 __global__ static void rocm_xdev_accumulate_f32_kernel(float *dst, const float *src, size_t count) {
     size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < count) {
@@ -142,19 +173,33 @@ extern "C" int ds4_rocm_xdev_copy(ds4_rocm_xdev_mesh *mesh,
 
     if (use_peer) {
         /* The writing kernels on src_dev may still be in flight on src_dev's
-         * own stream: hipMemcpyPeerAsync below is enqueued on dst_dev and has
-         * no implicit ordering against src_dev's queue, so without this the
-         * peer copy can race ahead of src_dev's last write and read stale /
-         * partially-written memory. */
-        (void)hipSetDevice(src_dev);
-        (void)hipDeviceSynchronize();
-        (void)hipSetDevice(dst_dev);
-        hipError_t err = hipMemcpyPeerAsync(dst_ptr, dst_dev, src_ptr, src_dev, bytes, stream);
-        if (err == hipSuccess) {
-            if (!stream) (void)hipDeviceSynchronize();
-            return 1;
+         * own default stream: hipMemcpyPeerAsync below is enqueued on
+         * dst_dev and has no implicit ordering against src_dev's queue, so
+         * without an explicit edge the peer copy can race ahead of
+         * src_dev's last write and read stale / partially-written memory.
+         * A device-wide hipDeviceSynchronize() here is not a reliable fence
+         * on gfx1201's hardware scheduler, which can reorder across it;
+         * recording an event on src_dev's producer stream and making the
+         * peer-copy stream wait on it is a real stream-ordered
+         * happens-before edge the HWS must respect. */
+        hipEvent_t producer_ready = rocm_xdev_producer_event(src_dev);
+        bool ordered = false;
+        if (producer_ready) {
+            (void)hipSetDevice(src_dev);
+            if (hipEventRecord(producer_ready, 0) == hipSuccess) {
+                (void)hipSetDevice(dst_dev);
+                ordered = hipStreamWaitEvent(stream, producer_ready, 0) == hipSuccess;
+            }
         }
-        // Fall back to host staging if peer memcpy returned error
+        if (ordered) {
+            (void)hipSetDevice(dst_dev);
+            hipError_t err = hipMemcpyPeerAsync(dst_ptr, dst_dev, src_ptr, src_dev, bytes, stream);
+            if (err == hipSuccess) {
+                if (!stream) (void)hipDeviceSynchronize();
+                return 1;
+            }
+        }
+        // Fall back to host staging if the ordering edge or peer memcpy failed
     }
 
     // Host Staging Fallback
@@ -282,6 +327,16 @@ extern "C" int ds4_rocm_xdev_accumulate_f16(ds4_rocm_xdev_mesh *mesh,
 
     (void)hipFree(temp_dst);
     return err == hipSuccess;
+}
+
+extern "C" int ds4_rocm_xdev_wait_producer(int dst_dev, int src_dev) {
+    if (src_dev == dst_dev) return 1;
+    hipEvent_t producer_ready = rocm_xdev_producer_event(src_dev);
+    if (!producer_ready) return 0;
+    (void)hipSetDevice(src_dev);
+    if (hipEventRecord(producer_ready, 0) != hipSuccess) return 0;
+    (void)hipSetDevice(dst_dev);
+    return hipStreamWaitEvent(0, producer_ready, 0) == hipSuccess;
 }
 
 extern "C" int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices) {

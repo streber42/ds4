@@ -222,16 +222,15 @@ extern "C" int ds4_gpu_tensor_wait_xdev(const ds4_gpu_tensor *src,
                                           int dst_tier) {
     /* dst_tier is about to read src via direct peer access rather than an
      * explicit xdev copy; src's writer may still have kernels in flight on
-     * its own stream, which has no implicit ordering against dst_tier's
-     * queue. Block until src's device has drained so the peer read is safe. */
+     * its own default stream, which has no implicit ordering against
+     * dst_tier's queue. A device-wide hipDeviceSynchronize() is not a
+     * reliable fence on gfx1201's hardware scheduler (see the peer-copy
+     * comment in ds4_rocm_xdev.cu), so this routes through the same
+     * event-based happens-before edge ds4_rocm_xdev_copy uses. */
     if (!src || !rocm_tier_valid(dst_tier)) return 0;
     const int src_dev = rocm_tier_device(ds4_gpu_tensor_device(src));
-    int cur_dev = 0;
-    if (hipGetDevice(&cur_dev) != hipSuccess) return 0;
-    if (hipSetDevice(src_dev) != hipSuccess) return 0;
-    const bool ok = hipDeviceSynchronize() == hipSuccess;
-    (void)hipSetDevice(cur_dev);
-    return ok;
+    const int dst_dev = rocm_tier_device(dst_tier);
+    return ds4_rocm_xdev_wait_producer(dst_dev, src_dev);
 }
 
 /* Cross-device accumulate: out = local + remote, where remote may live on
