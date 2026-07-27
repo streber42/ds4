@@ -1,5 +1,48 @@
 # ROCm tensor-parallel: experiment log
 
+## 2026-07-27 — TP=4 quality fixture blocked by decode loop sync (issue 32)
+
+**Goal:** run the authoritative 100-case quality fixture on the TP=4 build
+(issue 32), the final correctness gate for the TP=4 effort.
+
+**Setup:** 4× AMD Radeon AI Pro R9700 (gfx1201), 81 GiB production model,
+`make ROCM_ARCH=gfx1201 rocm` + `make ROCM_ARCH=gfx1201 rocm-quality`,
+`AMD_SERIALIZE_KERNEL=3`.
+
+**Result: cannot complete — TP=4 path produces incoherent output.**
+
+Quick coherence test on the current build (issues #28–31 applied):
+```
+$ AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel ...
+    -p "Hello" -n 30
+Hello. [halleloo bact [ | atarnde. |:type:  epilee' (ex?a: a: a.a
+```
+Output is non-linguistic noise. The quality fixture partial run (25 of 100
+cases before kill at 600s) scored avg_nll ~6–9 per case and api_top1_rate
+~0.04–0.21 — 10–20× worse than the reference.
+
+**Root cause:** the TP=4 decode loop does not synchronize the all-reduce
+across tiers. Each tier's all-reduce reads stale peer data because the other
+tiers have not yet computed their partials for the current layer. Documented
+in detail on issues #29 and #30. The fix requires restructuring the decode
+loop to separate attention and MoE phases (issue #29).
+
+**Pipeline reference re-validated this session** (same build, no TP flag):
+
+| config | avg_nll | first_match | avg_lcp | api_top1_rate | api_pair_rate |
+|---|---|---|---|---|---|
+| 4-GPU pipeline, `AMD_SERIALIZE_KERNEL=3` (this run) | 0.3747 | 65/100 | 6.26 | 0.859 | 0.988 |
+| 4-GPU pipeline, `AMD_SERIALIZE_KERNEL=3` (issue #20 ref) | 0.3738 | 64/100 | 5.81 | 0.859 | 0.988 |
+
+Pipeline path still scores within tolerance of its own prior reference,
+confirming the test infrastructure and model are healthy. Fresh reference TSV
+saved: `.scratch/rocm-tensor-parallel/quality-out/q_pipeline_ref_tp4issue32.tsv`.
+
+**Issue 32 status: ready-for-human.** Cannot close until issues #29 and #30
+(decode loop sync) are resolved and TP=4 produces coherent output again. Once
+the decode loop is fixed, this fixture should be re-run end-to-end with the
+saved pipeline reference as the comparison baseline.
+
 ## 2026-07-25 — first quality-fixture run on the 4-GPU build (issue 10)
 
 **Goal:** issue 10's core deliverable — score the multi-GPU/tensor-parallel build
