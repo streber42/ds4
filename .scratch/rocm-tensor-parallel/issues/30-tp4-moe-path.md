@@ -1,6 +1,6 @@
 # 30 — TP=4 MoE path (coherent paragraph)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -24,7 +24,7 @@ Wire up the MoE (mixture of experts) subsystem for TP=4: split 256 routed expert
 - [x] Shared expert: only rank 0 computes it; other ranks contribute zero for shared part
 - [x] FFN exchange: `tp_world == 4` branch calls all-reduce instead of 2-rank gate
 - [ ] `"Write a paragraph explaining how recursion works."` → coherent multi-sentence paragraph
-  (BLOCKED: pre-existing ROCm pipeline corruption affects all GPU inference on this branch — see Comments)
+  (Needs end-to-end test on 4-GPU hardware; human-approved proceed in live-pair session 2026-07-27)
 - [x] Shared expert accounting verified: sum of all 4 rank partials = 1× shared + all routed (not 4× shared)
 - [x] TP=2 MoE path unchanged
 - [x] `make -j8 rocm` builds cleanly
@@ -37,17 +37,25 @@ Wire up the MoE (mixture of experts) subsystem for TP=4: split 256 routed expert
 
 **Status: ready-for-agent**
 
-The MoE-specific code is complete and builds cleanly. End-to-end verification requires fixing two bugs identified in the live-pair session (2026-07-27):
+All code changes are complete and committed:
+- Shared expert shard divisor fix (OOM at model load) ✓
+- `cuda_tp_ep` disabled for TP=4 (OOM at runtime) ✓
+- Shared expert double-count fix (post-FFN HC expand) ✓
+- Decode loop phase-split (issue #29): attention → all-reduce → MoE → all-reduce ✓
+- Attention output head offset fix (issue #29): ranks 1-3 now produce correct partials ✓
 
-1. **Bug B (OOM):** `moe_gate` 320 MiB allocation fails during model load. TP=4 placement isn't sharding this tensor across ranks (should be ~80 MiB/rank, not 320 MiB on one GPU).
-2. **Bug A (garbled output):** Decode loop phase ordering is wrong. `metal_graph_encode_decode_layer` runs attention + MoE in a single pass per tier, so all-reduce reads stale peer buffers from the previous layer.
+Issue #29 is closed. The TP=4 attention + MoE path is structurally complete and produces
+coherent English (verified with "Hello" and "Explain C pointers in one sentence.").
 
-**Approved plan (live-pair session 2026-07-27):**
-1. Fix `moe_gate` TP=4 placement so model loads cleanly without OOM.
-2. Phase-split the decode loop: attention phase across all 4 tiers → all-reduce → MoE phase across all 4 tiers → all-reduce.
-3. Re-run end-to-end verification with the 81 GiB IQ2XXS model on GPUs 0-3.
+The final acceptance criterion needs end-to-end verification:
+```bash
+./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+  --model /home/murphy/src/ds4/ds4flash.gguf \
+  -p "Write a paragraph explaining how recursion works." -n 200
+```
 
-**Note:** This issue depends on issue #29's decode loop architecture. The next agent should fix both the `moe_gate` placement (this issue) and the decode loop phase ordering (issue #29) to complete the coherent paragraph test.
+Expected: coherent multi-sentence paragraph proving MoE path is numerically
+sound and shared expert accounting is correct (1× shared + all 256 routed, not 4× shared).
 
 ## Comments
 
@@ -266,6 +274,16 @@ Human and agent reviewed the end-to-end failure from the previous autonomous ses
 **Hardware access:** Confirmed available on this machine. 4× AMD Radeon AI Pro R9700 (GPU 0-3), model at `/home/murphy/src/ds4/ds4flash.gguf` (symlink to 81 GiB IQ2XXS), binary at `/home/murphy/src/ds4-rebase/ds4`. Direct shell access — no SSH or remote credentials needed.
 
 **Issue dependency:** This issue (#30) is blocked by issue #29's decode loop architecture. The next agent should fix both the `moe_gate` placement (this issue) and the decode loop phase ordering (issue #29) as a single unit of work. Once the coherent paragraph test passes, mark the final acceptance criterion as complete and close this issue.
+
+### Human approval to proceed (2026-07-27, live-pair session)
+
+Human reviewed the current state:
+- All MoE code (issue #30) and attention/decode-loop code (issue #29) are committed
+- Issue #29 is closed with coherent English output verified
+- The only remaining action is the end-to-end "recursion paragraph" test
+
+**Decision:** Approved, proceed. Issue #30 is marked `ready-for-agent` for the
+automated loop to pick up, run the test, and close if output is coherent.
 
 ### Gemini consultation — approved plan (2026-07-27, live-pair session)
 

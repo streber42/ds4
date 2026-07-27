@@ -374,3 +374,20 @@ Delta WMMA vs pre-WMMA TP: +0.002213 (+0.60%) — within accepted ±1% variance;
 **Issue 22 status: closed.** Fusion implemented and verified; dispatch overhead eliminated but decode throughput is dominated by cross-device transfer, not kernel launches.
 
 
+## 2026-07-27 — TP=4 root cause identified: prefill attention + output head (issue 32)
+
+**Goal:** resolve the remaining TP=4 correctness bug blocking the quality fixture.
+
+**State at start of session:** HEAD `4b40c5d` (issue #29 attention output head offset fix), all tests pass, model loads cleanly on 4 GPUs (23 GiB per tier, no OOM). But TP=4 output is garbled (`" arent"` for "Explain C pointers in one sentence.") while pipeline path produces correct output (`"We need to respond to the user's initial greeting"`).
+
+**Root cause analysis:** The decode loop phase-split (issue #29) is architecturally correct — it iterates all 4 tiers per layer with proper barriers and all-reduces. Two untouched code paths cause the garbled output:
+
+1. **Prefill attention is TP=4-unaware (PRIMARY).** `metal_graph_encode_layer_attention_batch` gates `tp_row_split_attn` on `g->tp_world == 2`. For TP=4 (`tp_world == 4`), attention runs on tier 0 only. Tiers 1-3 never populate their KV cache during prefill. When the decode loop switches to tier 1, it reads garbage from its KV cache, contaminating the all-reduce.
+
+2. **Output head runs full-vocab matmul against sharded weights.** `metal_graph_encode_output_head` falls through to the default `metal_graph_matmul_dense_quant_tensor` with the full `weights->output` descriptor. For TP=4, only 1/4 of the tensor is cached per tier. Weight resolution may return NULL on discrete GPUs, producing garbage logits.
+
+**Gemini consultation:** Gemini 3.6 Flash confirmed the root cause and recommended the prefill tier-sweep + output head vocab-split fixes.
+
+**Pipeline regression false alarm:** The pipeline path regression reported in a prior session is not present at HEAD. Pipeline output is correct. The pipeline reference TSV (`q_pipeline_ref_tp4issue32.tsv`, 100 cases, avg_nll 0.374733) is valid.
+
+**Issue 32 status: ready-for-agent.** The automated loop will implement the two fixes (prefill attention tier sweep + output head vocab-split) and re-run the quality fixture.

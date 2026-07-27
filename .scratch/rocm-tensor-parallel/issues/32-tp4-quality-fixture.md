@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -23,6 +23,8 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 ## Acceptance criteria
 
 - [ ] Quality fixture runs to completion on TP=4 (100 cases, 2289 tokens)
+      - BLOCKED BY: prefill attention lacks TP=4 tier sweep (attention runs on tier 0 only → KV cache tiers 1-3 uninitialized → decode reads garbage)
+      - BLOCKED BY: output head runs full-vocab matmul against 4-way sharded weights (logits may be garbage on discrete GPU)
 - [ ] avg_nll within ±1% of pipeline serialized reference (0.373815)
 - [ ] first_match ≥ 60/100
 - [ ] api_top1_rate ≥ 0.85 (consistent with reference)
@@ -33,16 +35,16 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 
 ## Blocked by
 
-- Issue #31: TP=4 output head (full end-to-end path must work)
-- Issue #29: TP=4 attention path (decode loop synchronization — see Comments)
-- Issue #30: TP=4 MoE path (decode loop synchronization — see Comments)
+- Prefill attention lacks TP=4 tier sweep (metal_graph_encode_layer_attention_batch runs on tier 0 only)
+- Output head lacks TP=4 vocab-split path (full-vocab matmul against 4-way sharded weights)
+- Issue #30: TP=4 MoE path (coherent paragraph test — final acceptance criterion)
 - Issue #23: same-device compressor prefill race (for default-mode scoring without serialization; serialized mode can proceed without this)
 
 ## Comments
 
 ### TP=4 path produces garbled output (2026-07-27, autonomous session)
 
-**Status: ready-for-human.** The TP=4 quality fixture cannot be completed because the
+**Status (at time of writing): ready-for-human.** The
 TP=4 decode path produces incoherent output. Root cause is the decode loop
 synchronization issue documented in issues #29 and #30: the all-reduce primitive
 (`ds4_rocm_xdev_allreduce_f32`) is a LOCAL operation on `my_dev` that reads peer
@@ -273,3 +275,98 @@ correctness bug. The following diagnostic steps would help:
    after the broadcast + HC expand phase.
 4. Fix the pipeline path regression (commit `946ba0a`) to restore the
    ability to re-validate the pipeline reference.
+
+### Human-investigation session (2026-07-27) — root cause identified
+
+**Status changed `ready-for-human` -> `ready-for-agent`.** Human and Gemini
+(Gemini 3.6 Flash) investigated the remaining TP=4 correctness bug. The decode
+loop phase-split (issue #29) is architecturally correct. The root cause is TWO
+untouched code paths:
+
+---
+
+**Root Cause 1 — Prefill attention is TP=4-unaware (PRIMARY).**
+
+`metal_graph_encode_layer_attention_batch` at `ds4.c:27356` has
+`tp_row_split_attn` gated on `g->tp_world == 2` (line 27398). For TP=4
+(`tp_world == 4`), this is FALSE, so no tier-aware attention happens during
+prefill. The function runs on tier 0 only.
+
+Sequence of failure:
+1. Prefill attention runs on tier 0, populates tier 0's KV cache.
+2. Tiers 1, 2, 3 never compute attention during prefill — their KV cache
+   regions remain uninitialized (zeros/garbage).
+3. Decode loop iterates all 4 tiers correctly (issue #29 fix), but when tier 1
+   switches in, it reads garbage from its local KV cache for the prefill
+   tokens.
+4. Tier 1's garbage attention output contaminates the all-reduce, corrupting
+   tier 0's correct partial.
+5. All subsequent decode tokens are garbage.
+
+Contrast with `metal_graph_encode_layer_ffn_batch` at `ds4.c:29152` which DOES
+have a complete `g->rocm_tp4` branch (line 29620) that iterates all 4 tiers,
+copies router data via xdev, and all-reduces MoE partials. The attention batch
+function has no equivalent.
+
+**Root Cause 2 — Output head runs full-vocab matmul against sharded weights.**
+
+`metal_graph_encode_output_head` at `ds4.c:24390` switches to head_tier (tier
+0) and falls through the TP=2-only branches (`tp_world == 2`, `cuda_tp_ep &&
+cuda_tp_output`) to the default `metal_graph_matmul_dense_quant_tensor` with
+the FULL `weights->output` descriptor. For TP=4, `engine_tp4_shard_divisor`
+returns 4 for `weights->output`, so only 1/4 of the tensor is cached on
+tier 0. The full-range weight resolution falls back to
+`cuda_model_range_ptr_from_fd` which, on discrete GPUs with limited VRAM,
+returns NULL. The matmul then reads from NULL → GPU page fault / garbage
+logits → garbled sampling.
+
+Issue #31 claimed the output head is complete, but its "Full logit all-gather
+available for prefill / quality fixture scoring" acceptance criterion is not
+actually implemented for the TP=4 code path. The distributed decode sampling
+(split_top1 with local argmax + all-gather of 4 tuples) works correctly for
+greedy decode, but the full-logit path used by quality fixture and prefill
+scoring does not.
+
+**Gemini consultation (2026-07-27, live-pair session):**
+
+Gemini reviewed the full code context including the decode loop, batch
+attention, batch FFN, output head, weight resolution, and cache installation
+code. Verdict: "YES, the TP=4-unaware prefill attention path and output head
+are 100% the root cause of the garbled output."
+
+**Approved fix plan (reviewed and approved by human):**
+
+1. **Add TP=4 tier sweep to prefill attention** (`metal_graph_encode_layer_attention_batch`):
+   Mirror the pattern from FFN batch and decode loop: iterate tiers 0-3 per
+   layer, each computing 32-head attention partials, all-reduce attention
+   output, broadcast to all tiers, HC expand on each tier. KV cache must be
+   populated on all 4 tiers during prefill.
+
+2. **Add TP=4 vocab-split path to output head** (`metal_graph_encode_output_head`):
+   Split vocabulary into 4 shards (V/4 per rank), each rank computes its shard
+   logits, gather via xdev_copy onto tier 0 for full logit scoring.
+   Alternative: set `cuda_tp_output` or equivalent flag for TP=4 to use the
+   existing multi-tier logit gather machinery.
+
+**Pipeline regression note:** The pipeline path regression reported in the
+previous comment is NOT present at HEAD (`4b40c5d`). The pipeline path produces
+correct output: `"We need to respond to the user's initial greeting"` for
+`"Hello"`. The pipeline reference TSV `q_pipeline_ref_tp4issue32.tsv` (100
+cases, avg_nll 0.374733) is valid and reusable.
+
+**After both fixes land**, re-run the quality fixture:
+```bash
+AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+  --model /home/murphy/src/ds4/ds4flash.gguf \
+  -p "Explain C pointers in one sentence." -n 50
+```
+If that produces coherent output, run the full fixture via `score_official`:
+```bash
+make -j8 rocm-quality
+AMD_SERIALIZE_KERNEL=3 \
+  ./gguf-tools/quality-testing/score_official \
+    /home/murphy/src/ds4/ds4flash.gguf \
+    gguf-tools/quality-testing/data/flash/manifest.tsv \
+    .scratch/rocm-tensor-parallel/quality-out/q_tp4_final.tsv \
+    4096 --gpu-devices 0,1,2,3 --cuda-tensor-parallel
+```
