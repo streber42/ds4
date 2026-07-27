@@ -55594,8 +55594,13 @@ static int engine_install_per_device_caches(ds4_engine *e) {
             }
             const uint64_t shard_bytes = t->bytes / div;
             for (int tier = 0; tier < 4; tier++) {
-                const uint64_t shard_offset =
-                    t->abs_offset + (uint64_t)tier * shard_bytes;
+                /* Replicated tensors (div == 1): every tier reads the same
+                 * byte range starting at abs_offset.  Sharded tensors
+                 * (div == 4): each tier reads its contiguous 1/4 slice,
+                 * starting at abs_offset + tier * shard_bytes. */
+                const uint64_t shard_offset = (div == 1)
+                    ? t->abs_offset
+                    : t->abs_offset + (uint64_t)tier * shard_bytes;
                 const int phys = g_gpu[tier].device_id;
                 if (engine_append_device_cache_span(per_dev_ranges, per_dev_n,
                                                     per_dev_cap,
