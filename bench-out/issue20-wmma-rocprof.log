@@ -1,0 +1,53 @@
+
+[0;31mWARNING: We are phasing out development and support for roctracer/rocprofiler/rocprof/rocprofv2 in favor of rocprofiler-sdk/rocprofv3 in upcoming ROCm releases. Going forward, only critical defect fixes will be addressed for older versions of profiling tools and libraries. We encourage all users to upgrade to the latest version, rocprofiler-sdk library and rocprofv3 tool, to ensure continued support and access to new features.[0m
+
+RPL: on '260726_060656' from '/opt/rocm-7.2.3' in '/home/murphy/src/ds4-rebase'
+RPL: profiling '"./ds4-bench" "-m" "/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf" "--rocm" "--gpu-devices" "0,1,2,3" "--cuda-tensor-parallel" "--prompt-file" "speed-bench/promessi_sposi.txt" "--ctx-start" "2048" "--ctx-max" "2048" "--step-incr" "2048" "--gen-tokens" "8"'
+RPL: input file ''
+RPL: output dir '/tmp/rpl_data_260726_060656_872543'
+
+------------ ------------ ------------
+WARNING: rocprof(v1) is not supported on this device. Recommended use: rocprofv2
+Please refer project's README for a list of supported architecures.
+------------ ------------ ------------
+
+RPL: result dir '/tmp/rpl_data_260726_060656_872543/input_results_260726_060656'
+ROCProfiler: input from "/tmp/rpl_data_260726_060656_872543/input.xml"
+  0 metrics
+ds4: GPU config: 4 devices [0,1,2,3] requested, budgets 30,30,30,30 GB; auto=true
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-20 + embedding  (22.1 / 27.8 GB)
+  GPU1: layers 21-42 + output head  (22.1 / 27.8 GB)
+  GPU2: (no transformer layers)  (0.0 / 27.8 GB)
+  GPU3: (no transformer layers)  (0.0 / 27.8 GB)
+ds4: per-tier graph scratch reserved: 2.00 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: CUDA decode TP half-resident routed experts enabled ([0,128) home, [128,256) partner); other layer tensors remain replicated
+ds4: CUDA output TP stores one vocabulary shard per tier (4 ways)
+ds4: CUDA tier 0 (device 0) selective weights: 22.09 GiB in 642 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 22.13 GiB in 687 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 21.10 GiB in 641 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 22.13 GiB in 683 ranges
+ds4-bench: context buffers 229.72 MiB (ctx=2057, backend=rocm, prefill_chunk=2048, raw_kv_rows=2304, compressed_kv_rows=516)
+ds4: CUDA routed MoE expert ownership enabled (half-resident decode and prefill)
+ds4: CUDA decode TP enabled: pairing lower-half tiers with upper-half tiers
+ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,gen_first_ms,gen_steady_tokens,gen_steady_tps,kvcache_bytes
+ds4: ROCm MoE WMMA hot-path enabled via DS4_ROCM_MOE_WMMA
+ds4: ROCm loading model tensors into device cache
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=5.97 GiB free=4.05 GiB reserve=4.00 GiB total=31.86 GiB)
+2048,2048,223.32,8,11.68,85.154,7,11.69,0
+
+ROCPRofiler: 35065 contexts collected, output directory /tmp/rpl_data_260726_060656_872543/input_results_260726_060656
+File 'rocprof-out/issue20-wmma-stats.csv' is generating
+File 'rocprof-out/issue20-wmma-stats.stats.csv' is generating
+dump json 0:35065                                                                                                    dump json 1000:35065                                                                                                    dump json 2000:35065                                                                                                    dump json 3000:35065                                                                                                    dump json 4000:35065                                                                                                    dump json 5000:35065                                                                                                    dump json 6000:35065                                                                                                    dump json 7000:35065                                                                                                    dump json 8000:35065                                                                                                    dump json 9000:35065                                                                                                    dump json 10000:35065                                                                                                    dump json 11000:35065                                                                                                    dump json 12000:35065                                                                                                    dump json 13000:35065                                                                                                    dump json 14000:35065                                                                                                    dump json 15000:35065                                                                                                    dump json 16000:35065                                                                                                    dump json 17000:35065                                                                                                    dump json 18000:35065                                                                                                    dump json 19000:35065                                                                                                    dump json 20000:35065                                                                                                    dump json 21000:35065                                                                                                    dump json 22000:35065                                                                                                    dump json 23000:35065                                                                                                    dump json 24000:35065                                                                                                    dump json 25000:35065                                                                                                    dump json 26000:35065                                                                                                    dump json 27000:35065                                                                                                    dump json 28000:35065                                                                                                    dump json 29000:35065                                                                                                    dump json 30000:35065                                                                                                    dump json 31000:35065                                                                                                    dump json 32000:35065                                                                                                    dump json 33000:35065                                                                                                    dump json 34000:35065                                                                                                    dump json 35000:35065                                                                                                    dump json 35064:35065                                                                                                    
+File 'rocprof-out/issue20-wmma-stats.json' is generating

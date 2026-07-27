@@ -22978,26 +22978,57 @@ static bool metal_graph_encode_decode_layer_phase(
                                                         n_groups, DS4_N_EMBD,
                                                         metal_graph_heads(g), 1) != 0;
     } else if (ok && g->rocm_tp4) {
-        /* ROCm TP=4: each rank computes its 32 heads → partial n_embd vector.
+        /* ROCm TP=4: each rank computes its 32 heads -> partial n_embd vector.
          * Store in per-tier buffer (attn_out_by_tier). Group selection ensures
          * only this tier's output groups are computed (n_groups/tp_world=2 of 8),
          * producing a true partial. The all-reduce is called from the outer
-         * decode loop after all 4 tiers sync. */
+         * decode loop after all 4 tiers sync.
+         *
+         * NOTE: unlike the shared ds4_gpu_attention_output_q8_tp_tensor which
+         * applies a group0 * group_dim offset to the heads pointer (assuming a
+         * grouped-layout heads tensor containing all 128 heads), each TP=4
+         * tier's metal_graph_heads(g) contains only its 32 owned heads
+         * contiguously from byte 0.  We therefore call the low-level
+         * sub-functions directly, passing the correct weight offsets and a
+         * zero-based heads view. */
         const int home_tier = g->active_tier;
         const uint32_t tp_attn_groups = n_groups / g->tp_world;
         const uint32_t tp_attn_group0 = g->tp_rank * tp_attn_groups;
-        ok = metal_graph_attention_output_dense_quant_tp(
-                g->attn_out_by_tier[home_tier],
-                metal_graph_attn_low(g),
-                g, model,
-                layer->attn_output_a,
-                layer->attn_output_b,
-                group_dim, rank,
-                n_groups,                    /* total groups */
-                tp_attn_group0,              /* this rank's first group */
-                tp_attn_groups,              /* this rank's group count */
-                DS4_N_EMBD,
-                metal_graph_heads(g));
+        if (layer->attn_output_a->type == DS4_TENSOR_Q8_0 &&
+            layer->attn_output_b->type == DS4_TENSOR_Q8_0) {
+            const uint64_t a_blocks = (group_dim + 31u) / 32u;
+            const uint64_t a_row_bytes = a_blocks * 34u;
+            const uint64_t a_off = layer->attn_output_a->abs_offset +
+                (uint64_t)tp_attn_group0 * rank * a_row_bytes;
+            const uint64_t k_off = (uint64_t)tp_attn_group0 * rank;
+            const uint64_t k_cnt = (uint64_t)tp_attn_groups * rank;
+            ok = ds4_gpu_attention_output_low_q8_tensor(
+                    metal_graph_attn_low(g),
+                    model->map, model->size,
+                    a_off, group_dim, rank, tp_attn_groups,
+                    metal_graph_heads(g)) != 0;
+            if (ok) ok = ds4_gpu_matmul_q8_0_kslice_rows_tensor(
+                    g->attn_out_by_tier[home_tier],
+                    model->map, model->size,
+                    layer->attn_output_b->abs_offset,
+                    (uint64_t)n_groups * rank,
+                    DS4_N_EMBD,
+                    k_off, k_cnt,
+                    metal_graph_attn_low(g), 1) != 0;
+        } else {
+            ok = metal_graph_attention_output_dense_quant_tp(
+                    g->attn_out_by_tier[home_tier],
+                    metal_graph_attn_low(g),
+                    g, model,
+                    layer->attn_output_a,
+                    layer->attn_output_b,
+                    group_dim, rank,
+                    n_groups,
+                    tp_attn_group0,
+                    tp_attn_groups,
+                    DS4_N_EMBD,
+                    metal_graph_heads(g));
+        }
     }
     /* ROCm TP=4 attention phase: exit after computing the partial attention
      * output (stored in attn_out_by_tier[tier]). The all-reduce and HC expand
