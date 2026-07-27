@@ -62,14 +62,11 @@ ROCM_UNAVAILABLE_INT(ds4_gpu_device_cache_support_tensors)
  * DSpark per the PRD problem statement), so this is unreached by any TP
  * session regardless of rank count. Deliberately refused, not deferred. */
 ROCM_UNAVAILABLE_INT_OK(ds4_gpu_dspark_markov_argmax_tensor)
-/* ds4_gpu_indexer_top1_value_tensor and ds4_gpu_matmul_q8_0_top1_tensor are
- * the decode-only greedy-sampling shortcut that skips materializing full
- * logits (metal_graph_encode_output_head_split_top1, ds4.c): reached only
- * when the caller wants a token id with no logits/top2 AND
- * DS4_CUDA_GREEDY_SPLIT_TOP1 is set (metal_graph_cuda_greedy_split_top1_
- * requested defaults false). Off by default and orthogonal to prefill;
- * deferred to issue 08 (auxiliary TP hooks). */
-ROCM_UNAVAILABLE_INT_OK(ds4_gpu_indexer_top1_value_tensor)
+/* ds4_gpu_indexer_top1_value_tensor has a real implementation in
+ * rocm/ds4_rocm_indexer.cuh (issue 31: TP=4 output head).  Reached by the
+ * TP=4 distributed decode sampling path (metal_graph_encode_output_head_
+ * split_top1, ds4.c) -- each rank finds its local best (id, value) in its
+ * V/4 shard, then a small all-gather picks the global winner. */
 /* Only called from metal_graph_encode_qkv_session_batch (ds4.c), the
  * multi-session continuous-batching decode path -- session batching for
  * ROCm is out of scope for this PRD (see PRD.md Out of Scope). The

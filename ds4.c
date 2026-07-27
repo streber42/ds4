@@ -71,10 +71,27 @@ static uint32_t metal_graph_cuda_tp_output_requested_ways(void) {
 static uint32_t metal_graph_cuda_tp_output_tiers_for_head(
         int   head_tier,
         bool  cuda_tp_output,
+        bool  rocm_tp4,
         int   n_gpus,
         int   tiers[DS4_MAX_GPUS]) {
     if (!tiers || !cuda_tp_output || n_gpus < 2 || (n_gpus & 1) != 0) return 0;
     if (head_tier < 0 || head_tier >= n_gpus) return 0;
+    /* ROCm TP=4: single-stage all-replicated placement.  Every tier holds
+     * every layer, and all 4 tiers participate in the output head as vocab
+     * shard holders.  Return all 4 tiers in rank order (0, 1, 2, 3) so the
+     * shard-split logic in metal_graph_output_logits_head_matmul and
+     * metal_graph_encode_output_head_split_top1 assigns each rank its
+     * contiguous V/4 range via the sharding policy from ds4_tp_shard.h. */
+    if (rocm_tp4 && n_gpus == 4) {
+        uint32_t want = metal_graph_cuda_tp_output_requested_ways();
+        if (want > (uint32_t)n_gpus) want = (uint32_t)n_gpus;
+        if (want < 4u) want = 4u;  /* TP=4 needs all 4 tiers */
+        uint32_t n = 0;
+        for (int t = 0; t < n_gpus && n < want; t++) {
+            tiers[n++] = t;
+        }
+        return n;
+    }
     const int half = n_gpus / 2;
     if (head_tier >= half) return 0;
     const int partner = head_tier + half;
@@ -16822,6 +16839,7 @@ static uint32_t metal_graph_cuda_tp_output_tiers(
     if (!g) return 0;
     return metal_graph_cuda_tp_output_tiers_for_head(g->head_tier,
                                                     g->cuda_tp_output,
+                                                    g->rocm_tp4,
                                                     g_n_gpus,
                                                     tiers);
 }
@@ -30359,7 +30377,7 @@ static bool metal_graph_eval_token_raw_swa_top(
         logits == NULL &&
         top2 == NULL &&
         g->cuda_tp_output &&
-        metal_graph_cuda_greedy_split_top1_requested();
+        (g->rocm_tp4 || metal_graph_cuda_greedy_split_top1_requested());
     if (split_top1) {
         int output_tiers[DS4_MAX_GPUS] = {0};
         uint32_t output_ways = 0;
@@ -55119,8 +55137,9 @@ static int engine_cuda_tp_output_shard_span(
     }
 
     int tiers[DS4_MAX_GPUS] = {0};
+    const bool rocm_tp4 = engine_rocm_tp4_requested(e);
     const uint32_t ways = metal_graph_cuda_tp_output_tiers_for_head(
-            head_tier, true, e->gpu_cfg.n_gpus, tiers);
+            head_tier, true, rocm_tp4, e->gpu_cfg.n_gpus, tiers);
     if (ways < 2u) return -1;
     for (uint32_t i = 0; i < ways; i++) {
         if (tiers[i] != logical_tier) continue;
@@ -55544,6 +55563,7 @@ static int engine_install_per_device_caches(ds4_engine *e) {
     const uint32_t output_tp_ways = cuda_tp_output
         ? metal_graph_cuda_tp_output_tiers_for_head(e->placement[output_head_entry],
                                                     true,
+                                                    rocm_tp4,
                                                     e->gpu_cfg.n_gpus,
                                                     output_tp_tiers)
         : 0;

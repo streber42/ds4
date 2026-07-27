@@ -287,6 +287,69 @@ __global__ static void argmax_kernel(int32_t *out_idx, const float *logits, uint
     if (tid == 0u) *out_idx = sm_idx[0];
 }
 
+/* top1 with value: finds the argmax index and its value in a single pass.
+ * Ported from CUDA's indexer_top1_value_kernel (ds4_cuda.cu:10977).
+ * Used by the TP=4 distributed decode sampling path (issue 31) -- each rank
+ * computes its V/4 local best (id, value) tuple, then a small all-gather of
+ * 4 tuples (48 bytes) picks the global winner on the head tier.
+ *
+ * `index_offset` is added to the stored index so callers can shard the
+ * vocabulary: rank k passes its shard start as the offset, so the returned
+ * id is the global vocab index, not the local shard index. */
+__global__ static void indexer_top1_value_kernel(
+        uint32_t *selected,
+        float *values,
+        const float *scores,
+        uint32_t n_comp,
+        uint32_t n_tokens,
+        uint32_t index_offset) {
+    enum { THREADS = 1024 };
+    const uint32_t t = blockIdx.x;
+    const uint32_t tid = threadIdx.x;
+    if (t >= n_tokens || tid >= THREADS) return;
+
+    const float *row = scores + (uint64_t)t * n_comp;
+    float local_v = -INFINITY;
+    uint32_t local_i = 0;
+    for (uint32_t i = tid; i < n_comp; i += THREADS) {
+        const float v = row[i];
+        /* Tie-break: lower global index wins (matches host sample_argmax). */
+        const uint32_t gi = index_offset + i;
+        const uint32_t best_gi = index_offset + local_i;
+        if (v > local_v || (v == local_v && gi < best_gi)) {
+            local_v = v;
+            local_i = i;
+        }
+    }
+
+    __shared__ float sm_val[THREADS];
+    __shared__ uint32_t sm_idx[THREADS];
+    sm_val[tid] = local_v;
+    sm_idx[tid] = local_i;
+    __syncthreads();
+
+    for (uint32_t s = THREADS / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            const float vr = sm_val[tid + s];
+            const uint32_t ir = sm_idx[tid + s];
+            const float vl = sm_val[tid];
+            const uint32_t il = sm_idx[tid];
+            const uint32_t gr = index_offset + ir;
+            const uint32_t gl = index_offset + il;
+            if (vr > vl || (vr == vl && gr < gl)) {
+                sm_val[tid] = vr;
+                sm_idx[tid] = ir;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0u) {
+        selected[t] = index_offset + sm_idx[0];
+        values[t] = sm_val[0];
+    }
+}
+
 __global__ static void indexer_topk_kernel(uint32_t *selected, const float *scores, uint32_t n_comp, uint32_t n_tokens, uint32_t top_k) {
     uint32_t t = blockIdx.x;
     if (t >= n_tokens || threadIdx.x != 0) return;
@@ -1100,6 +1163,35 @@ extern "C" int ds4_gpu_argmax_tensor(
                                (const float *)logits->ptr,
                                n_vocab);
     return cuda_ok(cudaGetLastError(), "argmax launch");
+}
+
+/* top1 with value: finds the argmax index and its value per row.
+ * Ported from CUDA's ds4_gpu_indexer_top1_value_tensor (ds4_cuda.cu:11989).
+ * Required by the TP=4 distributed decode sampling path (issue 31) -- each
+ * rank finds its local best (id, value) tuple in its V/4 shard; a small
+ * all-gather of 4 tuples picks the global winner on the head tier. */
+extern "C" int ds4_gpu_indexer_top1_value_tensor(
+        ds4_gpu_tensor       *selected,
+        ds4_gpu_tensor       *values,
+        const ds4_gpu_tensor *scores,
+        uint32_t              n_comp,
+        uint32_t              n_tokens,
+        uint32_t              index_offset) {
+    uint64_t scores_bytes = 0;
+    if (!selected || !values || !scores || n_comp == 0 || n_tokens == 0 ||
+        !cuda_u64_mul3_checked(n_tokens, n_comp, sizeof(float), &scores_bytes) ||
+        scores->bytes < scores_bytes ||
+        selected->bytes < (uint64_t)n_tokens * sizeof(uint32_t) ||
+        values->bytes < (uint64_t)n_tokens * sizeof(float)) {
+        return 0;
+    }
+    indexer_top1_value_kernel<<<n_tokens, 1024>>>((uint32_t *)selected->ptr,
+                                                  (float *)values->ptr,
+                                                  (const float *)scores->ptr,
+                                                  n_comp,
+                                                  n_tokens,
+                                                  index_offset);
+    return cuda_ok(cudaGetLastError(), "indexer top1 value launch");
 }
 
 extern "C" int ds4_gpu_dsv4_topk_mask_tensor(
