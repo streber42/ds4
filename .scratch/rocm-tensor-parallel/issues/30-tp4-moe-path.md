@@ -265,3 +265,57 @@ Human and agent reviewed the end-to-end failure from the previous autonomous ses
 **Hardware access:** Confirmed available on this machine. 4× AMD Radeon AI Pro R9700 (GPU 0-3), model at `/home/murphy/src/ds4/ds4flash.gguf` (symlink to 81 GiB IQ2XXS), binary at `/home/murphy/src/ds4-rebase/ds4`. Direct shell access — no SSH or remote credentials needed.
 
 **Issue dependency:** This issue (#30) is blocked by issue #29's decode loop architecture. The next agent should fix both the `moe_gate` placement (this issue) and the decode loop phase ordering (issue #29) as a single unit of work. Once the coherent paragraph test passes, mark the final acceptance criterion as complete and close this issue.
+
+### Gemini consultation — approved plan (2026-07-27, live-pair session)
+
+Second-opinion review covering both issues #29 and #30. Full context dump
+included `engine_tp4_shard_divisor` (ds4.c:54824-54852), the MoE all-reduce
+code (ds4.c:24249-24316), and the OOM error message from
+`rocm/ds4_rocm_runtime.cuh:5693`.
+
+**Decision 1: `moe_gate` OOM root cause is missing shared expert in shard divisor.**
+`engine_tp4_shard_divisor` only returns 4 for: routed expert tensors
+(`ffn_gate_exps`, `ffn_up_exps`, `ffn_down_exps`), the output head, and
+attention projections (`attn_q_b`, `attn_output`, `attn_output_a`). The shared
+expert tensors (`ffn_gate_shexp`, `ffn_up_shexp`, `ffn_down_shexp`) are NOT
+sharded — divisor returns 1, so they're loaded fully on every GPU. With the
+all-replicated placement, this is 4x the VRAM pressure it should be.
+
+**Decision 2: fix OOM by adding shared expert to shard divisor.**
+Add `ffn_gate_shexp`, `ffn_up_shexp`, `ffn_down_shexp` to
+`engine_tp4_shard_divisor` alongside the routed experts. The shared expert
+gate/up are column-parallel (sharded by intermediate dim / 4) and down is
+row-parallel (sharded by n_embd / 4) — same layout as routed experts. The
+cache-install code at `ds4.c:55312-55356` already handles the per-tier byte
+range correctly when divisor=4.
+
+**Decision 3: keep `ffn_gate_inp` (router gate) replicated.**
+Router gate is small (~7 MiB per layer) and must be evaluated fully on all
+ranks so top-k expert selection is globally consistent across tiers. Do NOT
+add to shard divisor.
+
+**Decision 4: order of attack — decode loop FIRST, OOM second.**
+Reverses the original recommendation. Evidence: the partial 25/100 quality
+fixture ran *despite* the OOM warning and produced NLL 6.0-9.2. The OOM is an
+arena-alloc warning that execution proceeds past; the decode loop is the
+primary correctness blocker. Fix the loop first to get a working validation
+path; then fix the OOM as a clean VRAM-pressure reduction on top of a working
+system.
+
+**Issue #29 handles the decode loop refactor** (see issue #29 comments for the
+approved 5-step plan: reuse `TO_FFN`/`FROM_ATTN_TO_FFN` phases, hoist
+all-reduce into outer loop, add `TO_FFN` early-exit at ~line 22933, add stream
+sync barrier, restructure outer loop at `ds4.c:26639`).
+
+**After issue #29 lands:** fix the shard divisor here (issue #30), rebuild, and
+verify the OOM warning is gone. Then re-run the coherent paragraph test:
+
+```bash
+./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+  --model /home/murphy/src/ds4/ds4flash.gguf \
+  -p "Write a paragraph explaining how recursion works." -n 200
+```
+
+Expected: coherent multi-sentence paragraph proving MoE path is numerically
+sound and shared expert accounting is correct (1x shared + all 256 routed, not
+4x shared).

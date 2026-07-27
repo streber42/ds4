@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -134,3 +134,74 @@ produces coherent output again.
 this fixture. The pipeline serialized reference from this session
 (`q_pipeline_ref_tp4issue32.tsv`) can be reused as the comparison baseline if
 the build has not changed materially.
+
+### Gemini consultation — path to unblock (2026-07-27, live-pair session)
+
+Second-opinion review covering the decode loop phase-split architecture (issue
+#29), the `moe_gate` OOM (issue #30), and the resulting quality fixture (this
+issue). Gemini reviewed a full context dump of `metal_graph_encode_decode_layer_phase`,
+the outer decode loop, TP=4 all-reduce code, the existing phase enum, the shard
+divisor, and the OOM error message. A follow-up corrected a subtle error in the
+first opinion.
+
+**Status changed `ready-for-human` -> `ready-for-agent`.** The ralph loop will
+pick this up by resolving issues #29 and #30 first.
+
+**Architectural decisions (approved by human):**
+
+1. **Reuse existing `TO_FFN` / `FROM_ATTN_TO_FFN` phases.** Do NOT add new
+   phases and do NOT split into `_attention_only`/`_moe_only` functions. The
+   existing phases are already used as a split pair in batch-session code
+   (`ds4.c:63929/63967/64353`). ~2,800 lines of GPU kernel dispatch should not
+   be duplicated.
+2. **Hoist TP=4 all-reduce OUT of `metal_graph_encode_decode_layer_phase`**
+   into the outer decode loop. Communication belongs in the decode loop, not
+   inside the phase function.
+3. **Add the missing `TO_FFN` early-exit** at ~line 22933 (after
+   `ds4_gpu_hc_expand_tensor`, before FFN-side HC post norm). Currently
+   `TO_FFN` falls through and runs the full layer — the existing batch-session
+   split pair is latent-broken. Fixing it fixes both paths.
+4. **Do NOT split at `TO_ROUTER`.** RMSNorm between attention output and the
+   router is non-linear: `RMSNorm(sum_t A_t) != sum_t RMSNorm(A_t)`. The
+   all-reduce MUST happen immediately after the attention output projection,
+   before any LayerNorm/RMSNorm.
+5. **Add `ds4_rocm_tp4_sync_tier_streams` barrier** between the tier-sweep and
+   all-reduce. ROCm kernel dispatch is async; without the sync, rank 0's
+   all-reduce kernel launches before rank 3's attention kernel has finished
+   writing its buffer.
+6. **`moe_gate` OOM root cause is missing shared expert in shard divisor.**
+   `engine_tp4_shard_divisor` doesn't include `ffn_gate_shexp`/`ffn_up_shexp`/
+   `ffn_down_shexp`, so they're loaded fully on every GPU. Add them to divisor
+   to shard shared expert across 4 ranks. Keep `ffn_gate_inp` (router gate)
+   replicated — small (~7 MiB) and must be globally consistent for top-k.
+7. **Order of attack (revised):** decode loop FIRST, OOM second. Evidence: the
+   partial 25/100 quality fixture ran *despite* the OOM warning and produced
+   NLL 6.0-9.2. The OOM is an arena-alloc warning execution proceeds past; the
+   decode loop is the primary correctness blocker.
+
+**Prerequisite issues:** #29 (decode loop phase-split) and #30 (shard divisor
+fix + coherent paragraph test) must land before this fixture can be re-run.
+
+**After prerequisites land, re-run this fixture:**
+```bash
+AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+  --model /home/murphy/src/ds4/ds4flash.gguf \
+  --quality-fixture 100
+```
+
+**Acceptance criteria (from top of issue):**
+- avg_nll within +/-1% of pipeline serialized reference (0.373815)
+- first_match >= 60/100
+- api_top1_rate >= 0.85
+- api_pair_rate >= 0.98
+- Results recorded in experiment log
+- Raw per-case TSV saved in `.scratch/rocm-tensor-parallel/quality-out/`
+
+**Reference baseline:** `q_pipeline_ref_tp4issue32.tsv` (from prior session)
+can be reused if the build has not changed materially since then. If the build
+HAS changed, re-run the pipeline serialized reference first.
+
+**Implementation plan for #29 (decode loop phase-split):** see issue #29
+comments "Gemini consultation — approved plan" section.
+**Implementation plan for #30 (shard divisor fix):** see issue #30 comments
+"Gemini consultation — approved plan" section.
