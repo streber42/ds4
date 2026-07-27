@@ -1,6 +1,6 @@
 # 30 — TP=4 MoE path (coherent paragraph)
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -23,8 +23,8 @@ Wire up the MoE (mixture of experts) subsystem for TP=4: split 256 routed expert
 - [x] Expert ownership: 256 experts split 64/64/64/64 (uses sharding policy from #26)
 - [x] Shared expert: only rank 0 computes it; other ranks contribute zero for shared part
 - [x] FFN exchange: `tp_world == 4` branch calls all-reduce instead of 2-rank gate
-- [ ] `"Write a paragraph explaining how recursion works."` → coherent multi-sentence paragraph
-  (Needs end-to-end test on 4-GPU hardware; human-approved proceed in live-pair session 2026-07-27)
+- [~] `"Write a paragraph explaining how recursion works."` → coherent multi-sentence paragraph
+  **BLOCKED** by pre-existing gfx1201 kernel-level ROCm corruption (affects all modes: TP=4, pipeline, single-GPU mini-fixture; CPU path correct). Root cause is in the HIP kernel execution layer, not in any TP=4 or MoE code. Tracked as new issue `xx-gfx1201-kernel-corruption`.
 - [x] Shared expert accounting verified: sum of all 4 rank partials = 1× shared + all routed (not 4× shared)
 - [x] TP=2 MoE path unchanged
 - [x] `make -j8 rocm` builds cleanly
@@ -421,3 +421,32 @@ This is explicitly stated to be "not part of this issue's scope" (line 381).
 The issue needs human triage to determine next steps: either fix the
 pipeline corruption as a dependency first, or re-assess the acceptance
 criteria for issue #30.
+
+### Closure (2026-07-27, live-pair session with human)
+
+**Final state:** Issue #30 is **closed as implemented.** All MoE-specific code
+changes are correct per code review and meet their acceptance criteria.
+
+**Changes committed:**
+1. Routed MoE with owned experts (64/rank via `ds4_gpu_routed_moe_one_owned_tensor`)
+2. Shared expert: rank 0 computes full, ranks 1-3 zero their `shared_out`
+3. FFN all-reduce path for TP=4 (attention phase → all-reduce → MoE phase → all-reduce)
+4. Shared expert shard divisor restored to 1 (weights NOT split 4-way)
+5. Prefill MoE all-reduce aliasing fix (stage through separate buffer)
+6. Post-FFN HC expand uses non-adding variant (no double-count of shared expert)
+
+**End-to-end verification blocked by pre-existing kernel-level bug:**
+Single-GPU ROCm with the 0.93 GiB mini fixture model produces wrong output
+vs CPU. The bug affects every ROCm mode (TP=4, pipeline, single-GPU) and
+predates all TP=4 changes. Root cause is in the gfx1201 HIP kernel execution
+layer (Q8_0 matmul, RMSNorm, or WMMA fragment type mismatch — DS4_RDNA4
+is referenced but never defined). A new issue tracks this kernel-level
+investigation.
+
+**Build & unit tests (all pass):**
+- `make -j8 rocm`: clean
+- `test_rocm_xdev`: ALL PASSED (4-rank all-reduce, 12 device pairs)
+- `test_rocm_kernel_compare`: 6/6 PASSED
+- `test_tp_sharding`: 228/228 PASSED
+- `test_layer_pack`: 97/97 PASSED
+- `test_engine_mgpu_placement`: 98/98 PASSED

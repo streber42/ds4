@@ -55675,12 +55675,10 @@ static uint32_t engine_tp4_shard_divisor(
         if (t == layer->attn_output)     return 4; /* single-matrix output (GLM-style) */
         if (t == layer->attn_output_a)   return 4; /* low-rank A stage (Flash-style) */
 
-        /* Shared expert tensors: column-parallel (gate/up) and row-parallel (down),
-         * same sharding layout as routed experts.  Without this divisor the full
-         * tensor is loaded on every GPU, causing ~320 MiB waste per layer per GPU. */
-        if (t == layer->ffn_gate_shexp)  return 4;
-        if (t == layer->ffn_up_shexp)    return 4;
-        if (t == layer->ffn_down_shexp)  return 4;
+        /* Shared expert tensors: NOT sharded (divisor=1, not 4). Only rank 0
+         * computes the full shared expert; ranks 1-3 contribute zero for the
+         * shared part. Sharding would give rank 0 only 1/4 of the weights,
+         * producing a wrong shared expert output — see issue #30 live-pair fix. */
     }
 
     return 1;
