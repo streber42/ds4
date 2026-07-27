@@ -30006,7 +30006,15 @@ static bool metal_graph_encode_layer_ffn_batch(
             ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
         }
         /* All-reduce batch_routed_out_by_tier across all 4 tiers.  After
-         * this, the home tier has the complete 256-expert routed output. */
+         * this, batch_routed_out has the complete 256-expert routed output.
+         *
+         * The all-reduce destination MUST NOT alias the source (the home
+         * tier's own partial), because ds4_rocm_xdev_allreduce_f32 zeroes the
+         * destination before accumulating partials — zeroing the home tier's
+         * buffer would lose its 64 owned experts.  We stage into the shared
+         * expert buffer (which has not been written yet — shared_done is
+         * still false at this point), then copy to the final destination.  The
+         * shared expert computation later overwrites the staging buffer. */
         if (ok) {
             ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
             int peer_devs[3];
@@ -30019,21 +30027,24 @@ static bool metal_graph_encode_layer_ffn_batch(
                     (const float *)g->batch_routed_out_by_tier[t]->ptr;
                 n_peers++;
             }
+            /* Stage into shared_out buffer (separate from routed_out — no alias). */
             ok = ds4_rocm_xdev_allreduce_f32(mesh, home_tier,
-                    (float *)g->batch_routed_out_by_tier[home_tier]->ptr,
+                    (float *)g->batch_shared_out_by_tier[home_tier]->ptr,
                     (const float *)g->batch_routed_out_by_tier[home_tier]->ptr,
                     peer_devs, peer_partials, n_peers,
                     (size_t)n_tokens * DS4_N_EMBD, NULL);
         }
-        /* Copy all-reduced result to the class-P batch_routed_out tensor
-         * so the downstream code (shared expert add, HC expand) sees it. */
+        /* Copy staged result to the class-P batch_routed_out tensor
+         * so the downstream code (shared expert add, HC expand) sees it.
+         * The shared_out buffer will be overwritten by the shared expert
+         * computation after this block. */
         if (ok) {
             ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
             size_t out_bytes = (size_t)n_tokens * DS4_N_EMBD * sizeof(float);
             ok = ds4_rocm_xdev_copy(mesh, home_tier,
                     (void *)metal_graph_batch_routed_out(g)->ptr,
                     home_tier,
-                    (const void *)g->batch_routed_out_by_tier[home_tier]->ptr,
+                    (const void *)g->batch_shared_out_by_tier[home_tier]->ptr,
                     out_bytes, NULL) != 0;
         }
         if (saved_selected) free(saved_selected);
