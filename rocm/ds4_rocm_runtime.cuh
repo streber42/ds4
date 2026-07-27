@@ -4807,7 +4807,6 @@ static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, 
                 (double)offset / 1073741824.0);
         return NULL;
     }
-
     if (model_map != g_model_host_base) {
         return cuda_model_range_copy_uncached(model_map, offset, bytes, what);
     }

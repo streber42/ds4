@@ -16941,8 +16941,22 @@ static bool metal_graph_alloc_raw_cap(
      * cuda_tp_moe and cuda_tp_ep so the TP=2 EP code doesn't run and try to
      * access expert ranges larger than the 64-expert cache slice. */
     if (g->rocm_tp4) {
+        /* ROCm TP=4 uses its own all-reduce-based attention, MoE, and output
+         * paths (see the tp_rank=0..3 decode loop in metal_graph_encode_decode).
+         * Disable all CUDA TP=2 peer-based paths — they assume a 2-pipeline-stage
+         * topology with one partner tier per rank, which doesn't exist in TP=4
+         * (where every tier is a peer of every other tier and communication goes
+         * through xdev all-reduce, not point-to-point handoff). */
         g->cuda_tp_moe = false;
         g->cuda_tp_ep = false;
+        g->cuda_tp_attn = false;
+        g->cuda_tp_attn_heads = false;
+        g->cuda_tp_attn_cache_dup = false;
+        g->cuda_tp_shared = false;
+        g->cuda_tp_q = false;
+        g->cuda_tp_output = false;
+        g->cuda_tp_prefill_ffn = false;
+        g->cuda_tp_prefill_attn_output = false;
     }
     g->cuda_tp_ep_pack_exact =
         g->cuda_tp_ep && metal_graph_cuda_tp_ep_pack_exact_requested();
@@ -21722,8 +21736,12 @@ static bool metal_graph_encode_decode_layer_phase(
      * function-scope typedef-conflict rules across multiple call sites. */
 
     /* switch to this layer's home tier before any Class P
-     * accessor reads. Single-tier (placement == NULL): no-op. */
-    if (g->placement) {
+     * accessor reads. Single-tier (placement == NULL): no-op.
+     * ROCm TP=4: the outer decode loop manages active_tier and tp_rank
+     * directly — skip the placement override so each TP rank (0..3)
+     * runs its own shard of attention heads and MoE experts on the
+     * correct device. */
+    if (g->placement && !g->rocm_tp4) {
         const int this_tier = g->placement[il + 1];
         if (!metal_graph_set_active_tier_decode(g, this_tier)) return false;
     }
@@ -21746,9 +21764,16 @@ static bool metal_graph_encode_decode_layer_phase(
     const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
-    const uint64_t gate_expert_bytes = expert_mid_dim * gate_row_bytes;
+    /* Per-expert byte size from the tensor's actual GGUF size rather than
+     * from dims * row_bytes, because quantization block padding can cause
+     * a slight discrepancy that defeats the strict cache comparison in
+     * cuda_model_range_ptr (the MoE dispatch needs gate_bytes to exactly
+     * match the per-tier shard size installed by engine_install_per_device_
+     * caches, which uses t->bytes/4).  Using bytes / DS4_N_EXPERT guarantees
+     * that 64 * gate_expert_bytes == t->bytes / 4 == the cache shard size. */
+    const uint64_t gate_expert_bytes = layer->ffn_gate_exps->bytes / DS4_N_EXPERT;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
-    const uint64_t down_expert_bytes = routed_out_dim * down_row_bytes;
+    const uint64_t down_expert_bytes = layer->ffn_down_exps->bytes / DS4_N_EXPERT;
     const bool compressed = ds4_layer_compress_ratio(il) != 0;
     const float freq_base = layer_rope_freq_base(il);
     const float freq_scale = layer_rope_freq_scale(il);
@@ -29213,9 +29238,16 @@ static bool metal_graph_encode_layer_ffn_batch(
     const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
-    const uint64_t gate_expert_bytes = expert_mid_dim * gate_row_bytes;
+    /* Compute per-expert byte size from the tensor's actual GGUF size rather
+     * than from dims * row_bytes, because GGUF quantization block padding can
+     * cause a slight discrepancy that defeats the strict cache comparison in
+     * cuda_resolve_weight_ptr (the MoE dispatch's gate_bytes must exactly
+     * match the per-tier shard size installed by engine_install_per_device_
+     * caches, which uses t->bytes/4).  Using bytes / DS4_N_EXPERT guarantees
+     * that 64 * gate_expert_bytes == t->bytes / 4 == the cache shard size. */
+    const uint64_t gate_expert_bytes = layer->ffn_gate_exps->bytes / DS4_N_EXPERT;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
-    const uint64_t down_expert_bytes = routed_out_dim * down_row_bytes;
+    const uint64_t down_expert_bytes = layer->ffn_down_exps->bytes / DS4_N_EXPERT;
     const bool layer_stage_profile = metal_graph_layer_stage_profile_enabled(il);
     double layer_stage_t0 = layer_stage_profile ? now_sec() : 0.0;
 #define DS4_METAL_PROFILE_FFN_STAGE(name) do { \
@@ -29652,38 +29684,139 @@ static bool metal_graph_encode_layer_ffn_batch(
         }
     } else if (ok && g->rocm_tp4) {
         /* ROCm TP=4 prefill MoE: each rank computes only its owned 64
-         * experts.  Use the batch-owned kernel which accepts a (base, count)
-         * expert range and resolves only the sharded portion of the cache. */
+         * experts.  After all 4 ranks finish, the partial results are
+         * all-reduced into the full routed output.
+         *
+         * Each tier runs ds4_gpu_routed_moe_batch_owned_tensor with its own
+         * 64-expert shard.  The ffn_norm, selected, and weights are propagated
+         * to each tier's scratch buffers before the MoE call (xdev_copy for
+         * ffn_norm across tiers, host-staged tensor_write for selected/weights
+         * after switching to the correct device).  The partial outputs are
+         * stored in batch_routed_out_by_tier and combined via all-reduce. */
         const uint32_t tp4_owned_base = g->tp_rank * (DS4_N_EXPERT / 4u);
         const uint32_t tp4_owned_count = DS4_N_EXPERT / 4u;
-        ok = ds4_gpu_routed_moe_batch_owned_tensor(
-                metal_graph_batch_routed_out(g),
-                metal_graph_batch_routed_gate(g),
-                metal_graph_batch_routed_up(g),
-                metal_graph_batch_routed_mid(g),
-                metal_graph_batch_routed_down(g),
-                model->map, model->size,
-                layer->ffn_gate_exps->abs_offset,
-                layer->ffn_up_exps->abs_offset,
-                layer->ffn_down_exps->abs_offset,
-                layer->ffn_gate_exps->type,
-                layer->ffn_down_exps->type,
-                gate_expert_bytes, gate_row_bytes,
-                down_expert_bytes, down_row_bytes,
-                (uint32_t)expert_in_dim,
-                (uint32_t)down_in_dim,
-                (uint32_t)routed_out_dim,
-                metal_graph_batch_router_selected(g),
-                metal_graph_batch_router_weights(g),
-                DS4_N_EXPERT,
-                DS4_N_EXPERT_USED,
-                tp4_owned_base,
-                tp4_owned_count,
-                DS4_SWIGLU_CLAMP_EXP,
-                metal_graph_batch_ffn_norm(g),
-                il,
-                n_tokens,
-                &g->batch_routed_mid_is_f16) != 0;
+        /* Save the router's selected/weights before the first owned MoE
+         * call modifies them via moe_filter_owned_pairs_kernel.  The saved
+         * copy is used to re-seed tiers 1-3 with unfiltered data. */
+        const size_t sel_bytes_save =
+                (size_t)n_tokens * DS4_N_EXPERT_USED * sizeof(int32_t);
+        const size_t wgt_bytes_save =
+                (size_t)n_tokens * DS4_N_EXPERT_USED * sizeof(float);
+        int32_t *saved_selected = (int32_t *)malloc(sel_bytes_save);
+        float   *saved_weights  = (float *)malloc(wgt_bytes_save);
+        if (!saved_selected || !saved_weights) { ok = false; }
+        if (ok) {
+            ok = ds4_gpu_tensor_read(metal_graph_batch_router_selected(g),
+                                     0, saved_selected,
+                                     sel_bytes_save) != 0;
+        }
+        if (ok) {
+            ok = ds4_gpu_tensor_read(metal_graph_batch_router_weights(g),
+                                     0, saved_weights,
+                                     wgt_bytes_save) != 0;
+        }
+        const int home_tier = g->active_tier;
+        /* Evaluate MoE on all 4 tiers.  Each tier switches to its own
+         * CUDA device, provisions the router data via xdev copy (ffn_norm)
+         * and host-staged tensor_write (selected/weights, which requires
+         * being on the correct device), then computes its owned 64 experts. */
+        const size_t norm_bytes =
+                (size_t)n_tokens * DS4_N_EMBD * sizeof(float);
+        for (int t = 0; ok && t < 4; t++) {
+            if (!metal_graph_set_active_tier_batch(g, t, n_tokens)) {
+                ok = false; break;
+            }
+            g->tp_rank = (uint32_t)t;
+            /* Replicate ffn_norm from home tier via xdev copy. */
+            if (t != home_tier) {
+                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                if (!ds4_rocm_xdev_copy(mesh, t,
+                        (void *)g->batch_ffn_norm_by_tier[t]->ptr,
+                        home_tier,
+                        (const void *)g->batch_ffn_norm_by_tier[home_tier]->ptr,
+                        norm_bytes, NULL)) { ok = false; break; }
+            }
+            /* Restore router data (moe_filter_owned_pairs_kernel will
+             * modify it in-place, so each tier needs its own copy). */
+            if (t != home_tier) {
+                if (ds4_gpu_tensor_write(
+                        g->batch_router_selected_by_tier[t],
+                        0, saved_selected,
+                        sel_bytes_save) == 0) { ok = false; break; }
+                if (ds4_gpu_tensor_write(
+                        g->batch_router_weights_by_tier[t],
+                        0, saved_weights,
+                        wgt_bytes_save) == 0) { ok = false; break; }
+            }
+            /* Compute this tier's owned 64 experts. */
+            const uint32_t tier_base = t * tp4_owned_count;
+            ok = ds4_gpu_routed_moe_batch_owned_tensor(
+                    g->batch_routed_out_by_tier[t],
+                    g->batch_routed_gate_by_tier[t],
+                    g->batch_routed_up_by_tier[t],
+                    g->batch_routed_mid_by_tier[t],
+                    g->batch_routed_down_by_tier[t],
+                    model->map, model->size,
+                    layer->ffn_gate_exps->abs_offset,
+                    layer->ffn_up_exps->abs_offset,
+                    layer->ffn_down_exps->abs_offset,
+                    layer->ffn_gate_exps->type,
+                    layer->ffn_down_exps->type,
+                    gate_expert_bytes, gate_row_bytes,
+                    down_expert_bytes, down_row_bytes,
+                    (uint32_t)expert_in_dim,
+                    (uint32_t)down_in_dim,
+                    (uint32_t)routed_out_dim,
+                    g->batch_router_selected_by_tier[t],
+                    g->batch_router_weights_by_tier[t],
+                    DS4_N_EXPERT,
+                    DS4_N_EXPERT_USED,
+                    tier_base, tp4_owned_count,
+                    DS4_SWIGLU_CLAMP_EXP,
+                    g->batch_ffn_norm_by_tier[t],
+                    il, n_tokens,
+                    &g->batch_routed_mid_is_f16) != 0;
+        }
+        /* Restore home tier and sync all devices. */
+        if (ok && !metal_graph_set_active_tier_batch(g, home_tier,
+                                                     n_tokens)) ok = false;
+        if (ok) {
+            const int devs[4] = {0, 1, 2, 3};
+            ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+        }
+        /* All-reduce batch_routed_out_by_tier across all 4 tiers.  After
+         * this, the home tier has the complete 256-expert routed output. */
+        if (ok) {
+            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+            int peer_devs[3];
+            const float *peer_partials[3];
+            int n_peers = 0;
+            for (int t = 0; t < 4; t++) {
+                if (t == home_tier) continue;
+                peer_devs[n_peers] = t;
+                peer_partials[n_peers] =
+                    (const float *)g->batch_routed_out_by_tier[t]->ptr;
+                n_peers++;
+            }
+            ok = ds4_rocm_xdev_allreduce_f32(mesh, home_tier,
+                    (float *)g->batch_routed_out_by_tier[home_tier]->ptr,
+                    (const float *)g->batch_routed_out_by_tier[home_tier]->ptr,
+                    peer_devs, peer_partials, n_peers,
+                    (size_t)n_tokens * DS4_N_EMBD, NULL);
+        }
+        /* Copy all-reduced result to the class-P batch_routed_out tensor
+         * so the downstream code (shared expert add, HC expand) sees it. */
+        if (ok) {
+            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+            size_t out_bytes = (size_t)n_tokens * DS4_N_EMBD * sizeof(float);
+            ok = ds4_rocm_xdev_copy(mesh, home_tier,
+                    (void *)metal_graph_batch_routed_out(g)->ptr,
+                    home_tier,
+                    (const void *)g->batch_routed_out_by_tier[home_tier]->ptr,
+                    out_bytes, NULL) != 0;
+        }
+        if (saved_selected) free(saved_selected);
+        if (saved_weights) free(saved_weights);
     } else if (ok) {
         ok = ds4_gpu_routed_moe_batch_tensor(metal_graph_batch_routed_out(g),
                                                metal_graph_batch_routed_gate(g),
