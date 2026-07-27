@@ -369,6 +369,44 @@ __device__ static float warp_max_f32(float v) {
     return v;
 }
 
+// Cross-warp block reduction helpers.
+// Each thread supplies one value; after the call every thread in the block
+// sees the same result (broadcast via shared memory).  Replaces manual
+// shared-memory tree-reduction loops (partial[256], 3× __syncthreads) with
+// a warp-native two-level reduce.
+
+__device__ static float block_reduce_f32_max(float v) {
+    __shared__ float sh[32];
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wid = tid >> 5u;
+    const uint32_t nwarp = (blockDim.x + 31u) >> 5u;
+    v = warp_max_f32(v);
+    if (lane == 0u) sh[wid] = v;
+    __syncthreads();
+    v = (tid < nwarp) ? sh[lane] : -3.4e38f;
+    if (wid == 0u) v = warp_max_f32(v);
+    if (tid == 0u) sh[0] = v;
+    __syncthreads();
+    return sh[0];
+}
+
+__device__ static float block_reduce_f32_sum(float v) {
+    __shared__ float sh[32];
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wid = tid >> 5u;
+    const uint32_t nwarp = (blockDim.x + 31u) >> 5u;
+    v = warp_sum_f32(v);
+    if (lane == 0u) sh[wid] = v;
+    __syncthreads();
+    v = (tid < nwarp) ? sh[lane] : 0.0f;
+    if (wid == 0u) v = warp_sum_f32(v);
+    if (tid == 0u) sh[0] = v;
+    __syncthreads();
+    return sh[0];
+}
+
 __device__ static uint16_t f32_to_f16_bits_hip_round(float f) {
     union { float f; uint32_t u; } v;
     v.f = f;
