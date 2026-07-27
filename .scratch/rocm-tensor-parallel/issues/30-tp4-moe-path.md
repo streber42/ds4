@@ -32,7 +32,105 @@ Wire up the MoE (mixture of experts) subsystem for TP=4: split 256 routed expert
 
 - Issue #29: TP=4 attention path (attention must work before MoE can be tested end-to-end)
 
+## Status Update
+
+**Status: ready-for-human**
+
+The MoE-specific code is complete and builds cleanly, but end-to-end verification fails due to a fundamental architectural issue in the decode loop (issue #29).
+
 ## Comments
+
+### End-to-end verification failure (2026-07-27, autonomous session)
+
+**Test command:**
+```bash
+./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+  --model /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf \
+  -p "Write a paragraph explaining how recursion works." -n 200
+```
+
+**Result:** Garbled output (Russian characters, punctuation mess, incoherent tokens):
+```
+WeМы - +r.  -ка (шу. each.  and  (sXw (i.e..i.  is ( i..the (d. i. (ihim. ...
+```
+
+Generation speed: 2.13 t/s (very slow for 4 GPUs).
+
+**Root cause analysis:**
+
+The all-reduce primitive (`ds4_rocm_xdev_allreduce_f32`) is NOT a collective operation that synchronizes all ranks. It's a LOCAL operation on `my_dev` that:
+1. Zeros the result buffer
+2. Accumulates `my_partial`
+3. For each peer, copies the peer's buffer to a staging area and accumulates it
+
+The current decode loop architecture (lines 26644-26665 in `ds4.c`) iterates over all 4 tiers per layer:
+```c
+for (int tier_iter = 0; ok && tier_iter < n_tiers; tier_iter++) {
+    if (g->rocm_tp4) {
+        metal_graph_set_active_tier_decode(g, tier_iter);
+        g->tp_rank = tier_iter;
+    }
+    ok = metal_graph_encode_decode_layer(g, ...);
+}
+```
+
+Inside `metal_graph_encode_decode_layer`, the attention all-reduce is called at line 22870-22879, and the MoE all-reduce is called at line 24291-24300. Both all-reduces read from peer buffers (`g->attn_out_by_tier[t]` and `g->shared_out_by_tier[t]`).
+
+**The problem:** When tier 0 runs, it calls all-reduce, which reads from tiers 1, 2, 3's buffers. But those buffers contain STALE data from the previous layer (or uninitialized data on the first layer). The all-reduce does NOT wait for tiers 1, 2, 3 to compute their partials.
+
+**Impact:**
+- Tier 0's attention all-reduce uses [tier0=correct, tier1=stale, tier2=stale, tier3=stale] → wrong result
+- Tier 0's MoE computation uses the wrong attention output → wrong MoE partial
+- Tier 0's MoE all-reduce uses [tier0=wrong, tier1=stale, tier2=stale, tier3=stale] → wrong result
+- Similar corruption for tiers 1 and 2
+- Only tier 3 gets a correct all-reduce (because all 4 tiers have computed by then), but tier 3's MoE partial is wrong because it used wrong attention output
+
+**Why this is an issue #29 problem, not #30:**
+
+The MoE code (issue #30) is correct — it properly computes owned experts and calls all-reduce. The problem is the decode loop architecture (issue #29), which calls all-reduce INSIDE each tier's iteration instead of AFTER all tiers have computed their partials.
+
+Issue #29's comments acknowledge this:
+> The minimal infrastructure changes I've made (setting tp_world=4, tp_rank=active_tier, generalizing the divisor) are necessary but not sufficient. The decode loop architecture needs to be modified to iterate over all 4 tiers per layer, which is a significant change that requires careful design to ensure the device switching and synchronization is correct.
+
+**Required fix (issue #29):**
+
+Restructure the decode loop to separate attention and MoE phases:
+```c
+for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
+    if (g->rocm_tp4) {
+        // Phase 1: all 4 tiers compute attention partials
+        for (int tier_iter = 0; ok && tier_iter < 4; tier_iter++) {
+            metal_graph_set_active_tier_decode(g, tier_iter);
+            g->tp_rank = tier_iter;
+            ok = metal_graph_encode_decode_layer_attention_only(g, ...);
+        }
+        // All-reduce attention (now all 4 partials are available)
+        allreduce_attention();
+        
+        // Phase 2: all 4 tiers compute MoE (using all-reduced attention)
+        for (int tier_iter = 0; ok && tier_iter < 4; tier_iter++) {
+            metal_graph_set_active_tier_decode(g, tier_iter);
+            g->tp_rank = tier_iter;
+            ok = metal_graph_encode_decode_layer_moe_only(g, ...);
+        }
+        // All-reduce MoE (now all 4 partials are available)
+        allreduce_moe();
+    } else {
+        ok = metal_graph_encode_decode_layer(g, ...);
+    }
+}
+```
+
+This requires splitting `metal_graph_encode_decode_layer` into attention-only and MoE-only phases, which is a significant refactor.
+
+**Alternative approaches:**
+1. Add synchronization primitives (events/flags) so each tier waits for all others before calling all-reduce
+2. Use a collective all-reduce that blocks until all ranks participate (like NCCL)
+3. Redesign the decode loop to use a different communication pattern
+
+**Recommendation:**
+
+This issue (#30) should remain `ready-for-human` until issue #29's decode loop architecture is fixed. The MoE code is correct, but it cannot be verified end-to-end until the attention path and decode loop synchronization are correct.
 
 ### Implementation (2026-07-26, autonomous session)
 
@@ -110,11 +208,11 @@ $ ./tests/test_engine_mgpu_placement
 
 ### What remains for end-to-end verification
 
-The MoE-specific code is complete and builds cleanly. However, the "coherent paragraph" correctness criterion cannot be verified for the same reason issue #29 is `ready-for-human`: **the decode loop does not yet iterate over all 4 tiers per layer**.
+The MoE-specific code is complete and builds cleanly. However, the "coherent paragraph" correctness criterion cannot be verified until issue #29's decode loop changes are complete: **the decode loop does not yet iterate over all 4 tiers per layer**.
 
 The decode loop in `metal_graph_encode_token_raw_swa` (line ~26441) calls `metal_graph_encode_decode_layer` once per layer. For TP=4, `placement[il+1] = 0` for all layers (all-replicated), so only tier 0 executes. The all-reduce in the new TP=4 MoE path references all 4 per-tier buffers, but only tier 0's partial is populated — the other 3 remain at whatever state they were left in from the previous iteration.
 
-To complete end-to-end verification, the human implementer needs to:
+To complete end-to-end verification, the implementer needs to:
 
 1. **Complete the decode loop iteration** from issue #29 (the attention path has the same dependency). Each layer must iterate over all 4 tiers, with each tier computing its partial (32 attention heads, 64 routed experts, shared expert if rank 0), then all-reduce at the attention and FFN boundaries.
 
