@@ -377,6 +377,27 @@ int         g_gpu_peer_ok[DS4_MAX_GPUS][DS4_MAX_GPUS];
 #include <arm_neon.h>
 #endif
 
+/* ROCm xdev symbols used by the decode loop and phase function.
+ * Forward-declared at file scope (inside the ROCm build guard) so that
+ * every function sees the same struct tag and linkage, avoiding C's
+ * function-scope typedef-conflict rules. */
+#if defined(DS4_ROCM_BUILD)
+typedef struct ds4_rocm_xdev_mesh ds4_rocm_xdev_mesh;
+extern ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
+extern int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
+                                        int my_dev, float *result_ptr,
+                                        const float *my_partial,
+                                        const int *peer_devs,
+                                        const float *const *peer_partials,
+                                        int n_peers,
+                                        size_t count, void *stream);
+extern int ds4_rocm_xdev_sync_all_devices(const int *device_ids, int n_devices);
+extern int ds4_rocm_xdev_copy(ds4_rocm_xdev_mesh *mesh,
+                               int dst_dev, void *dst_ptr,
+                               int src_dev, const void *src_ptr,
+                               size_t bytes, void *stream);
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -15264,6 +15285,7 @@ typedef struct {
      * transport slabs except tp_logits_half, whose view object is session-owned. */
     uint32_t tp_world;
     uint32_t tp_rank;
+    int tp4_phase; /* ROCm TP=4 phase: 0=normal, 1=attention partial, 2=MoE partial */
     ds4_gpu_tensor **tp_out;
     ds4_gpu_tensor **tp_in;
     ds4_gpu_tensor **tp_batch_out;
@@ -21686,19 +21708,10 @@ static bool metal_graph_encode_decode_layer_phase(
         uint32_t                n_raw,
         int                     token,
         metal_decode_layer_phase phase) {
-    /* ROCm TP=4 all-reduce symbols: declared once at function scope to avoid
-     * duplicate declarations in the attention and MoE all-reduce blocks. */
-#if defined(DS4_ROCM_BUILD)
-    typedef struct ds4_rocm_xdev_mesh ds4_rocm_xdev_mesh;
-    extern ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
-    extern int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
-                                            int my_dev, float *result_ptr,
-                                            const float *my_partial,
-                                            const int *peer_devs,
-                                            const float *const *peer_partials,
-                                            int n_peers,
-                                            size_t count, void *stream);
-#endif
+    /* ROCm TP=4 all-reduce symbols. Declared at file scope (above); visible
+     * here via the DS4_ROCM_BUILD guard. This function no longer carries its
+     * own extern declarations — they live at file scope to avoid C's
+     * function-scope typedef-conflict rules across multiple call sites. */
 
     /* switch to this layer's home tier before any Class P
      * accessor reads. Single-tier (placement == NULL): no-op. */
@@ -22912,7 +22925,7 @@ static bool metal_graph_encode_decode_layer_phase(
                                                            DS4_N_EMBD,
                                                            metal_graph_attn_low(g),
                                                            1);
-    } else if (ok) {
+    } else if (ok && !g->rocm_tp4) {
         ds4_gpu_tensor *attn_out_dst = g->tp_world == 2 ?
                 g->tp_out[il * DS4_TP_GATES_PER_LAYER + DS4_TP_GATE_ATTN] : metal_graph_attn_out(g);
         ok = ds4_gpu_attention_output_q8_batch_tensor(attn_out_dst,
@@ -22928,57 +22941,31 @@ static bool metal_graph_encode_decode_layer_phase(
                                                         metal_graph_heads(g), 1) != 0;
     } else if (ok && g->rocm_tp4) {
         /* ROCm TP=4: each rank computes its 32 heads → partial n_embd vector.
-         * Store in per-tier buffer, then all-reduce to sum all 4 partials. */
+         * Store in per-tier buffer (attn_out_by_tier). Group selection ensures
+         * only this tier's output groups are computed (n_groups/tp_world=2 of 8),
+         * producing a true partial. The all-reduce is called from the outer
+         * decode loop after all 4 tiers sync. */
         const int home_tier = g->active_tier;
-
-        /* Compute attention output for this rank's heads (32 for TP=4). */
-        ok = ds4_gpu_attention_output_q8_batch_tensor(
+        const uint32_t tp_attn_groups = n_groups / g->tp_world;
+        const uint32_t tp_attn_group0 = g->tp_rank * tp_attn_groups;
+        ok = metal_graph_attention_output_dense_quant_tp(
                 g->attn_out_by_tier[home_tier],
                 metal_graph_attn_low(g),
-                metal_graph_batch_group_tmp(g),
-                metal_graph_batch_low_tmp(g),
-                model->map,
-                model->size,
-                layer->attn_output_a->abs_offset,
-                layer->attn_output_b->abs_offset,
+                g, model,
+                layer->attn_output_a,
+                layer->attn_output_b,
                 group_dim, rank,
-                n_groups, DS4_N_EMBD,
-                metal_graph_heads(g), 1) != 0;
-
-        /* All-reduce: sum all 4 tiers' partial attention outputs. */
-        if (ok) {
-            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-            if (!mesh) {
-                fprintf(stderr, "ds4: TP=4 attn all-reduce: no xdev mesh\n");
-                ok = false;
-            } else {
-                int peer_devs[3];
-                const float *peer_partials[3];
-                int n_peers = 0;
-                for (int t = 0; t < 4; t++) {
-                    if (t == home_tier) continue;
-                    peer_devs[n_peers] = t;
-                    peer_partials[n_peers] = (const float *)g->attn_out_by_tier[t]->ptr;
-                    n_peers++;
-                }
-
-                int my_dev = home_tier;
-                int ar_ok = ds4_rocm_xdev_allreduce_f32(
-                        mesh,
-                        my_dev,
-                        (float *)metal_graph_attn_out(g)->ptr,
-                        (const float *)g->attn_out_by_tier[home_tier]->ptr,
-                        peer_devs,
-                        peer_partials,
-                        n_peers,
-                        (size_t)DS4_N_EMBD,
-                        NULL);
-                if (!ar_ok) {
-                    fprintf(stderr, "ds4: TP=4 attn all-reduce failed for tier %d\n", home_tier);
-                    ok = false;
-                }
-            }
-        }
+                n_groups,                    /* total groups */
+                tp_attn_group0,              /* this rank's first group */
+                tp_attn_groups,              /* this rank's group count */
+                DS4_N_EMBD,
+                metal_graph_heads(g));
+    }
+    /* ROCm TP=4 attention phase: exit after computing the partial attention
+     * output (stored in attn_out_by_tier[tier]). The all-reduce and HC expand
+     * are handled in the outer decode loop after all 4 tiers sync. */
+    if (g->rocm_tp4 && g->tp4_phase == 1) {
+        return ok;
     }
     if (ok && g->tp_world == 2) {
         /* Gate ATTN: exchange the attention block output with the peer and
@@ -24344,71 +24331,18 @@ static bool metal_graph_encode_decode_layer_phase(
         }
     } else if (ok && rocm_tp4_moe) {
         /* ROCm TP=4: each rank's partial = shared_out (full on rank 0, zero on ranks 1-3)
-         * + routed_out (owned 64 experts). The four partials are all-reduced to produce
-         * the canonical sum: 1× shared expert + all 256 routed experts.
-         *
-         * NOTE: This code assumes the decode loop iterates over all 4 tiers per layer,
-         * computing each tier's partial before calling all-reduce. Without that iteration
-         * (see issue #29), only tier 0's partial is computed, and the all-reduce sums
-         * tier 0's partial with zeros from the other 3 tiers. */
+         * + routed_out (owned 64 experts). Store in per-tier buffer; the all-reduce
+         * is called from the outer decode loop after all 4 tiers sync. */
         const int home_tier = g->active_tier;
-
-        /* Store this tier's partial in per-tier buffers for the all-reduce. */
         if (ok) {
             ok = ds4_gpu_add_tensor(g->shared_out_by_tier[home_tier],
                                      metal_graph_shared_out(g),
                                      metal_graph_routed_out(g),
                                      DS4_N_EMBD) != 0;
         }
-
-        /* All-reduce: sum all 4 tiers' partials into routed_out on the home tier.
-         * The all-reduce primitive collects partials from peer devices and sums them. */
-        if (ok) {
-            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-            if (!mesh) {
-                fprintf(stderr, "ds4: TP=4 MoE all-reduce: no xdev mesh\n");
-                ok = false;
-            } else {
-                /* Build peer device/buffer arrays for the 3 other tiers. */
-                int peer_devs[3];
-                const float *peer_partials[3];
-                int n_peers = 0;
-                for (int t = 0; t < 4; t++) {
-                    if (t == home_tier) continue;
-                    peer_devs[n_peers] = t;
-                    peer_partials[n_peers] = (const float *)g->shared_out_by_tier[t]->ptr;
-                    n_peers++;
-                }
-
-                /* Get the physical device ID for the home tier. */
-                int my_dev = home_tier;  /* tier index == device index for TP=4 */
-
-                /* All-reduce: result = sum of all 4 partials. */
-                int ar_ok = ds4_rocm_xdev_allreduce_f32(
-                        mesh,
-                        my_dev,
-                        (float *)metal_graph_routed_out(g)->ptr,  /* result */
-                        (const float *)g->shared_out_by_tier[home_tier]->ptr,  /* my partial */
-                        peer_devs,
-                        peer_partials,
-                        n_peers,
-                        (size_t)DS4_N_EMBD,
-                        NULL);  /* default stream */
-                if (!ar_ok) {
-                    fprintf(stderr, "ds4: TP=4 MoE all-reduce failed for tier %d\n", home_tier);
-                    ok = false;
-                }
-            }
-        }
-
-        /* After all-reduce, routed_out contains the full FFN output (shared + all routed).
-         * For keep_ffn_out or directional steering, copy to ffn_out. */
-        if (ok && keep_ffn_out) {
-            ok = metal_graph_ensure_ffn_out(g) &&
-                 ds4_gpu_tensor_copy(metal_graph_ffn_out(g), 0,
-                                      metal_graph_routed_out(g), 0,
-                                      (uint64_t)DS4_N_EMBD * sizeof(float)) != 0;
-        }
+        /* ROCm TP=4 MoE phase: exit after storing this tier's partial.
+         * All-reduce and post-FFN HC expand handled in the outer loop. */
+        if (g->tp4_phase == 2) return ok;
     }
     if (ok && keep_ffn_out) {
         ok = metal_graph_ensure_ffn_out(g) &&
@@ -26732,33 +26666,153 @@ static bool metal_graph_encode_token_raw_swa(
      */
     const uint32_t split_after_layers = metal_graph_token_split_after_layers();
 
+    /* ROCm TP=4 xdev symbols are declared at file scope (see the top of this
+     * file, inside the DS4_ROCM_BUILD guard). No need to re-declare here. */
+
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        /* ROCm TP=4: iterate over all 4 tiers per layer. Each tier computes
-         * its partial results (32 attention heads, 64 routed experts), then
-         * all-reduce combines them. The placement[] is homogeneous (all tier 0)
-         * for TP=4, so we explicitly iterate over tiers 0-3. */
-        const int n_tiers = g->rocm_tp4 ? 4 : 1;
-        for (int tier_iter = 0; ok && tier_iter < n_tiers; tier_iter++) {
-            if (g->rocm_tp4) {
-                /* Switch to this tier before running the layer. */
-                if (!metal_graph_set_active_tier_decode(g, tier_iter)) {
-                    ok = false;
-                    break;
+        /* ROCm TP=4 phase-split decode loop.
+         *
+         * Phase 1 (tp4_phase=1): Compute attention partials on all 4 tiers.
+         * Each tier stores its 32-head attention output in
+         * attn_out_by_tier[tier] and exits early (before all-reduce and
+         * HC expand).
+         *
+         * Barrier + all-reduce: Synchronize all 4 GPUs, then all-reduce
+         * the 4 partials into the full sum on tier 0. Broadcast the full
+         * sum to tiers 1-3 so their subsequent HC expand uses the correct
+         * combined attention output.
+         *
+         * Phase 2 (tp4_phase=2): Continue full layer (HC expand, pre-FFN HC,
+         * router, shared expert, routed MoE) on all 4 tiers. Each tier
+         * computes its 64-expert MoE partial and stores it in
+         * shared_out_by_tier[tier], then exits before the MoE all-reduce
+         * and post-FFN HC expand.
+         *
+         * Barrier + all-reduce: Synchronize all 4 GPUs, all-reduce MoE
+         * partials, then run post-FFN HC expand on tier 0. Broadcast
+         * after_ffn_hc to tiers 1-3 for the next layer's input. */
+        if (g->rocm_tp4) {
+            /* ---- Phase 1: Attention partials ---- */
+            g->tp4_phase = 1;
+            for (int tier = 0; ok && tier < 4; tier++) {
+                if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
+                g->tp_rank = (uint32_t)tier;
+                ok = metal_graph_encode_decode_layer_phase(
+                        g, model, &weights->layer[il],
+                        il, pos,
+                        g->layer_raw_cache[il], g->raw_cap, raw_row, n_raw, token,
+                        METAL_DECODE_LAYER_TO_FFN);
+            }
+            /* Barrier: wait for all 4 tiers' attention compute to finish. */
+            if (ok) {
+                const int devs[4] = {0, 1, 2, 3};
+                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+            }
+            /* All-reduce attention partials on tier 0. */
+            if (ok && !metal_graph_set_active_tier_decode(g, 0)) ok = false;
+            if (ok) {
+                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                int peer_devs[3];
+                const float *peer_partials[3];
+                int n_peers = 0;
+                for (int t = 0; t < 4; t++) {
+                    if (t == 0) continue;
+                    peer_devs[n_peers] = t;
+                    peer_partials[n_peers] = (const float *)g->attn_out_by_tier[t]->ptr;
+                    n_peers++;
                 }
-                g->tp_rank = (uint32_t)tier_iter;
+                ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
+                        (float *)metal_graph_attn_out(g)->ptr,
+                        (const float *)g->attn_out_by_tier[0]->ptr,
+                        peer_devs, peer_partials, n_peers,
+                        (size_t)DS4_N_EMBD, NULL);
+            }
+            /* Broadcast full attn_out from tier 0 to tiers 1-3. */
+            for (int tier = 1; ok && tier < 4; tier++) {
+                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                size_t bytes = (size_t)DS4_N_EMBD * sizeof(float);
+                ok = ds4_rocm_xdev_copy(mesh, tier,
+                        (void *)g->attn_out_by_tier[tier]->ptr,
+                        0, (const void *)metal_graph_attn_out(g)->ptr,
+                        bytes, NULL);
+            }
+            if (ok) {
+                const int devs[4] = {0, 1, 2, 3};
+                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
             }
 
-            ok = metal_graph_encode_decode_layer(g,
-                                                 model,
-                                                 &weights->layer[il],
-                                                 il,
-                                                 pos,
-                                                 g->layer_raw_cache[il],
-                                                 g->raw_cap,
-                                                 raw_row,
-                                                 n_raw,
-                                                 token);
+            /* ---- Phase 2: MoE partials (with HC expand using full attn_out) ---- */
+            g->tp4_phase = 2;
+            for (int tier = 0; ok && tier < 4; tier++) {
+                if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
+                g->tp_rank = (uint32_t)tier;
+                ok = metal_graph_encode_decode_layer_phase(
+                        g, model, &weights->layer[il],
+                        il, pos,
+                        g->layer_raw_cache[il], g->raw_cap, raw_row, n_raw, token,
+                        METAL_DECODE_LAYER_TO_FFN);
+            }
+            /* Barrier: wait for all 4 tiers' MoE compute to finish. */
+            if (ok) {
+                const int devs[4] = {0, 1, 2, 3};
+                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+            }
+            /* All-reduce MoE partials on tier 0. */
+            if (ok && !metal_graph_set_active_tier_decode(g, 0)) ok = false;
+            if (ok) {
+                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                int peer_devs[3];
+                const float *peer_partials[3];
+                int n_peers = 0;
+                for (int t = 0; t < 4; t++) {
+                    if (t == 0) continue;
+                    peer_devs[n_peers] = t;
+                    peer_partials[n_peers] = (const float *)g->shared_out_by_tier[t]->ptr;
+                    n_peers++;
+                }
+                ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
+                        (float *)metal_graph_routed_out(g)->ptr,
+                        (const float *)g->shared_out_by_tier[0]->ptr,
+                        peer_devs, peer_partials, n_peers,
+                        (size_t)DS4_N_EMBD, NULL);
+            }
+            /* Post-FFN HC expand on tier 0 using the all-reduced routed_out. */
+            if (ok) {
+                ok = ds4_gpu_hc_expand_add_split_tensor(
+                        metal_graph_after_ffn_hc(g),
+                        metal_graph_routed_out(g),       /* full MoE routed sum */
+                        metal_graph_shared_out(g),       /* full shared expert (tier 0) */
+                        metal_graph_after_attn_hc(g),    /* post-attention residual */
+                        metal_graph_hc_split(g),
+                        DS4_N_EMBD, DS4_N_HC) != 0;
+            }
+            /* Update cur_hc for tier 0 and broadcast to tiers 1-3. */
+            if (ok) {
+                ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
+                g->cur_hc_by_tier[0] = metal_graph_after_ffn_hc(g);
+                g->after_ffn_hc_by_tier[0] = tmp;
+            }
+            for (int tier = 1; ok && tier < 4; tier++) {
+                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                size_t bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
+                ok = ds4_rocm_xdev_copy(mesh, tier,
+                        (void *)g->cur_hc_by_tier[tier]->ptr,
+                        0, (const void *)metal_graph_after_ffn_hc(g)->ptr,
+                        bytes, NULL);
+            }
+            if (ok) {
+                const int devs[4] = {0, 1, 2, 3};
+                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+            }
+            /* Post-layer: dspark capture and tp4_phase reset. */
+            if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
+            g->tp4_phase = 0;
+            continue;
         }
+
+        /* Non-TP / standard layer iteration. */
+        /* switch to this layer's home tier before any Class P
+         * accessor reads. Single-tier (placement == NULL): no-op. */
         if (getenv("DS4_DEBUG_TP_OUTPUT") && g->placement) {
             const int expected_tier = g->placement[il + 1];
             fprintf(stderr,
@@ -29487,7 +29541,7 @@ static bool metal_graph_encode_layer_ffn_batch(
         g->tp_world == 2 &&
         g->tp_batch_out && g->tp_batch_in;
     const bool cuda_tp_owned_batch_moe =
-        g->cuda_tp_ep && g->cuda_tp_prefill_ffn;
+        g->cuda_tp_ep && g->cuda_tp_prefill_ffn && !g->rocm_tp4;
     if (ok && cuda_tp_owned_batch_moe) {
         ok = metal_graph_encode_mixed_routed_rows(
                 g, decode_items, decode_count, model, layer, il, n_tokens);
@@ -29550,6 +29604,40 @@ static bool metal_graph_encode_layer_ffn_batch(
                                     g->tp_batch_in[il],
                                     (uint32_t)((uint64_t)n_tokens * DS4_N_EMBD)) != 0;
         }
+    } else if (ok && g->rocm_tp4) {
+        /* ROCm TP=4 prefill MoE: each rank computes only its owned 64
+         * experts.  Use the batch-owned kernel which accepts a (base, count)
+         * expert range and resolves only the sharded portion of the cache. */
+        const uint32_t tp4_owned_base = g->tp_rank * (DS4_N_EXPERT / 4u);
+        const uint32_t tp4_owned_count = DS4_N_EXPERT / 4u;
+        ok = ds4_gpu_routed_moe_batch_owned_tensor(
+                metal_graph_batch_routed_out(g),
+                metal_graph_batch_routed_gate(g),
+                metal_graph_batch_routed_up(g),
+                metal_graph_batch_routed_mid(g),
+                metal_graph_batch_routed_down(g),
+                model->map, model->size,
+                layer->ffn_gate_exps->abs_offset,
+                layer->ffn_up_exps->abs_offset,
+                layer->ffn_down_exps->abs_offset,
+                layer->ffn_gate_exps->type,
+                layer->ffn_down_exps->type,
+                gate_expert_bytes, gate_row_bytes,
+                down_expert_bytes, down_row_bytes,
+                (uint32_t)expert_in_dim,
+                (uint32_t)down_in_dim,
+                (uint32_t)routed_out_dim,
+                metal_graph_batch_router_selected(g),
+                metal_graph_batch_router_weights(g),
+                DS4_N_EXPERT,
+                DS4_N_EXPERT_USED,
+                tp4_owned_base,
+                tp4_owned_count,
+                DS4_SWIGLU_CLAMP_EXP,
+                metal_graph_batch_ffn_norm(g),
+                il,
+                n_tokens,
+                &g->batch_routed_mid_is_f16) != 0;
     } else if (ok) {
         ok = ds4_gpu_routed_moe_batch_tensor(metal_graph_batch_routed_out(g),
                                                metal_graph_batch_routed_gate(g),

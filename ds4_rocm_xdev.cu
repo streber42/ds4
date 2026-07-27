@@ -479,6 +479,14 @@ extern "C" int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
     return 1;
 }
 
+extern "C" int ds4_rocm_xdev_sync_all_devices(const int *device_ids, int n_devices) {
+    for (int i = 0; i < n_devices; i++) {
+        if (hipSetDevice(device_ids[i]) != hipSuccess) return 0;
+        if (hipDeviceSynchronize() != hipSuccess) return 0;
+    }
+    return 1;
+}
+
 extern "C" int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices) {
     if (g_global_mesh_initialized) {
         ds4_rocm_xdev_destroy_mesh(&g_global_mesh);

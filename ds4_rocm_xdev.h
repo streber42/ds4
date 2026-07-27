@@ -109,6 +109,16 @@ int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices);
 ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
 
 /*
+ * Synchronize all devices in the mesh. Issues a hipDeviceSynchronize()
+ * on each device in order. Use this as a barrier between per-tier compute
+ * (which runs asynchronously on each device's default stream) and a
+ * multi-device all-reduce that reads peer buffers, ensuring every device's
+ * kernels have completed before any peer's data is read.
+ * Returns 1 on success, 0 if any device's sync failed.
+ */
+int ds4_rocm_xdev_sync_all_devices(const int *device_ids, int n_devices);
+
+/*
  * Fence a producer device against a consumer that will read its memory
  * directly via a peer-mapped pointer (no explicit xdev copy). Records an
  * event on src_dev's producer (default) stream and makes dst_dev's default
