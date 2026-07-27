@@ -582,10 +582,13 @@ static int routed_moe_launch(
     const int iq2_iq2_path = plan.iq2_iq2_path;
     const int iq2_gate_path = iq2_path || iq2_iq2_path;
     const int q2k_path = plan.q2k_path;
-    const uint64_t gate_bytes = owned_filtered
-        ? (uint64_t)n_expert * gate_expert_bytes : plan.gate_bytes;
-    const uint64_t down_bytes = owned_filtered
-        ? (uint64_t)n_expert * down_expert_bytes : plan.down_bytes;
+    /* For owned_filtered (TP rank with pre-filtered `selected`), use the
+     * full plan values computed from n_total_expert (e.g. 64 owned experts
+     * per rank for TP=4, not the per-token n_expert=6).  The downstream
+     * sorted-pairs kernels iterate over all n_total_expert expert slots, and
+     * cuda_resolve_weight_ptr must map the full range of owned weights. */
+    const uint64_t gate_bytes = plan.gate_bytes;
+    const uint64_t down_bytes = plan.down_bytes;
     uint64_t pair_count64 = 0;
     if (!cuda_u64_mul_checked(n_tokens, n_expert, &pair_count64) ||
         pair_count64 > UINT32_MAX) {

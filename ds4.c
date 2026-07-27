@@ -26852,6 +26852,11 @@ static bool metal_graph_encode_token_raw_swa(
         }
 
         /* Non-TP / standard layer iteration. */
+        ok = metal_graph_encode_decode_layer(g, model, &weights->layer[il],
+                                              il, pos,
+                                              g->layer_raw_cache[il],
+                                              g->raw_cap,
+                                              raw_row, n_raw, token);
         /* switch to this layer's home tier before any Class P
          * accessor reads. Single-tier (placement == NULL): no-op. */
         if (getenv("DS4_DEBUG_TP_OUTPUT") && g->placement) {

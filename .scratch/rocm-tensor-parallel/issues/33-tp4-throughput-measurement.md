@@ -1,6 +1,6 @@
 # 33 — TP=4 throughput measurement and utilization
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -33,11 +33,11 @@ Measure TP=4 throughput and per-GPU utilization against the pipeline and TP=2 ba
 
 ## Blocked by
 
-- Issue #32: TP=4 quality fixture (correctness must be verified before trusting throughput numbers) — **Status: ready-for-agent**
-- Issue #29: TP=4 attention path (decode loop synchronization) — **Status: ready-for-agent**
-- Issue #30: TP=4 MoE path (decode loop synchronization) — **Status: ready-for-agent**
+- Issue #32: TP=4 quality fixture (correctness must be verified before trusting throughput numbers) — **Status: ready-for-human** (garbled output persists, needs debug)
+- Issue #29: TP=4 attention path (decode loop synchronization) — **Status: implemented** (committed in `224c338`)
+- Issue #30: TP=4 MoE path (decode loop synchronization) — **Status: implemented** (committed in `56c721b`)
 
-**Note:** Issues #29, #30, and #32 all share the same root cause (decode loop phase-split bug). An approved plan exists in issue #25's Comments section to fix them together in one coherent change.
+**Note:** Issues #29 and #30 have been implemented (decode loop phase-split + shard divisor fix + cuda_tp_ep disable + FROM_ATTN_TO_FFN fix). The TP=4 path still produces garbled output — the remaining bug is in the phase-split logic or prefill MoE TP=4 path. Issue #32 documents the quality fixture failure.
 
 ## Comments
 
@@ -101,3 +101,44 @@ Raw benchmark log: `.scratch/rocm-tensor-parallel/bench-out/tp4-issue33.log`
 **Recommendation:** resolve issues #29/#30 (decode loop sync) and audit weight
 sharding, then re-run this benchmark. Issue #32 (quality fixture) must also
 pass before TP=4 throughput numbers are meaningful.
+
+### Pipeline regression fix + VRAM block (2026-07-27, Ralph Loop session)
+
+**Pipeline regression fixed.** The non-TP pipeline path had a latent bug introduced
+in commit `946ba0a` (feat: 25 — Widen TP): the `metal_graph_encode_decode_layer`
+call was accidentally removed when the decode loop was restructured for TP=4.
+The non-TP fallthrough code (line ~26758 in `ds4.c`) only did post-layer
+processing (cur_hc swap, dspark capture) without actually computing the layer.
+This caused `ds4 --rocm --gpu-devices 0,1,2,3` (no `--cuda-tensor-parallel`)
+to produce garbled output, making the pipeline reference baseline unusable.
+
+**Fix applied:** Added `metal_graph_encode_decode_layer(g, model, &weights->layer[il], ...)`
+call before the non-TP post-layer processing block. Verified correct output:
+```
+$ ./ds4 --rocm --gpu-devices 0,1,2,3 --model ds4flash.gguf -c 512 -p "The capital of France is" -n 30
+We need to answer: "The capital of France is" and then provide the correct answer...
+ds4: prefill: 4.46 t/s, generation: 14.35 t/s
+```
+
+**VRAM blocked — cannot test TP=4.**
+After the fix was verified, subsequent test runs were killed by `timeout 120`,
+which left ~29 GiB of stale VRAM on GPUs 0-2 (confirmed via DRM sysfs:
+`mem_info_vram_used` shows 29010 MiB on GPU 0, 29447 MiB on GPU 1,
+28359 MiB on GPU 2). Only GPU 3 is free (337 MiB used).
+
+Attempted cleanup methods (all failed):
+- `hipDeviceReset()` on each device — only affects the calling process's context
+- Allocating+freed all available free VRAM — stale allocations are from exited process
+- Kernel cache drop (`echo 3 > /proc/sys/vm/drop_caches`) — doesn't affect GPU VRAM
+- KFD topology write (`tee /sys/class/kfd/kfd_topology/reset`) — triggered a GPU reset that recovered from a hang but didn't free VRAM
+
+**Required:** A GPU reset or reboot to clear the stale VRAM before TP=4 can be tested.
+
+**Recommended next steps (for human):**
+1. Reboot or `sudo rocm-smi --reset-gpu` to free VRAM on GPUs 0-2
+2. Rebuild with the pipeline fix (already applied at current HEAD)
+3. Run pipeline reference: `AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --model ... -p "Hello" -n 10` to confirm pipeline still works
+4. Run TP=4 coherence test: `AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel --model ... -p "Explain C pointers in one sentence." -n 50`
+5. If TP=4 output is still garbled (as documented in issue #32), debug the remaining decode loop correctness bug
+6. Once TP=4 output is coherent, run the benchmark: `ds4-bench --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel -m <model> --prompt-file speed-bench/promessi_sposi.txt --ctx-start 2048 --ctx-max 2048 --step-incr 2048 --gen-tokens 256`
+7. Record throughput measurements in experiment-log.md
