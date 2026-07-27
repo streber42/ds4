@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -205,3 +205,71 @@ HAS changed, re-run the pipeline serialized reference first.
 comments "Gemini consultation — approved plan" section.
 **Implementation plan for #30 (shard divisor fix):** see issue #30 comments
 "Gemini consultation — approved plan" section.
+
+### Autonomous re-evaluation (2026-07-27) — TP=4 path still garbled after #29/#30
+
+**Context:** Commits #29 (`224c338` — decode loop phase-split) and #30
+(`56c721b` — MoE shard divisor + cuda_tp_ep fix) are both applied at HEAD.
+All automated tests pass (sharding, xdev, kernel compare, TP stubs, engine
+refusal). The model loads without OOM on 4 GPUs (23.00 GiB per tier, 3.83 GiB
+free).
+
+**TP=4 coherence test:**
+```
+$ AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+    --model .../ds4flash.gguf -p "Hello" -n 10
+ for sake     ( e
+```
+Output is garbled — not a coherent sentence. No OOM errors this time
+(cuda_tp_moe=false fix is present and working), but the decode loop
+synchronization issue persists.
+
+**Pipeline path regression (new finding):**
+The ROCm pipeline path (without `--cuda-tensor-parallel`) also produces
+garbled output on the current HEAD. This is a regression introduced in
+commit `946ba0a` (feat: 25 — Widen TP from 2-pair pipeline to true 4-rank
+tensor parallelism). At commit `6354b24` (the parent of `946ba0a`), the
+pipeline path produces correct avg_nll ~0.37 on the quality fixture.
+At the current HEAD, the pipeline path produces avg_nll ~21 on the same
+fixture. The exact root cause could not be identified — all code changes
+between these commits appear to be inside `g->rocm_tp4` guarded blocks.
+
+The CPU backend path (`make cpu`) still produces coherent output:
+"for sake     ( e" on GPU vs "We need to answer the" on CPU.
+
+**Quality fixture status:**
+The previously captured pipeline reference (`q_pipeline_ref_tp4issue32.tsv`,
+avg_nll 0.374733) cannot be re-validated because the pipeline path is
+regressed. The TP=4 quality fixture (run at HEAD with correct binary)
+produces avg_nll ~10-21 (from partial 55-case run earlier in this session),
+which is far outside the ±1% tolerance (0.370-0.378).
+
+**Root cause:**
+The TP=4 decode loop synchronization issue remains unfixed. The phase-split
+implementation from #29 restructured the decode loop into TO_FFN and
+FROM_ATTN_TO_FFN phases with barriers and all-reduces, but the output is
+still numerically corrupted. The specific remaining bug could be:
+
+1. The HC expand after attention all-reduce may not be correctly using
+   the full combined attention output on all 4 tiers (the broadcast step
+   might have a stale buffer or wrong size).
+2. The prefill MoE all-reduce path (batch mode) might have a similar
+   synchronization issue — each tier computes only its owned 64 experts,
+   but the all-reduce might fire before all tiers finish.
+3. The `metal_graph_encode_output_head` path for TP=4 (distributed decode
+   sampling) might have a correctness bug.
+4. A subtle issue in the barrier placement or `ds4_rocm_xdev_sync_all_devices`
+   might leave stale data in the peer buffers read by the all-reduce.
+
+**Recommendation:**
+This issue requires human investigation to debug the remaining TP=4
+correctness bug. The following diagnostic steps would help:
+
+1. Use the correctness harness (`test_engine_correctness_harness-rocm`) to
+   compare per-layer logits between TP=4 and the CPU reference path.
+2. Add debug output to the TP=4 decode loop to trace per-tier attention
+   output values before and after all-reduce.
+3. Verify the HC expand produces identical `after_attn_hc` on all 4 tiers
+   after the broadcast + HC expand phase.
+4. Fix the pipeline path regression (commit `946ba0a`) to restore the
+   ability to re-validate the pipeline reference.
