@@ -16935,6 +16935,15 @@ static bool metal_graph_alloc_raw_cap(
                                 metal_graph_cuda_tp_attn_cache_dup_requested();
     g->cuda_tp_moe = g->cuda_tp_decode && metal_graph_cuda_tp_moe_requested();
     g->cuda_tp_ep = g->cuda_tp_moe && cuda_tensor_parallel;
+    /* ROCm TP=4 uses its own owned-expert MoE with 64 experts/rank via
+     * ds4_gpu_routed_moe_one_owned_tensor and all-reduce, not the CUDA TP=2
+     * EP path which requests 128 experts per rank via peer handoff.  Disable
+     * cuda_tp_moe and cuda_tp_ep so the TP=2 EP code doesn't run and try to
+     * access expert ranges larger than the 64-expert cache slice. */
+    if (g->rocm_tp4) {
+        g->cuda_tp_moe = false;
+        g->cuda_tp_ep = false;
+    }
     g->cuda_tp_ep_pack_exact =
         g->cuda_tp_ep && metal_graph_cuda_tp_ep_pack_exact_requested();
     g->cuda_tp_moe_delay_reduce = metal_graph_cuda_tp_moe_delay_reduce_requested();
@@ -26806,12 +26815,15 @@ static bool metal_graph_encode_token_raw_swa(
                         peer_devs, peer_partials, n_peers,
                         (size_t)DS4_N_EMBD, NULL);
             }
-            /* Post-FFN HC expand on tier 0 using the all-reduced routed_out. */
+            /* Post-FFN HC expand on tier 0 using the all-reduced routed_out.
+             * After the all-reduce, routed_out already contains 1x shared expert
+             * (from rank 0) + all 256 routed experts (all 4 ranks).  We use the
+             * non-adding variant (split, not add_split) because adding shared_out
+             * again would double-count the shared expert. */
             if (ok) {
-                ok = ds4_gpu_hc_expand_add_split_tensor(
+                ok = ds4_gpu_hc_expand_split_tensor(
                         metal_graph_after_ffn_hc(g),
-                        metal_graph_routed_out(g),       /* full MoE routed sum */
-                        metal_graph_shared_out(g),       /* full shared expert (tier 0) */
+                        metal_graph_routed_out(g),       /* 1x shared + all routed */
                         metal_graph_after_attn_hc(g),    /* post-attention residual */
                         metal_graph_hc_split(g),
                         DS4_N_EMBD, DS4_N_HC) != 0;
@@ -55292,6 +55304,13 @@ static uint32_t engine_tp4_shard_divisor(
         if (t == layer->attn_q_b)        return 4;
         if (t == layer->attn_output)     return 4; /* single-matrix output (GLM-style) */
         if (t == layer->attn_output_a)   return 4; /* low-rank A stage (Flash-style) */
+
+        /* Shared expert tensors: column-parallel (gate/up) and row-parallel (down),
+         * same sharding layout as routed experts.  Without this divisor the full
+         * tensor is loaded on every GPU, causing ~320 MiB waste per layer per GPU. */
+        if (t == layer->ffn_gate_shexp)  return 4;
+        if (t == layer->ffn_up_shexp)    return 4;
+        if (t == layer->ffn_down_shexp)  return 4;
     }
 
     return 1;

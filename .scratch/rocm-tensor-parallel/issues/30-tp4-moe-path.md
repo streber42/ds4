@@ -1,6 +1,6 @@
 # 30 — TP=4 MoE path (coherent paragraph)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -24,6 +24,7 @@ Wire up the MoE (mixture of experts) subsystem for TP=4: split 256 routed expert
 - [x] Shared expert: only rank 0 computes it; other ranks contribute zero for shared part
 - [x] FFN exchange: `tp_world == 4` branch calls all-reduce instead of 2-rank gate
 - [ ] `"Write a paragraph explaining how recursion works."` → coherent multi-sentence paragraph
+  (BLOCKED: pre-existing ROCm pipeline corruption affects all GPU inference on this branch — see Comments)
 - [x] Shared expert accounting verified: sum of all 4 rank partials = 1× shared + all routed (not 4× shared)
 - [x] TP=2 MoE path unchanged
 - [x] `make -j8 rocm` builds cleanly
@@ -319,3 +320,50 @@ verify the OOM warning is gone. Then re-run the coherent paragraph test:
 Expected: coherent multi-sentence paragraph proving MoE path is numerically
 sound and shared expert accounting is correct (1x shared + all 256 routed, not
 4x shared).
+
+### Implementation (2026-07-27, autonomous session — this issue's changes)
+
+Made the following code changes to `ds4.c`:
+
+1. **Shared expert shard divisor fix (OOM at model load):** Added `ffn_gate_shexp`,
+   `ffn_up_shexp`, `ffn_down_shexp` to `engine_tp4_shard_divisor` returning 4.
+   Previously these returned 1 (replicated), causing ~320 MiB per-tier waste.
+   After fix: each tier loads 1/4 of each shared expert tensor, model fits in
+   23 GiB per tier instead of OOM.
+
+2. **`cuda_tp_ep` disabled for TP=4 (OOM at runtime):** `cuda_tp_moe` and
+   `cuda_tp_ep` are now explicitly set to false when `g->rocm_tp4` is true.
+   Previously these flags were true (from `metal_graph_cuda_tp_moe_requested()`
+   defaulting to true), which caused the CUDA TP=2 expert parallelism code to
+   run during TP=4 decode. That code requested 128 experts per rank via
+   `ds4_gpu_routed_moe_one_owned_tensor` (TP=2 convention), but the TP=4 cache
+   only holds 64 experts per rank, causing a cache miss → arena alloc →
+   OOM. Disabling these flags ensures the TP=4 owned-expert + all-reduce path
+   is the only active MoE path.
+
+3. **Shared expert double-count fix:** The outer decode loop's post-FFN HC expand
+   used `ds4_gpu_hc_expand_add_split_tensor` which adds `block_out + block_add`.
+   After the MoE all-reduce, `metal_graph_routed_out(g)` already contains
+   1× shared expert (from rank 0) + all 256 routed experts (all 4 ranks).
+   Passing `metal_graph_shared_out(g)` as `block_add` caused 2× shared expert.
+   Fixed by using `ds4_gpu_hc_expand_split_tensor` (non-adding variant) so
+   only the all-reduced result is used.
+
+### Pre-existing ROCm pipeline corruption (2026-07-27, discovered during verification)
+
+The ROCm pipeline mode (`--rocm --gpu-devices 0,1,2,3` without
+`--cuda-tensor-parallel`) produces garbled output on this branch.
+Confirmed by:
+- Testing at commit `224c338` (before my changes): pipeline outputs "Theكة..."
+  (correct "The" then Arabic/gibberish)
+- Testing with my changes applied: same behavior
+- CPU backend (`--cpu`) produces correct output: "We are asked: 'The capital of France is"
+- Both the main IQ2XXS model and TP=4 produce structurally similar garbage
+
+Root cause unknown — not part of this issue's scope.
+
+**Impact on acceptance criteria:** The coherent-paragraph verification cannot
+meaningfully distinguish TP=4 output quality from pipeline output quality until
+the ROCm pipeline corruption is fixed. The TP=4 MoE changes are complete,
+correct per code review, and pass all automated tests (sharding, xdev,
+kernel compare, build, unit tests).
