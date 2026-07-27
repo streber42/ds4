@@ -1,5 +1,82 @@
 # ROCm tensor-parallel: experiment log
 
+## 2026-07-27 — TP=4 throughput measurement blocked by correctness regression (issue 33)
+
+**Goal:** measure TP=4 throughput and per-GPU utilization against the pipeline and
+TP=2 baselines per issue 33's acceptance criteria.
+
+**Setup:** 4× AMD Radeon AI Pro R9700 (gfx1201), 81 GiB production model
+(`/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf`),
+`make rocm -j8` (build succeeded, all 5 binaries green), `AMD_SERIALIZE_KERNEL=3`.
+
+**Coherence test (quick, `ds4 -p "The capital of France is" -n 30`):**
+```
+ds4: ROCm TP=4 placement: all 4 tiers hold every layer, sharded tensors split 4-way per rank
+ds4: CUDA tier 0 (device 0) selective weights: 23.80 GiB in 1328 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.80 GiB in 1328 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.80 GiB in 1328 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 23.80 GiB in 1328 ranges
+ds4: ROCm model arena alloc failed for moe_gate (320.00 MiB chunk): out of memory
+We know a lot about the nature of the6 |.. Wester! one of ( as? working? My??  for? Logical
+ds4: prefill: 0.64 t/s, generation: 1.22 t/s
+```
+Output is non-linguistic noise — confirms issue #32's finding. Generation speed
+1.22 t/s is not meaningful because the output is incoherent.
+
+**Benchmark (`ds4-bench --ctx-start 2048 --gen-tokens 256`):**
+```
+ds4-bench: prefill to 2048 failed: rocm prefill failed
+```
+The benchmark cannot run. The model arena OOM (`moe_gate 320 MiB chunk`) prevents
+prefill from completing. Each tier loads 23.80 GiB of weights into a ~31.86 GiB
+VRAM budget (after 2.00 GiB scratch reservation), leaving only ~6 GiB for KV
+cache, activations, and the model arena — insufficient for the 320 MiB moe_gate
+allocation plus everything else.
+
+**Why each tier loads 23.80 GiB instead of ~20 GiB:** The TP=4 placement code
+(issue #28) reports "sharded tensors split 4-way per rank" but the actual weight
+loading loads 23.80 GiB per tier (1328 ranges), which is nearly the full model
+size on each GPU. The 81 GiB model should shard to ~20 GiB per rank (81 / 4 ≈
+20) with proper expert/head/vocab sharding. The extra 3.8 GiB suggests some
+tensors are being replicated instead of sharded, or the sharded offset
+calculation is not reducing per-rank weight bytes as expected. Combined with the
+model arena overhead, this pushes total per-GPU usage past the VRAM budget.
+
+**Root cause analysis:**
+
+Two independent bugs prevent TP=4 throughput measurement:
+
+1. **Decode loop synchronization (issue #29/#30).** The all-reduce primitive
+   reads stale peer data because tiers compute partials sequentially within a
+   single tier's iteration rather than all 4 tiers computing before any
+   all-reduce fires. This produces garbled output (confirmed above).
+
+2. **Model arena OOM.** The per-tier weight loading is 23.80 GiB instead of the
+   expected ~20 GiB with proper 4-way sharding. This leaves insufficient VRAM
+   for the model arena's runtime allocations (moe_gate, activations, KV cache
+   overhead), causing prefill to fail outright.
+
+**Throughput numbers are not meaningful.** With garbled output and failing
+prefill, any throughput measurement would be measuring a broken system. Issue 33
+is blocked by issue #32 (quality fixture), which is itself blocked by issues
+#29/#30 (decode loop sync) and this OOM finding.
+
+**Baselines for comparison (from earlier experiment log entries):**
+
+| config | prefill (t/s) | generation (t/s) | per-GPU util |
+|---|---|---|---|
+| 4-GPU pipeline layer-split (issue #19/#22) | 192.83 | 22.81 | ~30% |
+| 4-GPU TP=2 pipelined (issue #19/#22) | 206.09 | 12.27 | ~25% |
+| **4-GPU TP=4 (this session)** | **FAIL** | **FAIL** | N/A |
+
+TP=4 cannot be measured until issues #29/#30 (decode loop sync) are fixed and
+the per-tier weight loading is audited to ensure proper 4-way sharding reduces
+per-GPU VRAM to ~20 GiB.
+
+**Issue 33 status: ready-for-human.** All acceptance criteria are blocked by the
+correctness regressions. Raw benchmark log at
+`.scratch/rocm-tensor-parallel/bench-out/tp4-issue33.log`.
+
 ## 2026-07-27 — TP=4 quality fixture blocked by decode loop sync (issue 32)
 
 **Goal:** run the authoritative 100-case quality fixture on the TP=4 build
