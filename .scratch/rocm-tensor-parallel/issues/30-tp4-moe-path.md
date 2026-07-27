@@ -1,6 +1,6 @@
 # 30 — TP=4 MoE path (coherent paragraph)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -385,3 +385,39 @@ meaningfully distinguish TP=4 output quality from pipeline output quality until
 the ROCm pipeline corruption is fixed. The TP=4 MoE changes are complete,
 correct per code review, and pass all automated tests (sharding, xdev,
 kernel compare, build, unit tests).
+
+### Autonomous verification attempt (2026-07-27, Ralph Loop agent)
+
+Ran the end-to-end verification test as instructed by the approved plan:
+
+```bash
+./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+  --model /home/murphy/src/ds4/ds4flash.gguf \
+  -p "Write a paragraph explaining how recursion works." -n 200
+```
+
+**Result:** Garbled output (punctuation fragments, no coherent text).
+
+**Root cause:** Pre-existing ROCm pipeline corruption (documented above,
+line 370-387). Both pipeline mode (`--rocm --gpu-devices 0,1,2,3` without
+`--cuda-tensor-parallel`) and TP=4 mode produce structurally similar
+garbage. The CPU backend (`--cpu`) produces coherent text.
+
+**Verification summary:**
+- `make -j8 rocm`: builds cleanly ✅
+- `test_tp_sharding`: 228/228 checks passed ✅
+- `test_layer_pack`: 97/97 checks passed ✅
+- `test_engine_mgpu_placement`: 98/98 checks passed ✅
+- `test_gpu_args`: all tests passed ✅
+- `test_rocm_tp_stubs`: ALL PASSED ✅
+- `test_rocm_xdev`: ALL CROSS-DEVICE TRANSFER TESTS PASSED ✅
+- `test_rocm_kernel_compare`: 6/6 kernel comparisons passed ✅
+- `test_engine_rocm_tp_refusal`: PASS ✅
+- Generation speed: ~4 t/s (slow, consistent with per-layer tier-switch overhead)
+
+**Blocking issue:** The coherent paragraph acceptance criterion (#4) cannot
+be verified until the pre-existing ROCm pipeline corruption is fixed.
+This is explicitly stated to be "not part of this issue's scope" (line 381).
+The issue needs human triage to determine next steps: either fix the
+pipeline corruption as a dependency first, or re-assess the acceptance
+criteria for issue #30.

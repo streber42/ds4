@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -370,3 +370,57 @@ AMD_SERIALIZE_KERNEL=3 \
     .scratch/rocm-tensor-parallel/quality-out/q_tp4_final.tsv \
     4096 --gpu-devices 0,1,2,3 --cuda-tensor-parallel
 ```
+
+### Autonomous session (2026-07-27) — structural fixes landed, decode loop still garbleed
+
+**What was implemented:**
+
+1. **TP=4 output head vocab-split** (`metal_graph_encode_output_head`):
+   Splits vocabulary into 4 equal shards (V/4 per rank). Each rank computes its
+   shard via `metal_graph_matmul_dense_quant_abs` with adjusted weight offset.
+   Output_norm is xdev-copied from tier 0 to tiers 1-3 before each shard
+   matmul. Shard results are gathered back to tier 0's logits buffer via
+   `ds4_rocm_xdev_copy`.
+
+2. **Per-tier KV cache allocation** (`metal_graph_alloc_raw_cap`):
+   For ROCm TP=4, allocates `layer_raw_cache_tp1/tp3` and
+   `layer_attn_comp_cache_tp1/tp3` on tiers 1 and 3 (tier 0 uses the
+   existing `layer_raw_cache[il]` and tier 2 reuses the existing
+   `layer_raw_cache_tp[il]`).
+
+3. **Post-prefill KV cache sync** (`metal_graph_rocm_tp4_sync_kv_cache`):
+   Copies raw and compressed KV cache from tier 0 to tiers 1-3 using
+   `ds4_rocm_xdev_copy`. Called from `ds4_session_slice` (batch prefill path).
+
+4. **Per-tier raw cache helper** (`metal_graph_tp4_raw_cache`,
+   `metal_graph_tp4_comp_cache`): Provides per-tier cache pointer lookup
+   for the decode loop. Compressed cache returns shared tier-0 cache
+   because all tiers read the shared compressed cache (only tier 0 updates
+   it during decode).
+
+**Remaining issue — decode loop still produces garbleed output:**
+" about any    " for prompt "Explain C pointers.".
+First decode token is often correct ("You" for "Hello"), but subsequent
+tokens degrade. Root cause not fully identified but likely involves:
+
+1. The post-prefill sync is in `ds4_session_slice` (batch prefill), but the
+   quality fixture uses token-by-token `ds4_session_eval` → `metal_graph_eval_
+   token_raw_swa` path. The sync is never called during quality fixture runs.
+
+2. The decode loop uses the shared `g->layer_raw_cache[il]` (all 4 tiers
+   read/write the same device-0 memory). Even though the actual KV data is
+   identical across tiers, the compressor state arrays
+   (`layer_attn_state_kv/score`) are shared device-0 memory. All 4 tiers'
+   GPU kernels run concurrently (async launch), causing a read-modify-write
+   race on the shared state arrays.
+
+3. Fixing the race requires either:
+   a) Per-tier compressor state arrays (add `layer_attn_state_kv_tp1/3` etc.)
+   b) Inter-tier sync barriers (serialize tiers)
+   c) Move KV cache sync to the token-by-token eval path
+
+**Build:** Compiles cleanly. Pipeline path unaffected.
+
+**Recommendation:** Human investigation needed to resolve the decode loop
+state management issue. The structural fixes (output head, KV cache alloc)
+are correct and should be kept.

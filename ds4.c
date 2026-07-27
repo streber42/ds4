@@ -15035,6 +15035,15 @@ typedef struct {
     ds4_gpu_tensor *layer_index_state_score[DS4_MAX_LAYER];
     ds4_gpu_tensor *layer_raw_cache_tp[DS4_MAX_LAYER];
     ds4_gpu_tensor *layer_attn_comp_cache_tp[DS4_MAX_LAYER];
+    /* Additional per-tier KV caches for ROCm TP=4 (4-way replication).
+     * Tier 0: layer_raw_cache[il] / layer_attn_comp_cache[il]
+     * Tier 1: layer_raw_cache_tp1[il] / layer_attn_comp_cache_tp1[il]
+     * Tier 2: layer_raw_cache_tp[il]  / layer_attn_comp_cache_tp[il]  (partner)
+     * Tier 3: layer_raw_cache_tp3[il] / layer_attn_comp_cache_tp3[il] */
+    ds4_gpu_tensor *layer_raw_cache_tp1[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_raw_cache_tp3[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_comp_cache_tp1[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_comp_cache_tp3[DS4_MAX_LAYER];
 
     /* Speculative decoding scratch.  MTP is allowed to mutate graph state only
      * if the target verifier can either commit it or restore the saved
@@ -15841,6 +15850,18 @@ static void metal_graph_free(ds4_gpu_graph *g) {
     }
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->layer_attn_comp_cache_tp[il]);
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        ds4_gpu_tensor_free(g->layer_raw_cache_tp1[il]);
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        ds4_gpu_tensor_free(g->layer_raw_cache_tp3[il]);
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        ds4_gpu_tensor_free(g->layer_attn_comp_cache_tp1[il]);
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        ds4_gpu_tensor_free(g->layer_attn_comp_cache_tp3[il]);
     }
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->layer_attn_state_kv[il]);
@@ -17185,9 +17206,22 @@ static bool metal_graph_alloc_raw_cap(
                 managed_kv_cache,
                 layer_tier,
                 (uint64_t)raw_cap * DS4_N_HEAD_DIM * sizeof(float));
-        const int layer_tp_partner = g->cuda_tp_attn_cache_dup
+        /* ROCm TP=4: allocate raw KV cache on all 4 tiers so each tier
+         * writes to its own cache during decode (avoiding races on the
+         * compressor state read-modify-write and concurrent KV store). */
+        const int layer_tp_partner = !g->rocm_tp4 && g->cuda_tp_attn_cache_dup
             ? metal_graph_cuda_tp_partner_tier(layer_tier) : -1;
-        if (layer_tp_partner >= 0) {
+        if (g->rocm_tp4) {
+            g->layer_raw_cache_tp1[il] = metal_graph_alloc_kv_cache_tensor_on(
+                    managed_kv_cache, 1,
+                    (uint64_t)raw_cap * DS4_N_HEAD_DIM * sizeof(float));
+            g->layer_raw_cache_tp[il] = metal_graph_alloc_kv_cache_tensor_on(
+                    managed_kv_cache, 2,
+                    (uint64_t)raw_cap * DS4_N_HEAD_DIM * sizeof(float));
+            g->layer_raw_cache_tp3[il] = metal_graph_alloc_kv_cache_tensor_on(
+                    managed_kv_cache, 3,
+                    (uint64_t)raw_cap * DS4_N_HEAD_DIM * sizeof(float));
+        } else if (layer_tp_partner >= 0) {
             g->layer_raw_cache_tp[il] = metal_graph_alloc_kv_cache_tensor_on(
                     managed_kv_cache,
                     layer_tp_partner,
@@ -17203,7 +17237,20 @@ static bool metal_graph_alloc_raw_cap(
                     layer_tier,
                     (uint64_t)g->layer_comp_cap[il] * DS4_N_HEAD_DIM *
                     (DS4_GPU_ATTN_COMP_CACHE_F16 ? sizeof(uint16_t) : sizeof(float)));
-            if (layer_tp_partner >= 0) {
+            if (g->rocm_tp4) {
+                g->layer_attn_comp_cache_tp1[il] = metal_graph_alloc_kv_cache_tensor_on(
+                        managed_kv_cache, 1,
+                        (uint64_t)g->layer_comp_cap[il] * DS4_N_HEAD_DIM *
+                        (DS4_GPU_ATTN_COMP_CACHE_F16 ? sizeof(uint16_t) : sizeof(float)));
+                g->layer_attn_comp_cache_tp[il] = metal_graph_alloc_kv_cache_tensor_on(
+                        managed_kv_cache, 2,
+                        (uint64_t)g->layer_comp_cap[il] * DS4_N_HEAD_DIM *
+                        (DS4_GPU_ATTN_COMP_CACHE_F16 ? sizeof(uint16_t) : sizeof(float)));
+                g->layer_attn_comp_cache_tp3[il] = metal_graph_alloc_kv_cache_tensor_on(
+                        managed_kv_cache, 3,
+                        (uint64_t)g->layer_comp_cap[il] * DS4_N_HEAD_DIM *
+                        (DS4_GPU_ATTN_COMP_CACHE_F16 ? sizeof(uint16_t) : sizeof(float)));
+            } else if (layer_tp_partner >= 0) {
                 g->layer_attn_comp_cache_tp[il] = metal_graph_alloc_kv_cache_tensor_on(
                         managed_kv_cache,
                         layer_tp_partner,
@@ -20130,6 +20177,72 @@ static bool metal_graph_cuda_tp_attn_cache_sync_raw_row(
             row_bytes);
 }
 
+/* After prefill (or checkpoint restore), replicate KV cache from tier 0
+ * to all 4 tiers for ROCm TP=4.  Each tier must have its own copy of the
+ * raw and compressed KV caches to avoid races during decode. */
+static bool metal_graph_rocm_tp4_sync_kv_cache(ds4_gpu_graph *g) {
+    if (!g || !g->rocm_tp4) return true;
+#if defined(DS4_ROCM_BUILD)
+    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const uint64_t raw_bytes =
+            (uint64_t)g->raw_cap * DS4_N_HEAD_DIM * sizeof(float);
+        /* Copy raw cache from tier 0 to tiers 1, 2, 3. */
+        if (g->layer_raw_cache_tp1[il] && g->layer_raw_cache[il]) {
+            if (!ds4_rocm_xdev_copy(mesh, 1,
+                    (void *)g->layer_raw_cache_tp1[il]->ptr,
+                    0,
+                    (const void *)g->layer_raw_cache[il]->ptr,
+                    raw_bytes, NULL)) return false;
+        }
+        if (g->layer_raw_cache_tp[il] && g->layer_raw_cache[il]) {
+            if (!ds4_rocm_xdev_copy(mesh, 2,
+                    (void *)g->layer_raw_cache_tp[il]->ptr,
+                    0,
+                    (const void *)g->layer_raw_cache[il]->ptr,
+                    raw_bytes, NULL)) return false;
+        }
+        if (g->layer_raw_cache_tp3[il] && g->layer_raw_cache[il]) {
+            if (!ds4_rocm_xdev_copy(mesh, 3,
+                    (void *)g->layer_raw_cache_tp3[il]->ptr,
+                    0,
+                    (const void *)g->layer_raw_cache[il]->ptr,
+                    raw_bytes, NULL)) return false;
+        }
+        /* Copy compressed cache from tier 0 to tiers 1, 2, 3. */
+        const uint32_t n_comp = g->layer_n_comp[il];
+        if (n_comp != 0) {
+            const uint64_t comp_bytes =
+                (uint64_t)n_comp * metal_graph_attn_comp_cache_row_bytes();
+            if (g->layer_attn_comp_cache_tp1[il] && g->layer_attn_comp_cache[il]) {
+                if (!ds4_rocm_xdev_copy(mesh, 1,
+                        (void *)g->layer_attn_comp_cache_tp1[il]->ptr,
+                        0,
+                        (const void *)g->layer_attn_comp_cache[il]->ptr,
+                        comp_bytes, NULL)) return false;
+            }
+            if (g->layer_attn_comp_cache_tp[il] && g->layer_attn_comp_cache[il]) {
+                if (!ds4_rocm_xdev_copy(mesh, 2,
+                        (void *)g->layer_attn_comp_cache_tp[il]->ptr,
+                        0,
+                        (const void *)g->layer_attn_comp_cache[il]->ptr,
+                        comp_bytes, NULL)) return false;
+            }
+            if (g->layer_attn_comp_cache_tp3[il] && g->layer_attn_comp_cache[il]) {
+                if (!ds4_rocm_xdev_copy(mesh, 3,
+                        (void *)g->layer_attn_comp_cache_tp3[il]->ptr,
+                        0,
+                        (const void *)g->layer_attn_comp_cache[il]->ptr,
+                        comp_bytes, NULL)) return false;
+            }
+        }
+    }
+    return true;
+#else
+    return true;
+#endif
+}
+
 static bool metal_graph_cuda_tp_attn_cache_sync_all(ds4_gpu_graph *g) {
     if (!g || !g->cuda_tp_attn_cache_dup) return true;
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
@@ -21718,6 +21831,31 @@ typedef enum {
     METAL_DECODE_LAYER_FROM_ROUTER,
 } metal_decode_layer_phase;
 
+/* Return the per-tier raw KV cache tensor for ROCm TP=4 (or shared for TP=2).
+ * Each tier must write to its own cache during decode to avoid races on the
+ * compressor state read-modify-write and concurrent KV store. */
+static inline ds4_gpu_tensor *metal_graph_tp4_raw_cache(const ds4_gpu_graph *g, uint32_t il, int tier) {
+    if (!g->rocm_tp4) return g->layer_raw_cache[il];
+    switch (tier) {
+        case 0: return g->layer_raw_cache[il];
+        case 1: return g->layer_raw_cache_tp1[il];
+        case 2: return g->layer_raw_cache_tp[il];
+        case 3: return g->layer_raw_cache_tp3[il];
+        default: return NULL;
+    }
+}
+
+/* Return the per-tier compressed KV cache tensor for ROCm TP=4.
+ * Note: during decode, all tiers share layer_attn_comp_cache[il] (tier 0)
+ * for reads because only tier 0 updates the compressed cache (shared).
+ * Per-tier comp caches mirror tier 0's at prefill time. Writes via
+ * metal_graph_commit_attn_comp_stage always go to the shared cache. */
+static inline ds4_gpu_tensor *metal_graph_tp4_comp_cache(const ds4_gpu_graph *g, uint32_t il, int tier) {
+    if (!g->rocm_tp4) return g->layer_attn_comp_cache[il];
+    (void)tier;
+    return g->layer_attn_comp_cache[il];
+}
+
 static bool metal_graph_encode_decode_layer_phase(
         ds4_gpu_graph  *g,
         const ds4_model        *model,
@@ -22488,7 +22626,7 @@ static bool metal_graph_encode_decode_layer_phase(
         }
 
         n_comp = g->layer_n_comp[il];
-        comp_cache = g->layer_attn_comp_cache[il];
+        comp_cache = metal_graph_tp4_comp_cache(g, il, g->active_tier);
     }
     DS4_METAL_PROFILE_DECODE_STAGE("compressor_indexer");
 
@@ -24619,6 +24757,58 @@ static bool metal_graph_encode_output_head(
         ok = metal_graph_output_logits_head_matmul(
                 g, model, weights, metal_graph_output_norm(g),
                 metal_graph_logits(g), 1, vocab_dim);
+    } else if (ok && g->rocm_tp4) {
+        /* ROCm TP=4: each rank computes its V/4 vocabulary shard.
+         * The output_norm is computed on the head tier (tier 0).
+         * Copy it to each tier's attn_norm scratch, compute the shard
+         * matmul on that tier, then gather all shards back to tier 0. */
+        const uint64_t tp_v4 = vocab_dim / 4u;
+        uint64_t head_row_bytes = 0;
+        ok = metal_graph_dense_quant_row_bytes(weights->output,
+                                               DS4_N_EMBD,
+                                               &head_row_bytes);
+        if (ok) {
+            const int home_tier = g->active_tier;
+            ds4_gpu_tensor *output_norm_t0 = metal_graph_output_norm(g);
+            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+            size_t norm_bytes = (size_t)DS4_N_EMBD * sizeof(float);
+            /* Compute shard on each tier.
+             * Tier 0 already has output_norm; tiers 1-3 get a copy. */
+            for (int t = 0; ok && t < 4; t++) {
+                if (t != home_tier) {
+                    if (!ds4_rocm_xdev_copy(mesh, t,
+                            (void *)g->attn_norm_by_tier[t]->ptr,
+                            home_tier,
+                            (const void *)output_norm_t0->ptr,
+                            norm_bytes, NULL)) { ok = false; break; }
+                }
+                if (ds4_gpu_set_current_device(t) != 0) { ok = false; break; }
+                ds4_gpu_tensor *shard_logits = ds4_gpu_tensor_view(
+                        g->logits_by_tier[t], 0, tp_v4 * sizeof(float));
+                if (!shard_logits) { ok = false; break; }
+                ok = metal_graph_matmul_dense_quant_abs(
+                        shard_logits,
+                        model, weights->output,
+                        weights->output->abs_offset +
+                            (uint64_t)t * tp_v4 * head_row_bytes,
+                        DS4_N_EMBD, tp_v4,
+                        t == home_tier ? output_norm_t0
+                                       : g->attn_norm_by_tier[t],
+                        1);
+                ds4_gpu_tensor_free(shard_logits);
+            }
+            /* Restore head_tier device. */
+            if (ok) ok = ds4_gpu_set_current_device(home_tier) == 0;
+            /* Gather shards 1-3 into logits_by_tier[0]. */
+            for (int t = 1; ok && t < 4; t++) {
+                const uint64_t off = (uint64_t)t * tp_v4 * sizeof(float);
+                ok = ds4_rocm_xdev_copy(mesh, home_tier,
+                        (void *)((uint8_t *)g->logits_by_tier[home_tier]->ptr + off),
+                        t,
+                        (const void *)g->logits_by_tier[t]->ptr,
+                        tp_v4 * sizeof(float), NULL);
+            }
+        }
     } else if (ok) {
         ok = metal_graph_matmul_dense_quant_tensor(metal_graph_logits(g),
                                                    model,
@@ -59191,6 +59381,10 @@ int ds4_session_eval_layer_slice(ds4_session *s,
                                                 n_tokens);
         }
     }
+    /* ROCm TP=4: after prefill, replicate KV cache from tier 0 to all 4
+     * tiers so each tier has its own cache during decode (avoids races on
+     * the compressor state read-modify-write and concurrent KV store). */
+    if (ok) ok = metal_graph_rocm_tp4_sync_kv_cache(g);
     if (ok && output_logits) {
         saved_cur = g->cur_hc_by_tier[src_tier];
         last_hc = metal_graph_tensor_row_view(metal_graph_batch_cur_hc(g), n_tokens - 1u, hc_dim);

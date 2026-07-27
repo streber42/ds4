@@ -1,6 +1,6 @@
 # 33 — TP=4 throughput measurement and utilization
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -142,3 +142,23 @@ Attempted cleanup methods (all failed):
 5. If TP=4 output is still garbled (as documented in issue #32), debug the remaining decode loop correctness bug
 6. Once TP=4 output is coherent, run the benchmark: `ds4-bench --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel -m <model> --prompt-file speed-bench/promessi_sposi.txt --ctx-start 2048 --ctx-max 2048 --step-incr 2048 --gen-tokens 256`
 7. Record throughput measurements in experiment-log.md
+
+### VRAM cleared by reboot (2026-07-27, human action)
+
+GPUs 0-2 had ~29 GiB stale VRAM from a killed test process. User rebooted the
+machine, clearing all GPU VRAM. TP=4 testing is no longer VRAM-blocked.
+
+**Remaining bugs (from comments above):**
+1. Decode loop synchronization (issues #29/#30): tiers compute partials
+   sequentially, then all-reduce — needs all 4 tiers to compute before
+   any all-reduce fires
+2. Weight sharding overshoot: each rank loads 23.80 GiB vs expected ~20 GiB —
+   audit per-tier weight loading for proper 4-way sharding
+3. Prefill OOM on moe_gate (320 MiB alloc) — downstream of issue 2
+
+**Next actions for agent:**
+1. Rebuild from current HEAD (pipeline fix already applied)
+2. Verify pipeline reference still works
+3. Debug TP=4 decode loop correctness
+4. Once coherent, run TP=4 benchmark
+5. Record throughput in experiment-log.md
