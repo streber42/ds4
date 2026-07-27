@@ -1,6 +1,6 @@
 # 33 — TP=4 throughput measurement and utilization
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -33,9 +33,11 @@ Measure TP=4 throughput and per-GPU utilization against the pipeline and TP=2 ba
 
 ## Blocked by
 
-- Issue #32: TP=4 quality fixture (correctness must be verified before trusting throughput numbers) — **Status: ready-for-human**
-- Issue #29: TP=4 attention path (decode loop synchronization) — **Status: ready-for-human**
-- Issue #30: TP=4 MoE path (decode loop synchronization) — **Status: ready-for-human**
+- Issue #32: TP=4 quality fixture (correctness must be verified before trusting throughput numbers) — **Status: ready-for-agent**
+- Issue #29: TP=4 attention path (decode loop synchronization) — **Status: ready-for-agent**
+- Issue #30: TP=4 MoE path (decode loop synchronization) — **Status: ready-for-agent**
+
+**Note:** Issues #29, #30, and #32 all share the same root cause (decode loop phase-split bug). An approved plan exists in issue #25's Comments section to fix them together in one coherent change.
 
 ## Comments
 
