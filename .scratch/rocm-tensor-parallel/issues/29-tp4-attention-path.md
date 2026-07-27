@@ -1,6 +1,6 @@
 # 29 — TP=4 attention path (coherent single sentence)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -378,23 +378,121 @@ The previous garbled output was caused by the OOM (missing MoE weights) AND the
 missing HC expand. With both the OOM and the new HC expand fix, the attention path
 is architecturally complete — but the MoE path is still corrupted by missing weights.
 
-**What blocks the final acceptance criterion:**
+### Live-pair session 2 (2026-07-27) — OOM fixed, still garbled
 
-- **Primary blocker:** ROCm backend VRAM fragmentation. After loading ~23.80 GiB
-  of selective weights in 1328 ranges, a 384 MiB contiguous allocation for
-  `moe_owned_down` fails. The free arena has 4.01 GiB total, but no fragment large
-  enough. This requires fixing the ROCm model arena allocator (defrag, larger
-  initial reservations, or separate heap for large moe_owned tensors).
+**OOM fix applied:** Arena chunk size increased from 256 MiB → 1024 MiB in
+`rocm/ds4_rocm_runtime.cuh:5662`. Gemini (gemini-3.6-flash) reviewed and
+confirmed it's a valid quick fix for this hardware configuration (4×32 GiB).
+Adaptive/geometric chunking recommended for production but deferred.
 
-- **Secondary:** Once OOM is fixed, the "coherent single sentence" test should be
-  re-run. If the output is still garbled (unlikely, since the decode loop changes
-  follow the reviewed plan and all unit tests pass), debug the attention/MoE all-reduce
-  ordering.
+**Build & test results:**
+```
+$ make -j8 rocm     # all 5 binaries clean
+$ make test-rocm     # all tests pass
+```
 
-**Next steps for the human / next agent:**
+**End-to-end test:**
+```
+$ ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+    --model /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-...gguf \
+    -c 512 -p "Explain C pointers in one sentence." -n 50
+```
 
-1. Fix the ROCm VRAM fragmentation/moe_owned OOM in the model loading path
-   (likely in `ds4_rocm.cu` / `rocm/ds4_rocm_runtime.cuh`)
-2. Re-run the "Explain C pointers in one sentence." test
-3. If coherent, mark the final acceptance criterion complete and close this issue
-4. If still garbled with the OOM fixed, debug the attention/MoE all-reduce path
+**Load:** All 4 tiers load 23.00 GiB in 1328 ranges. No more OOM.
+```
+ds4: CUDA tier 0 (device 0) selective weights: 23.00 GiB in 1328 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.00 GiB in 1328 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.00 GiB in 1328 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 23.00 GiB in 1328 ranges
+```
+
+**Output:** Still garbled:
+```
+"to taleds  e a\n,\n\n**     **.\n, \n,.,.**     ****a**  ..."
+```
+Generation: 4.14 t/s. Prefill: 5.50 t/s.
+
+**Status:** The OOM was masking a decode-loop correctness bug. The floor is
+now clean to debug it.
+
+### Diagnosis of garbled output
+
+**What was ruled out (correct):**
+- `cur_hc` initialization across tiers: `metal_graph_set_active_tier_decode`
+  (line 15527-15543) already copies `cur_hc` from the previous active tier
+  when switching. So all tiers start layer 0 with the correct embedding.
+  Confirmed by reading the code — NOT the bug.
+- Arena fragmentation causing missing weights: fixed. All weights load cleanly.
+- HC expand missing: Phase-split restructure handles this correctly (TO_FFN →
+  all-reduce → HC expand → FROM_ATTN_TO_FFN → all-reduce → post-FFN HC
+  expand → broadcast cur_hc).
+
+**Likely root cause areas:**
+
+1. **MoE expert weight sharding vs. router selection.** The `FROM_ATTN_TO_FFN`
+   phase runs the router on each tier, producing identical selected-expert
+   lists (same ffn_norm → same router logits). But each tier only HAS 64 of
+   256 experts in its selective weight cache (tier 0 has experts 0-63, tier 1
+   has 64-127, etc.). When the router selects experts from outside a tier's
+   owned set, the MoE matmul reads garbage weight data for the missing
+   experts. The all-reduce then mixes garbage into the result.
+
+   The mechanism by which tiers compute only their owned experts needs
+   investigation. Two sub-questions:
+   a. Does the routed MoE matmul on each tier actually restrict itself to
+      owned expert weights, or does it attempt the full 256-expert matmul?
+   b. If it attempts the full matmul, what does `cuda_resolve_weight_ptr`
+      return for expert weight ranges not owned by the current tier? If it
+      falls back to a host copy of the full tensor, each tier computes all
+      256 experts redundantly (wasteful but numerically correct), and the
+      all-reduce sums 4× the correct value. If it returns NULL or garbage,
+      the output is corrupted.
+
+2. **Attention output combine.** The attention all-reduce sums the 4 partials
+   from `attn_out_by_tier[0..3]` into `metal_graph_attn_out(g)` on tier 0.
+   Each partial should be `n_embd` floats computed from 32 attention heads.
+   If the `metal_graph_attention_output_dense_quant_tp` function with
+   `tp_attn_groups = 2` and `tp_attn_group0 = tier * 2` produces the correct
+   partial, the all-reduce should be correct. But this hasn't been verified
+   numerically (e.g. with the kernel comparison scaffold).
+
+3. **Post-MoE HC expand and cur_hc broadcast.** After the MoE all-reduce into
+   `metal_graph_routed_out(g)` on tier 0, the code calls
+   `ds4_gpu_hc_expand_split_tensor` on tier 0 only, then swaps cur_hc/after_ffn_hc
+   pointers on tier 0 only, and broadcasts `after_ffn_hc` to tiers 1-3 via
+   `cur_hc_by_tier[tier]->ptr`. If `metal_graph_cur_hc(g)` on tiers 1-3
+   points to a different tensor than `cur_hc_by_tier[tier]`, the broadcast
+   writes to a stale location. But the tier switch copies cur_hc explicitly,
+   so this should be fine.
+
+4. **Prefill vs. decode mismatch.** The test uses context size 512, so there
+   is a prefill phase followed by decode. The prefill path may not correctly
+   handle TP=4. Testing with `-c 1 -p "Hello"` (pure decode, no prefill)
+   would isolate this.
+
+**Debugging approach for next agent:**
+
+1. **Isolate decode-only:** Run with `-c 1` to skip prefill entirely. If
+   output is still garbled, the bug is in the decode loop. If output is
+   clean, the bug is in the prefill path.
+2. **Verify attention all-reduce:** Use `DS4_DEBUG_TP_OUTPUT=1` to dump
+   per-layer tensor statistics and compare tier 0 partial vs. all-reduced
+   result.
+3. **Verify MoE expert ownership:** Add temporary debug logging to
+   `metal_graph_encode_decode_layer_phase` in the MoE section showing which
+   expert weights are used on each tier.
+4. **Disable MoE sharding temporarily:** If the MoE path is the issue, try
+   having all tiers load the full model (no sharding) to see if the output
+   becomes coherent. This would confirm the MoE matmul itself works when all
+   weights are present.
+5. **Numerical comparison:** Run the kernel comparison scaffold (`test_rocm`)
+   on the attention output and MoE matmul for TP=4 to verify partial results
+   sum correctly.
+
+**Acceptance criteria status:**
+- [x] Attention head split generalized: `tp_groups = n_groups / tp_world` (works for both 2 and 4)
+- [x] Attention output exchange: `tp_world == 4` branch calls all-reduce instead of 2-rank gate
+- [x] MLA compressed KV remains replicated (no sharding change)
+- [ ] `"Explain C pointers in one sentence."` → fluent, coherent single sentence on 4 GPUs
+- [x] TP=2 attention path unchanged (still works with `tp_world == 2`)
+- [x] `make -j8 rocm` builds cleanly

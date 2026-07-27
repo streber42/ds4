@@ -5738,9 +5738,12 @@ static int cuda_stream_model_cache_prepare_memory(
 }
 
 static uint64_t cuda_model_arena_chunk_bytes(uint64_t need) {
-    /* 256 MiB default: host-validated on 4x R9700 (issue 10 OOM fix carried
-     * by e843f97); upstream's tight-allocation guard kept for large spans. */
-    const uint64_t default_bytes = 256ull * 1048576ull;
+    /* 1 GiB default: branch issue-29 finding — small chunks (256 MiB) turned
+     * every lazy tensor touch into a real cudaMalloc and broke the
+     * host-register fallback near the VRAM limit; a spare 1 GiB chunk keeps
+     * amortizing across later tenants.  Upstream's tight-allocation guard
+     * kept for large spans. */
+    const uint64_t default_bytes = 1024ull * 1048576ull;
     /*
      * Two allocations larger than half the default arena can never share it.
      * Allocate those spans tightly for DeepSeek instead of stranding the
