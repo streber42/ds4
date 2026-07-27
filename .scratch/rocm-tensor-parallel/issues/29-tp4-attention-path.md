@@ -1,6 +1,6 @@
 # 29 — TP=4 attention path (coherent single sentence)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -311,3 +311,90 @@ partial 25/100 quality fixture ran *despite* the OOM warning and produced NLL
 past; the decode loop is the primary correctness blocker. Fix the loop first
 to get a working validation path; then fix the OOM as a clean VRAM-pressure
 reduction on top of a working system.
+
+### Implementation complete — decode loop phase-split (2026-07-27)
+
+Followed the Gemini-approved 5-step plan to restructure the TP=4 decode loop.
+
+**Changes made to `ds4.c`:**
+
+1. **Added `TO_FFN` early exit** (line ~22937): `if (phase == METAL_DECODE_LAYER_TO_FFN) return ok;`
+   - Placed after attention output HC expand, before FFN-side RMSNorm
+   - Makes `TO_FFN` a true attention-only phase for the first time
+
+2. **Wrapped KV store → attention output in `if (!resume_after_attn)`** (lines ~21965-22932):
+   - When `FROM_ATTN_TO_FFN` is the phase, skips KV store, compressor, attention core,
+     attention output, HC expand
+   - Resumes at the FFN-side RMSNorm on `after_attn_hc`
+   - Fixes the latent bug in batch session code too (both `TO_FFN` and `FROM_ATTN_TO_FFN`
+     were previously broken — one ran the full layer, the other re-entered attention core)
+
+3. **Changed TP=4 attention/MoE early-exit guards** (lines ~22876, ~24260):
+   - Replaced `g->tp4_phase == 1` with `phase == METAL_DECODE_LAYER_TO_FFN`
+   - Replaced `g->tp4_phase == 2` with `g->rocm_tp4`
+   - Removed all `tp4_phase` references (struct field, assignments, checks)
+
+4. **Added HC expand in outer loop** (lines ~26655-26670):
+   - After the attention all-reduce and broadcast, each tier runs
+     `ds4_gpu_hc_expand_tensor(after_attn_hc, attn_out_by_tier[tier], ...)`
+   - Tier 0 uses `metal_graph_attn_out(g)` (has full sum from all-reduce)
+   - Tiers 1-3 use `g->attn_out_by_tier[tier]` (has full sum from broadcast)
+   - Barrier after all 4 tiers complete their HC expand
+
+5. **Restructured outer decode loop** (lines ~26609-26719):
+   - Phase 1: `METAL_DECODE_LAYER_TO_FFN` — attention partials on all 4 tiers
+   - Barrier + all-reduce + broadcast
+   - HC expand on all 4 tiers (NEW — produces correct `after_attn_hc`)
+   - Phase 2: `METAL_DECODE_LAYER_FROM_ATTN_TO_FFN` — MoE partials on all 4 tiers
+   - Barrier + all-reduce MoE → post-FFN HC expand → broadcast cur_hc
+
+**Build & test verification:**
+```
+$ make -j8 rocm     # all 5 binaries build cleanly
+$ make test-rocm    # all tests pass
+$ ./tests/test_tp_sharding    # 228/228 checks passed
+$ ./tests/test_layer_pack     # 97/97 checks passed
+$ ./tests/test_engine_mgpu_placement  # 98/98 checks passed
+```
+
+**End-to-end test:**
+```
+$ ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+    --model /home/murphy/src/ds4/ds4flash.gguf -c 512 -p "Hello" -n 10
+```
+
+Result: still OOM-blocked. The model loads but fails on:
+```
+ROCm model arena alloc failed for moe_owned_down (384.00 MiB chunk): out of memory
+```
+
+This is a VRAM fragmentation issue, not a decode-loop bug. After loading 1328 weight
+ranges on tier 0 (23.80 GiB selective weights), the free arena is 4.01 GiB but no
+single fragment is large enough for a 384 MiB contiguous allocation. The OOM happens
+during model loading (before any decode), so it is entirely independent of the decode
+loop changes.
+
+The previous garbled output was caused by the OOM (missing MoE weights) AND the
+missing HC expand. With both the OOM and the new HC expand fix, the attention path
+is architecturally complete — but the MoE path is still corrupted by missing weights.
+
+**What blocks the final acceptance criterion:**
+
+- **Primary blocker:** ROCm backend VRAM fragmentation. After loading ~23.80 GiB
+  of selective weights in 1328 ranges, a 384 MiB contiguous allocation for
+  `moe_owned_down` fails. The free arena has 4.01 GiB total, but no fragment large
+  enough. This requires fixing the ROCm model arena allocator (defrag, larger
+  initial reservations, or separate heap for large moe_owned tensors).
+
+- **Secondary:** Once OOM is fixed, the "coherent single sentence" test should be
+  re-run. If the output is still garbled (unlikely, since the decode loop changes
+  follow the reviewed plan and all unit tests pass), debug the attention/MoE all-reduce
+  ordering.
+
+**Next steps for the human / next agent:**
+
+1. Fix the ROCm VRAM fragmentation/moe_owned OOM in the model loading path
+   (likely in `ds4_rocm.cu` / `rocm/ds4_rocm_runtime.cuh`)
+2. Re-run the "Explain C pointers in one sentence." test
+3. If coherent, mark the final acceptance criterion complete and close this issue
+4. If still garbled with the OOM fixed, debug the attention/MoE all-reduce path

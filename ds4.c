@@ -15285,7 +15285,6 @@ typedef struct {
      * transport slabs except tp_logits_half, whose view object is session-owned. */
     uint32_t tp_world;
     uint32_t tp_rank;
-    int tp4_phase; /* ROCm TP=4 phase: 0=normal, 1=attention partial, 2=MoE partial */
     ds4_gpu_tensor **tp_out;
     ds4_gpu_tensor **tp_in;
     ds4_gpu_tensor **tp_batch_out;
@@ -22058,6 +22057,11 @@ static bool metal_graph_encode_decode_layer_phase(
         ds4_debug_tp_output_stat_f32(lbl, metal_graph_kv(g), DS4_N_HEAD_DIM);
     }
     }
+    /* Skip KV store, compressor, attention core, and attention output when
+     * resuming after attention (FROM_ATTN_TO_FFN phase).  These were already
+     * computed in the TO_FFN phase and are not needed again for the FFN-only
+     * pass. */
+    if (!resume_after_attn) {
     if (!resume_after_kv_store) {
         /* The common no-debug path may fuse KV RMS with RoPE above. KV
          * storage starts here after metal_graph_kv(g) contains the RoPE row. */
@@ -22964,7 +22968,7 @@ static bool metal_graph_encode_decode_layer_phase(
     /* ROCm TP=4 attention phase: exit after computing the partial attention
      * output (stored in attn_out_by_tier[tier]). The all-reduce and HC expand
      * are handled in the outer decode loop after all 4 tiers sync. */
-    if (g->rocm_tp4 && g->tp4_phase == 1) {
+    if (g->rocm_tp4 && phase == METAL_DECODE_LAYER_TO_FFN) {
         return ok;
     }
     if (ok && g->tp_world == 2) {
@@ -23021,11 +23025,17 @@ static bool metal_graph_encode_decode_layer_phase(
     if (ok) {
         metal_graph_debug_dump_tensor("hc_attn_post", metal_graph_after_attn_hc(g), hc_dim, il, pos);
     }
+    }
     if (getenv("DS4_DEBUG_TP_OUTPUT") && ok) {
         char lbl[64];
         snprintf(lbl, sizeof(lbl), "il=%u after_attn_hc (post-attn)", il);
         ds4_debug_tp_output_stat_f32(lbl, metal_graph_after_attn_hc(g), hc_dim);
     }
+    /* METAL_DECODE_LAYER_TO_FFN: exit after the attention output HC expand,
+     * before the FFN-side HC post norm (RMSNorm).  The MoE all-reduce and
+     * post-FFN HC expand happen in the outer decode loop (TP=4) or through
+     * the tp_world == 2 gate exchange. */
+    if (phase == METAL_DECODE_LAYER_TO_FFN) return ok;
     if (ok && !tp_ablate_hcpre) {
         ok = ds4_gpu_rms_norm_plain_tensor(metal_graph_flat_hc(g), metal_graph_after_attn_hc(g), (uint32_t)hc_dim, DS4_RMS_EPS) != 0;
         if (ok) ok = metal_graph_matmul_plain_tensor(metal_graph_hc_mix(g), model, layer->hc_ffn_fn,
@@ -24340,9 +24350,9 @@ static bool metal_graph_encode_decode_layer_phase(
                                      metal_graph_routed_out(g),
                                      DS4_N_EMBD) != 0;
         }
-        /* ROCm TP=4 MoE phase: exit after storing this tier's partial.
+        /* ROCm TP=4 phase: exit after storing this tier's partial.
          * All-reduce and post-FFN HC expand handled in the outer loop. */
-        if (g->tp4_phase == 2) return ok;
+        if (g->rocm_tp4) return ok;
     }
     if (ok && keep_ffn_out) {
         ok = metal_graph_ensure_ffn_out(g) &&
@@ -26670,30 +26680,27 @@ static bool metal_graph_encode_token_raw_swa(
      * file, inside the DS4_ROCM_BUILD guard). No need to re-declare here. */
 
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        /* ROCm TP=4 phase-split decode loop.
-         *
-         * Phase 1 (tp4_phase=1): Compute attention partials on all 4 tiers.
-         * Each tier stores its 32-head attention output in
-         * attn_out_by_tier[tier] and exits early (before all-reduce and
-         * HC expand).
-         *
-         * Barrier + all-reduce: Synchronize all 4 GPUs, then all-reduce
-         * the 4 partials into the full sum on tier 0. Broadcast the full
-         * sum to tiers 1-3 so their subsequent HC expand uses the correct
-         * combined attention output.
-         *
-         * Phase 2 (tp4_phase=2): Continue full layer (HC expand, pre-FFN HC,
-         * router, shared expert, routed MoE) on all 4 tiers. Each tier
-         * computes its 64-expert MoE partial and stores it in
-         * shared_out_by_tier[tier], then exits before the MoE all-reduce
-         * and post-FFN HC expand.
-         *
-         * Barrier + all-reduce: Synchronize all 4 GPUs, all-reduce MoE
-         * partials, then run post-FFN HC expand on tier 0. Broadcast
-         * after_ffn_hc to tiers 1-3 for the next layer's input. */
         if (g->rocm_tp4) {
+            /*
+             * ROCm TP=4 decode loop: iterate over all 4 tiers per layer.
+             *
+             * Phase 1 (TO_FFN): Compute attention partials on all 4 tiers.
+             *   Each tier runs the full attention pipeline (HC pre, QKV,
+             *   attention core, attention output projection) for its 32
+             *   heads. The partial n_embd vector is stored in
+             *   attn_out_by_tier[tier] and the phase exits early at the
+             *   TO_FFN return point (before FFN-side RMSNorm).
+             *
+             * Phase 2 (FROM_ATTN_TO_FFN): Compute MoE partials on all 4
+             *   tiers.  Skips attention via resume_after_attn and runs the
+             *   FFN path only (HC post norm, shared expert, routed MoE with
+             *   64 owned experts). The partial is stored in
+             *   shared_out_by_tier[tier].
+             *
+             * All-reduce combines the 4 partials after each phase.
+             * The post-FFN HC expand is done on tier 0 after the MoE
+             * all-reduce, then after_ffn_hc is broadcast to all tiers. */
             /* ---- Phase 1: Attention partials ---- */
-            g->tp4_phase = 1;
             for (int tier = 0; ok && tier < 4; tier++) {
                 if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
                 g->tp_rank = (uint32_t)tier;
@@ -26741,8 +26748,31 @@ static bool metal_graph_encode_token_raw_swa(
                 ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
             }
 
-            /* ---- Phase 2: MoE partials (with HC expand using full attn_out) ---- */
-            g->tp4_phase = 2;
+            /* ---- HC expand: produce after_attn_hc from the full attn_out. ----
+             * On tier 0, metal_graph_attn_out(g) has the full sum from the
+             * all-reduce.  On tiers 1-3, g->attn_out_by_tier[tier] has the
+             * full sum from the broadcast.  The HC expand is linear, so it is
+             * safe to run independently on each tier after the sync. */
+            for (int tier = 0; ok && tier < 4; tier++) {
+                if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
+                g->tp_rank = (uint32_t)tier;
+                if (ok) {
+                    ok = ds4_gpu_hc_expand_tensor(
+                            metal_graph_after_attn_hc(g),
+                            tier == 0 ? metal_graph_attn_out(g)
+                                      : g->attn_out_by_tier[tier],
+                            metal_graph_cur_hc(g),
+                            metal_graph_hc_post(g),
+                            metal_graph_hc_comb(g),
+                            DS4_N_EMBD, DS4_N_HC) != 0;
+                }
+            }
+            if (ok) {
+                const int devs[4] = {0, 1, 2, 3};
+                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+            }
+
+            /* ---- Phase 2: MoE partials ---- */
             for (int tier = 0; ok && tier < 4; tier++) {
                 if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
                 g->tp_rank = (uint32_t)tier;
@@ -26750,7 +26780,7 @@ static bool metal_graph_encode_token_raw_swa(
                         g, model, &weights->layer[il],
                         il, pos,
                         g->layer_raw_cache[il], g->raw_cap, raw_row, n_raw, token,
-                        METAL_DECODE_LAYER_TO_FFN);
+                        METAL_DECODE_LAYER_FROM_ATTN_TO_FFN);
             }
             /* Barrier: wait for all 4 tiers' MoE compute to finish. */
             if (ok) {
@@ -26804,9 +26834,8 @@ static bool metal_graph_encode_token_raw_swa(
                 const int devs[4] = {0, 1, 2, 3};
                 ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
             }
-            /* Post-layer: dspark capture and tp4_phase reset. */
+            /* Post-layer: dspark capture. */
             if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
-            g->tp4_phase = 0;
             continue;
         }
 
