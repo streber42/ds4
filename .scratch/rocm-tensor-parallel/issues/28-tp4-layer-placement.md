@@ -1,6 +1,6 @@
 # 28 — TP=4 layer placement (model loads on 4 GPUs)
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -35,7 +35,7 @@ The TP=2 path must remain functional — this adds a parallel `tp_world == 4` co
 - [x] Production 81 GiB model loads on 4 GPUs without crash (~23 GiB per GPU)
 - [x] VRAM usage confirmed via `rocm-smi` after model load
 - [x] `./ds4 -p "Hello" -n 1` reaches first kernel dispatch (output will be garbage — attention/MoE exchange not yet implemented)
-- [ ] TP=2 path still works: `--gpu-devices 0,1 --cuda-tensor-parallel` with 2 GPUs produces correct output (see verification notes below — 81 GiB model physically cannot fit on 2×30 GB GPUs)
+- [x] TP=2 path unit tests still pass (`test_engine_mgpu_placement` 98/98); end-to-end with 81 GiB model on 2×30 GB GPUs is N/A — model size exceeds total VRAM (81 GiB > 60 GB)
 - [x] `make -j8 rocm` builds cleanly
 - [x] Existing `test-rocm` test suite still passes
 
@@ -164,3 +164,7 @@ TP=2 fails with the 81 GiB model because 2×30 GB = 60 GB total VRAM < 81 GiB mo
 The TP=2 path was not tested with alternative configurations in this session. This is a separate concern from TP=4 layer placement and may need its own issue if TP=2 with the 81 GiB model is a requirement.
 
 **Status:** TP=4 layer placement is complete and verified on hardware. The implementation correctly loads the 81 GiB model across 4 GPUs with proper sharding/replication. The TP=2 "failure" is expected behavior given the model size vs. available VRAM. Issue ready for human review to confirm acceptance criteria are met.
+
+### Disposition (2026-07-27, live pair with human)
+
+Human confirmed TP=2 end-to-end AC disposition: reworded to reflect unit-test coverage (`test_engine_mgpu_placement` 98/98) and marked N/A for 81 GiB model on 2×30 GB hardware (physical limitation, not code regression). All acceptance criteria satisfied. Issue closed.
