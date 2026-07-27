@@ -1,6 +1,6 @@
 # 30 — TP=4 MoE path (coherent paragraph)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -30,13 +30,23 @@ Wire up the MoE (mixture of experts) subsystem for TP=4: split 256 routed expert
 
 ## Blocked by
 
-- Issue #29: TP=4 attention path (attention must work before MoE can be tested end-to-end)
+- ~~Issue #29: TP=4 attention path~~ — will be fixed as part of this issue's work (see approved plan in Status Update and Comments)
 
 ## Status Update
 
-**Status: ready-for-human**
+**Status: ready-for-agent**
 
-The MoE-specific code is complete and builds cleanly, but end-to-end verification fails due to a fundamental architectural issue in the decode loop (issue #29).
+The MoE-specific code is complete and builds cleanly. End-to-end verification requires fixing two bugs identified in the live-pair session (2026-07-27):
+
+1. **Bug B (OOM):** `moe_gate` 320 MiB allocation fails during model load. TP=4 placement isn't sharding this tensor across ranks (should be ~80 MiB/rank, not 320 MiB on one GPU).
+2. **Bug A (garbled output):** Decode loop phase ordering is wrong. `metal_graph_encode_decode_layer` runs attention + MoE in a single pass per tier, so all-reduce reads stale peer buffers from the previous layer.
+
+**Approved plan (live-pair session 2026-07-27):**
+1. Fix `moe_gate` TP=4 placement so model loads cleanly without OOM.
+2. Phase-split the decode loop: attention phase across all 4 tiers → all-reduce → MoE phase across all 4 tiers → all-reduce.
+3. Re-run end-to-end verification with the 81 GiB IQ2XXS model on GPUs 0-3.
+
+**Note:** This issue depends on issue #29's decode loop architecture. The next agent should fix both the `moe_gate` placement (this issue) and the decode loop phase ordering (issue #29) to complete the coherent paragraph test.
 
 ## Comments
 
@@ -232,3 +242,26 @@ To complete end-to-end verification, the implementer needs to:
 - The shared expert accounting avoids 4× over-counting by having only rank 0 compute the full shared expert. Ranks 1-3 zero their `shared_out` before the all-reduce. Alternative formulations (each rank contributes `shared_out/4`) would require row-slicing the shared expert, which the current shared_dim does not cleanly support.
 - The TP=2 MoE path is preserved exactly — my changes add new `rocm_tp4_moe` branches before the existing `tp_split_shared` / `cuda_tp_moe` / `!tp_fold_ffn` branches, so the conditional logic falls through to the existing paths for TP=2 and non-TP.
 - The all-reduce uses `g->shared_out_by_tier[t]` as the per-tier partial buffer (repurposing the existing per-tier shared expert output buffer). This is a temporary staging area — the partial is `shared_out + routed_out` stored into `shared_out_by_tier[home_tier]`, then all-reduced into `metal_graph_routed_out(g)`.
+
+### Live-pair session (2026-07-27, human + agent)
+
+Human and agent reviewed the end-to-end failure from the previous autonomous session. Confirmed:
+
+**Root causes:**
+1. **`moe_gate` OOM (Bug B):** 320 MiB allocation fails during model load. TP=4 placement isn't sharding this tensor — it's loading the full 320 MiB on one GPU instead of splitting it ~80 MiB across 4 ranks.
+2. **Decode loop phase ordering (Bug A):** The decode loop iterates 4 times per layer (once per tier), but each iteration calls the full `metal_graph_encode_decode_layer` which includes both attention and MoE. When tier 0 runs, its all-reduce reads peer tier buffers that contain stale data from the previous layer. This alone explains the garbled output, but the OOM makes it impossible to even test the phase ordering until fixed.
+
+**Approved execution plan:**
+1. Fix `moe_gate` TP=4 placement in `ds4.c` so the model loads cleanly without OOM. Check the placement logic around line ~16000-17000 where tensor sharding decisions are made — `moe_gate` should be split across ranks like other MoE tensors.
+2. Phase-split the decode loop in `metal_graph_encode_token_raw_swa` (line ~26441): restructure to run attention phase across all 4 tiers → all-reduce attention → MoE phase across all 4 tiers → all-reduce MoE. This requires splitting `metal_graph_encode_decode_layer` into attention-only and MoE-only phases, or restructuring the loop to call them separately.
+3. Re-run end-to-end verification:
+   ```bash
+   ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+     --model /home/murphy/src/ds4/ds4flash.gguf \
+     -p "Write a paragraph explaining how recursion works." -n 200
+   ```
+   Expected: coherent multi-sentence paragraph proving MoE path is numerically sound.
+
+**Hardware access:** Confirmed available on this machine. 4× AMD Radeon AI Pro R9700 (GPU 0-3), model at `/home/murphy/src/ds4/ds4flash.gguf` (symlink to 81 GiB IQ2XXS), binary at `/home/murphy/src/ds4-rebase/ds4`. Direct shell access — no SSH or remote credentials needed.
+
+**Issue dependency:** This issue (#30) is blocked by issue #29's decode loop architecture. The next agent should fix both the `moe_gate` placement (this issue) and the decode loop phase ordering (issue #29) as a single unit of work. Once the coherent paragraph test passes, mark the final acceptance criterion as complete and close this issue.
