@@ -1,6 +1,6 @@
 # 25 — Widen TP from 2-pair pipeline to true 4-rank tensor parallelism
 
-Status: in-progress
+Status: ready-for-human
 
 **What to build:** The current 4-GPU topology is "Option A" from issue #11 — two TP=2
 pairs arranged in a pipeline. GPUs 0-1 form one TP pair processing layers 0-20, GPUs 2-3
