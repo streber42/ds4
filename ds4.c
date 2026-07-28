@@ -55926,12 +55926,24 @@ static uint32_t engine_tp4_shard_divisor(
         return 4;
     }
 
-    /* Per-head attention projections within transformer layers. */
+    /* Per-head attention projections within transformer layers.
+     *
+     * NOTE: attn_q_b and attn_output_a are replicated (divisor=1, not 4)
+     * because the batch prefill attention function
+     * (metal_graph_encode_layer_attention_batch) runs only on tier 0 and
+     * accesses the full weight range.  Sharding these would leave tier 0
+     * with only 25% of the weight cached, causing cuda_resolve_weight_ptr
+     * to return NULL or host-mapped memory — producing wrong hidden states
+     * during prefill and garbled decode output (issue #32).
+     *
+     * The decode path uses explicit per-tier weight offsets (tp_q_rows_off,
+     * tp_attn_group0) regardless of the divisor, so replication does not
+     * affect decode correctness.  VRAM cost: ~120 MB extra per GPU. */
     if (entry >= 1 && entry <= (int)DS4_N_LAYER) {
         const ds4_layer_weights *layer = &e->weights.layer[entry - 1];
-        if (t == layer->attn_q_b)        return 4;
-        if (t == layer->attn_output)     return 4; /* single-matrix output (GLM-style) */
-        if (t == layer->attn_output_a)   return 4; /* low-rank A stage (Flash-style) */
+        if (t == layer->attn_q_b)        return 1;
+        if (t == layer->attn_output)     return 4; /* single-matrix output (GLM-style, CPU ref only) */
+        if (t == layer->attn_output_a)   return 1; /* low-rank A stage (Flash-style) */
 
         /* Shared expert tensors: NOT sharded (divisor=1, not 4). Only rank 0
          * computes the full shared expert; ranks 1-3 contribute zero for the
