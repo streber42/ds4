@@ -2290,6 +2290,17 @@ int ds4_gpu_routed_moe_owned_slots_combine_tensor(
         uint32_t              out_dim,
         uint32_t              expert_split);
 
+/* Single-rank single-token owned-slot combine for TP=4 decode (issue #32).
+ * Sums the 6 per-slot expert contributions from home_slots into out,
+ * including only slots whose expert falls in [owned_base, owned_base+owned_count). */
+int ds4_gpu_routed_moe_owned_single_combine_tensor(
+        ds4_gpu_tensor       *out,
+        const ds4_gpu_tensor *home_slots,
+        const ds4_gpu_tensor *selected,
+        uint32_t              out_dim,
+        uint32_t              owned_base,
+        uint32_t              owned_count);
+
 int ds4_gpu_routed_moe_owned_slots_combine_rows_tensor(
         ds4_gpu_tensor       *out,
         const ds4_gpu_tensor *home_slots,

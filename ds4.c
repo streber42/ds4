@@ -24757,6 +24757,21 @@ static bool metal_graph_encode_decode_layer_phase(
             }
         }
     } else if (ok && rocm_tp4_moe) {
+        /* ROCm TP=4: combine owned per-slot expert contributions from
+         * metal_graph_routed_down(g) (6 × n_embd per-slot, written by
+         * ds4_gpu_routed_moe_one_owned_tensor) into an n_embd partial
+         * in metal_graph_routed_out(g).  Without this combine the
+         * all-reduce sums uninitialized memory → hidden-state blowup
+         * (issue #32 root cause, 2026-07-28). */
+        if (ok) {
+            ok = ds4_gpu_routed_moe_owned_single_combine_tensor(
+                    metal_graph_routed_out(g),
+                    metal_graph_routed_down(g),
+                    metal_graph_router_selected(g),
+                    DS4_N_EMBD,
+                    tp4_owned_base,
+                    tp4_experts_per_rank) != 0;
+        }
         /* ROCm TP=4: each rank's partial = shared_out (full on rank 0, zero on ranks 1-3)
          * + routed_out (owned 64 experts). Store in per-tier buffer; the all-reduce
          * is called from the outer decode loop after all 4 tiers sync.

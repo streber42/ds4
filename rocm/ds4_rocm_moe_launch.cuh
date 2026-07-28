@@ -2600,6 +2600,39 @@ extern "C" int ds4_gpu_routed_moe_owned_slots_combine_tensor(
             out, home_slots, peer_slots, selected, out_dim, expert_split, 1u);
 }
 
+/* Single-rank single-token owned-slot combine for TP=4 decode (issue #32).
+ * Sums the 6 per-slot expert contributions from home_slots into out,
+ * including only slots whose expert falls in [owned_base, owned_base+owned_count).
+ * This is the TP=4 counterpart to ds4_gpu_routed_moe_owned_slots_combine_tensor
+ * which assumes an expert-split between exactly two ranks. */
+extern "C" int ds4_gpu_routed_moe_owned_single_combine_tensor(
+        ds4_gpu_tensor       *out,
+        const ds4_gpu_tensor *home_slots,
+        const ds4_gpu_tensor *selected,
+        uint32_t              out_dim,
+        uint32_t              owned_base,
+        uint32_t              owned_count) {
+    if (!out || !home_slots || !selected ||
+        out_dim == 0u || owned_count == 0u ||
+        out_dim > 65535u ||
+        owned_base >= 256u ||
+        owned_count > 256u - owned_base ||
+        selected->bytes < 6u * sizeof(int32_t) ||
+        home_slots->bytes < 6ull * out_dim * sizeof(float) ||
+        out->bytes < (uint64_t)out_dim * sizeof(float)) {
+        return 0;
+    }
+    dim3 grid((out_dim + 255u) / 256u, 1u, 1u);
+    moe_owned_single_combine_kernel<<<grid, 256>>>(
+            (float *)out->ptr,
+            (const float *)home_slots->ptr,
+            (const int32_t *)selected->ptr,
+            out_dim,
+            owned_base,
+            owned_count);
+    return cuda_ok(cudaGetLastError(), "owned single combine launch");
+}
+
 extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_total_expert, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t layer_index, uint32_t n_tokens, bool *mid_is_f16, bool force_resident) {
     if (mid_is_f16) *mid_is_f16 = false;
     return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,

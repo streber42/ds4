@@ -4685,6 +4685,32 @@ __global__ static void moe_owned_slots_combine_kernel(
     out[col] = home + peer;
 }
 
+/* Single-rank owned-slot combine: sums the 6 per-slot expert contributions
+ * from `slots` into `out`, including only slots whose expert id falls in
+ * [owned_base, owned_base + owned_count).  Unowned slots (not yet computed
+ * by the per-tier MoE kernels) are skipped.  This is the TP=4 decode-path
+ * counterpart to the two-rank moe_owned_slots_combine_kernel (issue #32). */
+__global__ static void moe_owned_single_combine_kernel(
+        float *out,
+        const float *slots,
+        const int32_t *selected,
+        uint32_t out_dim,
+        uint32_t owned_base,
+        uint32_t owned_count) {
+    const uint32_t col = (uint32_t)((uint64_t)blockIdx.x * blockDim.x + threadIdx.x);
+    if (col >= out_dim) return;
+    float acc = 0.0f;
+#pragma unroll
+    for (uint32_t slot = 0; slot < 6u; slot++) {
+        const int32_t expert = selected[slot];
+        if (expert < 0) continue;
+        const uint32_t e = (uint32_t)expert;
+        if (e < owned_base || e - owned_base >= owned_count) continue;
+        acc += slots[(uint64_t)slot * out_dim + col];
+    }
+    out[col] = acc;
+}
+
 /* MoE handoff pack (issue 08, auxiliary TP hooks): gathers ffn_norm,
  * selected, and weights into one contiguous [norm|selected|weights] buffer
  * so DS4_CUDA_TP_MOE_PACK=1 can hand the router state to the partner rank
