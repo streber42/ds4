@@ -714,6 +714,117 @@ avoid the tier sweep entirely. Rejected because:
 - The tier sweep is the correct TP=4 architecture for attention, matching
   what was already done for MoE
 
+### Consultant panel (2026-07-28) — plan review and revised approach
+
+**Panel convened:** AI Consultants v3.2.0. 4/6 responded (Qwen3, Grok, DeepSeek,
+MiniMax; Gemini/GLM failed on known API/CLI issues).
+
+**Category:** ARCHITECTURE. **Overall risk:** high.
+
+**Consensus points:**
+
+| Point | Agreement |
+|--------|-----------|
+| Non-aliasing AR staging buffer is correct (keep it) | **Unanimous** |
+| n_head=16 is a high risk — blocking kernel audit needed first | **Unanimous** |
+| Weight replication (shard_divisor=1 for Q_b/output_proj) is a serious alternative worth measuring | **Grok, Qwen3, MiniMax** |
+| Tier-sweep is architecturally sound | DeepSeek only; Grok/MiniMax dissent |
+| Full-device sync before all-reduce is overkill — prefer per-stream event DAG | Grok, MiniMax |
+
+**Coverage — the union of distinct considerations:**
+
+1. **Architecture category error (Grok):** Attention is head-parallel and
+   reduction-order-sensitive (softmax); FFN MoE is channel-parallel and
+   reduction-agnostic (GEMM+SiLU+GEMM). "Consistency with MoE is not a hardware
+   primitive." The tier sweep must be derived for head-block ownership, not
+   copied from the FFN pattern.
+
+2. **Weight replication may dominate (Grok, Qwen3, MiniMax):** If Q_b/output_proj
+   weights are <5% of total model, 4× replication costs a few hundred MB and
+   eliminates the entire tier sweep, one all-reduce, and the n_head=16 risk.
+   "Prove it loses on bytes before you reject it" (Grok). Qwen3 estimates 10-15%
+   latency reduction vs tier sweep on memory-bandwidth-bound prefill.
+
+3. **n_head=16 risks (all):**
+   - AMD CDNA 64-thread wavefronts → 16 active threads → 75% underutilization (Qwen3)
+   - MFMA tile sizes tuned for 64-head groups → 40-60% compute throughput drop (Qwen3)
+   - Silent kernel assumptions: `n_head % waves == 0`, GQA kv_group mapping, global
+     head indexing in bias/alibi/rope (Grok)
+   - Flash attention tile size minimums (64-128) → kernel fallback path (MiniMax)
+   - Softmax numerical instability from per-tier partial computation stitched across
+     all-reduce boundary (Grok, MiniMax)
+
+4. **Phase boundary concerns:**
+   - Q_a privilege on tier 0 only is a bottleneck — either replicate fully or
+     shard fully (Grok)
+   - HC expand after all-reduce+broadcast is "correct but late" — consider
+     expanding per-tier then all-gathering to overlap compute with communication (Grok)
+   - Q_a/Q_b split with different replication states mid-sweep is unusual —
+     suggests working around a weight-shape constraint, not expressing natural
+     parallelism (MiniMax)
+
+5. **Sync pattern:**
+   - `hipDeviceSynchronize` across all devices before all-reduce is a code smell —
+     if you need it, you have a stream/dependency bug. `hipStreamWaitEvent` is the
+     right fix (MiniMax). Keep the full sync only as a debug/reference path (Grok).
+
+6. **Edge cases to pre-register (Grok):** batch=1 vs large batch AR latency
+   flip, seqlen not divisible by tile, n_kv_head not divisible by TP (GQA),
+   mixed precision accum, ordered reducers for deterministic quality fixture,
+   concurrent prefill+decode stream comm-buffer contention, HC expand overflow
+   with narrow intermediate dtype.
+
+**Human decision (2026-07-28):** The n_head=16 attention kernel question is the
+blocking unknown. Before implementing either the tier sweep or the weight
+replication approach, the attention kernel MUST be audited for n_head=16
+correctness and performance.
+
+**Revised implementation plan (2 phases):**
+
+**Phase 1 — Attention kernel audit for n_head=16 (BLOCKING):**
+
+Audit every attention kernel entry point in `ds4_cuda.cu` reachable from
+`metal_graph_encode_layer_attention_batch`:
+
+| Kernel | Line in ds4_cuda.cu | What to check |
+|--------|---------------------|---------------|
+| `ds4_gpu_attention_prefill_raw_heads_tensor` | 14870 | Launch config, softmax warp reduction, n_head hardcodes |
+| `ds4_gpu_attention_prefill_raw_heads_range_tensor` | (nearby) | Same + row offset interaction |
+| `ds4_gpu_attention_prefill_static_mixed_heads_tensor` | (after raw) | Mixed attention path, Br/Bc tile sizing |
+| `ds4_gpu_attention_prefill_static_mixed_heads_range_tensor` | (after raw) | Same |
+| `ds4_gpu_attention_decode_heads_tensor` | (after raw) | Per-token decode path |
+| `ds4_gpu_attention_indexed_mixed_batch_heads_tensor` | (after raw) | Indexer top-k path |
+| `ds4_gpu_attention_output_q8_batch_f16_tensor` | (output proj) | n_groups / group_heads with partial heads |
+
+For each kernel:
+1. Does the launch config (grid/block dims) scale with n_head, or is it
+   hardcoded for 64?
+2. Are there `DS4_N_HEAD` or `64` literal uses in the kernel body that
+   would break with 16?
+3. Does the GQA mapping (`n_head / n_kv_head`) survive when n_head is
+   divided by TP without also adjusting `kv_groups`?
+4. Are there global head indexing assumptions (fused bias, alibi, RoPE
+   that indexes `[batch, head, seq]` with global not local head IDs)?
+5. For wavefront-bound kernels: does 16 heads × n_tokens provide enough
+   work to fill CDNA CUs, or is occupancy collapse expected?
+
+**Phase 1 output:** A go/no-go verdict on n_head=16 for the attention kernel
+family. Include either:
+- **GO**: Confirmed safe, list any required parameters (head_offset, head_stride)
+- **NO-GO**: Kernel changes needed first, or fall back to weight replication
+
+**Phase 2 — Implement based on Phase 1 result:**
+
+- **If GO**: Implement the tier sweep as planned (Phase 2a)
+- **If NO-GO**: Implement weight replication (change `engine_tp4_shard_divisor`
+  to return 1 for `attn_q_b`, `attn_output`, `attn_output_a`; measure VRAM
+  impact; run fixture) (Phase 2b)
+
+**Regardless of Phase 1 outcome, keep:**
+- Non-aliasing all-reduce staging (unanimous correctness win)
+- The broadcast-after-all-reduce pattern (attention output must be replicated
+  for HC expand which uses shared weights)
+
 ### Autonomous session (2026-07-28) — structural fixes committed, TP=4 quality still outside tolerance
 
 **Status: in-progress -> ready-for-human.** Five structural fixes were implemented and verified in this session. The `make test-rocm` suite passes (all 4 test targets, 6/6 kernel comparisons). The pipeline path is not regressed. However, the TP=4 quality fixture still produces avg_nll ~9-11 (far outside the ±1% tolerance of 0.370-0.378).

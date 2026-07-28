@@ -43,3 +43,27 @@ DeepSeek V4's attention architecture: `DS4_N_HEAD_KV = 1` — one shared K,V lat
 per token shared across all 64 heads. Head parallelism is in Q projection and
 output projection only. Implication: all tiers produce identical K,V data, so KV
 cache can be replicated per-tier rather than sharded.
+
+### weight replication alternative
+Instead of the tier-sweep approach, changing `engine_tp4_shard_divisor` to return
+1 for `attn_q_b`, `attn_output`, and `attn_output_a` would cause every GPU to cache
+100% of those weight rows. Eliminates the need for a tier sweep in batch prefill
+attention entirely — each tier can compute all 64 heads locally. Trade-off:
+permanent VRAM increase vs elimination of per-layer all-reduce + tier sweep overhead.
+The question is whether the byte cost is justified; blocked on measurements.
+
+### attention kernel n_head constraint
+The attention kernels in `ds4_cuda.cu` receive `n_head` as a runtime parameter,
+but may have implicit assumptions about head count being a multiple of wavefront
+width (64 on AMD CDNA). Passing `n_head=16` (DS4_N_HEAD=64 / TP=4) risks:
+- Launch config mismatch (grid/block dims hardcoded for 64)
+- Wavefront underutilization (75% idle threads on CDNA)
+- MFMA tile size mismatch (tuned for 64-head groups)
+- Broken GQA kv_group mapping when n_head is divided without also adjusting kv_groups
+- Softmax numerical instability from per-tier partial computation
+
+### attention vs FFN parallelism asymmetry
+Attention is head-parallel with a data-dependent softmax reduction (reduction-order
+sensitive). FFN MoE is channel-parallel with GEMM+SiLU+GEMM (reduction-agnostic).
+Patterns that work for MoE tier sweeps do not automatically transfer to attention
+— the tier sweep must be derived for head-block ownership, not copied from the FFN.
