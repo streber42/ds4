@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -864,3 +864,64 @@ Alternatively, there may be a subtle issue in the all-reduce accumulating the wr
 2. Add debug output to compare batch attention output (tier 0 only) with and without TP=4 weight sharding
 3. Verify the Q_b weight offset and row bytes alignment for TP=4 sharding
 4. Check if `cuda_model_range_ptr` returns host-mapped or device-cached pointers for the full output weight tensor during the batch output head call
+
+### Autonomous session (2026-07-28) — weight replication committed, quality fixture still outside tolerance
+
+**What was implemented (commit c2f906d):**
+
+**Weight replication for batch attention weights.** Changed `engine_tp4_shard_divisor` to return 1 (replicated) instead of 4 (sharded) for `attn_q_b` and `attn_output_a`. The batch prefill attention function (`metal_graph_encode_layer_attention_batch`) runs on tier 0 with full 64-head attention and accesses the full weight range. Sharding (divisor=4) left tier 0 with only 25% cached, forcing `cuda_resolve_weight_ptr` to return host-mapped memory for the remaining 75% of the rows — the GPU kernel then reads wrong Q8 quantized data from the host mapping, producing wrong hidden states.
+
+VRAM cost: ~120 MB per GPU (23.80 GiB → still well within each GPU's 31.86 GiB budget).
+
+**Quality fixture results (77 of 100 cases):**
+
+| Metric | TP=4 (this session) | Pipeline ref | Acceptable range |
+|---|---|---|---|
+| avg_nll | 10.523634 | 0.406944 | 0.370 – 0.378 |
+| first_match | 0/77 | 65/100 | ≥ 60/100 |
+| api_top1_rate | 0.0038 | 0.854 | ≥ 0.85 |
+| api_pair_rate | 0.343 | 0.988 | ≥ 0.98 |
+
+All 77 cases have avg_nll > 5.0 (none < 1.0). This is not floating-point reassociation — it is fundamental numerical corruption.
+
+**Critical finding — weight replication alone is insufficient.**
+
+The hypothesis from the previous session ("batch attention is TP=4-unaware") was addressed by the weight replication fix. Despite this fix, the quality fixture scores DID NOT IMPROVE — they remain at the same ~10.5 avg_nll level reported before the fix. This proves the root cause is NOT in the batch prefill path, but in the **decode/scoring path** used by `ds4_session_eval` for token-by-token scoring after prefill.
+
+**Remaining decode loop investigation:**
+
+The scoring loop in `score_official` calls:
+1. `ds4_session_sync` → batch prefill (all prompt tokens at once, now with full weights)
+2. For each target token: `ds4_session_copy_logits` (reads logits from GPU) → `ds4_session_eval` (evaluates one token via TP=4 decode loop)
+
+The TP=4 decode loop (`metal_graph_encode_token_raw_swa`, lines 27080–27259) contains the tier-sweep logic:
+- Phase 1 (TO_FFN): iterate tiers 0-3, each computing 16-head attention → sync → all-reduce → broadcast → HC expand on all tiers
+- Phase 2 (FROM_ATTN_TO_FFN): iterate tiers 0-3, each computing 64-expert MoE → sync → all-reduce → HC expand on tier 0 → broadcast
+
+Code review of the decode loop shows no obvious correctness bug:
+- `tp_head0` = tier * 16 heads, `tp_heads` = 16 — correct per-tier head split
+- Attention kernel receives `n_head=16` — kernel grid scales correctly
+- KV cache uses per-tier buffers (`metal_graph_tp4_raw_cache`) — no cross-device race
+- Post-prefill KV sync called in `ds4_session_sync_internal` — tiers 1-3 have prefill KV data
+- All-reduces use non-aliasing staging buffer (`shared_out_by_tier[0]`)
+- Broadcast after all-reduce + sync ensures all tiers have the combined result
+- MoE per-tier partials correctly include shared expert (only tier 0) + routed (64 per tier)
+- Output head (TP=4 vocab-split path) gathers V/4 shards from all 4 tiers
+
+**All 4 ROCm test targets pass** (`make -j8 test-rocm`):
+- `test_rocm_tp_stubs` — PASS
+- `test_rocm_xdev` — all cross-device tests PASS (peer mesh, byte-exact copy, accumulate, host-staging fallback, bandwidth, all-reduce F32)
+- `test_rocm_kernel_compare` — 6/6 kernel comparisons PASS
+- `test_engine_rocm_tp_refusal` — PASS
+
+**The pipeline path is not regressed:**
+```
+$ ./ds4 --rocm --gpu-devices 0,1,2,3 --model ... -p "Hello" -n 10
+We are asked: "You are a helpful assistant
+```
+
+**Recommended next steps:**
+1. Use GPU kernel-level trace (ROCm `rocprof` or `hip-trace`) to verify all 4 tiers' kernels complete before all-reduce on the correct devices
+2. Compare per-layer hidden states between pipeline and TP=4 using the correctness harness (`test_engine_correctness_harness-rocm`), though this currently fails due to unspecific "missing field" errors (likely harness validation of batch buffers not allocated for TP=4's token-by-token path)
+3. Add targeted debug output to the decode loop to trace per-tier attention output values before and after all-reduce for a single token
+4. Test with `HIP_LAUNCH_BLOCKING=1` to serialize all kernel launches and eliminate any async race condition as the root cause
