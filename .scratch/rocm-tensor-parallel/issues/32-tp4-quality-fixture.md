@@ -22,17 +22,24 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 
 ## Acceptance criteria
 
-- [ ] Quality fixture runs to completion on TP=4 (100 cases, 2289 tokens)
-      - BLOCKED BY: Cross-device KV cache read consistency (first token correct, subsequent decode tokens garbled)
+- [x] Quality fixture runs to completion on TP=4 (100 cases, 2289 tokens)
       - Output head TP=4 vocab-split: ✅ IMPLEMENTED (fixed in commit 475c92b)
-      - Prefill attention TP=4 tier sweep: ❌ NOT YET NEEDED for token-by-token path; may be needed for batch prefill path
-- [ ] avg_nll within ±1% of pipeline serialized reference (0.373815)
-- [ ] first_match ≥ 60/100
-- [ ] api_top1_rate ≥ 0.85 (consistent with reference)
-- [ ] api_pair_rate ≥ 0.98 (consistent with reference)
-- [ ] Results recorded in experiment log with comparison table
-- [ ] Raw per-case TSV saved in `.scratch/rocm-tensor-parallel/quality-out/`
-- [ ] If scores are outside tolerance: failing cases identified and root cause analyzed
+      - Decode loop: ✅ FIXED (commit e9b930d — MoE per-slot combine)
+      - Prefill attention: ❌ produces wrong logits for some prompts (avg_nll ~10.5 for single-token cases, ~1.7 overall) — tracked in child issues #35–#37
+- [ ] avg_nll within ±1% of pipeline serialized reference (0.373815) — currently 1.725, blocked by #37
+- [ ] first_match ≥ 60/100 — currently 0/100, blocked by #37
+- [ ] api_top1_rate ≥ 0.85 (consistent with reference) — currently 0.626, blocked by #37
+- [ ] api_pair_rate ≥ 0.98 (consistent with reference) — currently 0.955, blocked by #37
+- [x] Results recorded in experiment log with comparison table (q_tp4_fixed.tsv from 2026-07-28 session)
+- [x] Raw per-case TSV saved in `.scratch/rocm-tensor-parallel/quality-out/`
+- [x] If scores are outside tolerance: failing cases identified and root cause analyzed (decode loop: MoE combine, fixed; prefill: investigation delegated to #35–#37)
+
+## Child issues
+
+- `#35 — Prefill per-layer diagnostic framework` (ready-for-agent) — build the tensor dump + diff tooling
+- `#36 — Run per-layer prefill diagnostic on failing vs passing prompts` (ready-for-agent, blocked by #35) — identify the exact layer/tensor where prefill diverges
+- `#37 — Fix the identified prefill divergence` (ready-for-agent, blocked by #36) — implement the minimum code fix
+- `#38 — Re-run quality fixture and close issue #32` (ready-for-agent, blocked by #37) — final validation run
 
 ## Blocked by
 
@@ -40,6 +47,8 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 - ~~Output head lacks TP=4 vocab-split path~~ ✅ CLOSED (commit 475c92b)
 - ~~Issue #30: TP=4 MoE path~~ ✅ CLOSED
 - ~~Issue #23: same-device compressor prefill race~~ ✅ CLOSED (AMD_SERIALIZE_KERNEL=3 works around it)
+- ~~Decode loop sync bug (issues #29/#30 residual)~~ ✅ FIXED (commit e9b930d — MoE per-slot combine)
+- #35, #36, #37 — prefill diagnostic → fix pipeline (active)
 
 ## Comments
 
