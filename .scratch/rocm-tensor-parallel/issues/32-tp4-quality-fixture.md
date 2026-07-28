@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -370,6 +370,46 @@ AMD_SERIALIZE_KERNEL=3 \
     .scratch/rocm-tensor-parallel/quality-out/q_tp4_final.tsv \
     4096 --gpu-devices 0,1,2,3 --cuda-tensor-parallel
 ```
+
+### AI Consultants panel — per-tier compressor state consensus (2026-07-28, human + consultant panel)
+
+**Status: ready-for-agent** (changed from ready-for-human). The remaining decode
+loop data race has been reviewed by a consultant panel (Grok 9/10, Qwen3 9/10)
+and the fix plan is approved.
+
+**Root cause of remaining garbled decode:**
+The compressor state arrays (`layer_attn_state_kv[il]`, `layer_attn_state_score[il]`)
+are allocated only on device 0 but the decode loop launches all 4 tiers' kernels
+concurrently (async HIP launches). All 4 tiers write the same device-0 memory
+simultaneously → data race → corrupted attention state → garbled output.
+
+**Consultant panel verdict (unanimous): Option A — per-tier compressor state arrays.**
+Options B (serialize tiers) and C (read-only shared state) are rejected:
+- B imposes ~4× latency penalty, defeating TP's purpose entirely — not even
+  acceptable as a "correctness-first interim step"
+- C risks silent quality drift (tiers 1-3 would compress with stale state)
+
+**Approved fix plan (3 steps):**
+
+1. **Allocate per-tier compressor state arrays:**
+   `layer_attn_state_kv_tp1[il]`, `layer_attn_state_kv_tp3[il]`,
+   `layer_attn_state_score_tp1[il]`, `layer_attn_state_score_tp3[il]`
+   (tier 2 reuses existing `_tp` variants). Each allocated on its respective
+   device. VRAM cost: ~8.6 MB total (0.026% of 32 GiB per GPU).
+
+2. **Fix raw cache + compressor state pointer selection in decode loop:**
+   Stop passing `g->layer_raw_cache[il]` (tier 0) to all 4 tiers. Use a
+   tier-switch (preferably tier-indexed arrays: `_tier[4][il]`) to select
+   the correct per-tier raw cache, compressed cache, and compressor state
+   pointers based on active tier. Fix all three pointer families together.
+
+3. **Close the prefill→decode KV sync gap:**
+   Ensure the token-by-token eval path (`ds4_session_eval` →
+   `metal_graph_eval_token_raw_swa`) initiates KV cache + state on all 4
+   tiers after prefill, not just the batch prefll path (`ds4_session_slice`).
+
+**Decision:** proceed directly to Option A implementation. Do not ship a
+host-serial interim.
 
 ### Autonomous session (2026-07-27) — structural fixes landed, decode loop still garbleed
 
