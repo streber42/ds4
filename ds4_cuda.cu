@@ -99,6 +99,7 @@ static cudaStream_t g_model_prefetch_stream;
 static cudaStream_t g_model_upload_stream;
 static int g_cublas_ready;
 static int g_quality_mode;
+static int g_use_host_weights;  /* TP=4: force weight resolution to use host-mapped pointer */
 static int g_decode_fast_attention;
 static int g_decode_score_vec4;
 static int g_xdev_sync_debug;
@@ -730,6 +731,17 @@ static const char *cuda_resolve_weight_ptr(const void *model_map,
                                             uint64_t bytes,
                                             int logical_tier,
                                             const char *label) {
+    /* TP=4 batch prefill shared expert: bypass the device cache and use the
+     * host-mapped pointer so weight reads are from the same virtual address
+     * in both pipeline and TP=4 modes.  Different cache arena layouts between
+     * the two configurations produce 2.37e-4 floating-point noise in the
+     * shared expert matmul, which compounds across 43 layers and causes
+     * avg_nll to diverge by ~460% from the pipeline reference.  The host
+     * mapping is device-accessible on ROCm gfx1201 with registered memory
+     * (same address regardless of cache layout). */
+    if (g_use_host_weights) {
+        return cuda_model_range_ptr(model_map, offset, bytes, label);
+    }
     if (g_n_gpus <= 1) {
         return cuda_model_range_ptr(model_map, offset, bytes, label);
     }
@@ -1111,7 +1123,7 @@ static const __half *cuda_q8_f16_ptr(
      *    lookup; on miss this is a placement bug and we hard-fail.
      */
     const char *q8;
-    if (g_n_gpus <= 1) {
+    if (g_use_host_weights || g_n_gpus <= 1) {
         q8 = cuda_model_range_ptr(model_map, offset, weight_bytes, "q8_0");
     } else {
         void *strict_ptr = NULL;
@@ -1219,9 +1231,12 @@ static float *cuda_q8_f32_ptr(
     if (!cuda_q8_f32_cache_allowed(label, in_dim, out_dim)) return NULL;
 
     /* Source Q8 bytes: legacy path in single-tier; strict per-device lookup
-     * in multi-tier (same rationale as cuda_q8_f16_ptr). */
+     * in multi-tier (same rationale as cuda_q8_f16_ptr).
+     * When g_use_host_weights is set (TP=4 batch prefill shared expert), use
+     * the host-mapped pointer so dequantization reads from the same address
+     * in both pipeline and TP=4 modes. */
     const char *q8;
-    if (g_n_gpus <= 1) {
+    if (g_use_host_weights || g_n_gpus <= 1) {
         q8 = cuda_model_range_ptr(model_map, offset, weight_bytes, label ? label : "q8_0");
     } else {
         void *strict_ptr = NULL;
@@ -3838,6 +3853,10 @@ extern "C" void ds4_gpu_set_quality(bool quality) {
         }
         if (prev >= 0) (void)cudaSetDevice(prev);
     }
+}
+
+extern "C" void ds4_gpu_set_use_host_weights(int enable) {
+    g_use_host_weights = enable ? 1 : 0;
 }
 
 __global__ static void embed_token_hc_kernel(float *out, const unsigned short *w, uint32_t token, uint32_t n_embd, uint32_t n_hc) {

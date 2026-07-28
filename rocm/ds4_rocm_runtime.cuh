@@ -4737,11 +4737,24 @@ static inline int ds4_tensor_device_idx(const ds4_gpu_tensor *t) {
     return t->device_id >= 0 ? t->device_id : t->owner;
 }
 
+static int g_use_host_weights;
+
 static const char *cuda_resolve_weight_ptr(const void *model_map,
                                              uint64_t offset,
                                              uint64_t bytes,
                                              int logical_tier,
                                              const char *label) {
+    /* TP=4 batch prefill shared expert: bypass the device cache and use the
+     * host-mapped pointer so weight reads are from the same virtual address
+     * in both pipeline and TP=4 modes.  Different cache arena layouts between
+     * the two configurations produce 2.37e-4 floating-point noise in the
+     * shared expert matmul, which compounds across 43 layers and causes
+     * avg_nll to diverge by ~460% from the pipeline reference.  The host
+     * mapping is device-accessible on ROCm gfx1201 with registered memory
+     * (same address regardless of cache layout). */
+    if (g_use_host_weights) {
+        return cuda_model_range_ptr(model_map, offset, bytes, label);
+    }
     if (g_n_gpus <= 1) {
         return cuda_model_range_ptr(model_map, offset, bytes, label);
     }
@@ -4766,11 +4779,18 @@ static const char *cuda_resolve_weight_ptr(const void *model_map,
 static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
     if (bytes == 0) return cuda_model_ptr(model_map, offset);
 
-    int cur_dev = -1;
-    if (hipGetDevice(&cur_dev) == hipSuccess && cur_dev >= 0) {
-        void *dev_ptr = NULL;
-        if (ds4_gpu_lookup_cache_strict(offset, bytes, cur_dev, &dev_ptr) && dev_ptr) {
-            return (const char *)dev_ptr;
+    /* When g_use_host_weights is set (shared expert in batch prefill), bypass
+     * the per-device cache and go directly to the model image.  Different
+     * cache arena layouts between pipeline and TP=4 configurations produce
+     * 2.37e-4 floating-point noise in the Q8 matmul, which compounds across
+     * 43 layers (issue #37). */
+    if (!g_use_host_weights) {
+        int cur_dev = -1;
+        if (hipGetDevice(&cur_dev) == hipSuccess && cur_dev >= 0) {
+            void *dev_ptr = NULL;
+            if (ds4_gpu_lookup_cache_strict(offset, bytes, cur_dev, &dev_ptr) && dev_ptr) {
+                return (const char *)dev_ptr;
+            }
         }
     }
 
@@ -6701,4 +6721,8 @@ extern "C" void ds4_gpu_set_quality(bool quality) {
         const cublasMath_t math_mode = g_quality_mode ? CUBLAS_DEFAULT_MATH : CUBLAS_TF32_TENSOR_OP_MATH;
         (void)cublasSetMathMode(g_cublas, math_mode);
     }
+}
+
+extern "C" void ds4_gpu_set_use_host_weights(int enable) {
+    g_use_host_weights = enable ? 1 : 0;
 }

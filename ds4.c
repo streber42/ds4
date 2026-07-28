@@ -30420,6 +30420,13 @@ static bool metal_graph_encode_layer_batch(
             return false;
         }
     }
+    /* Host-mapped weight pointers for the entire batch prefill to avoid
+     * floating-point noise from different device-cache addresses between
+     * pipeline and TP=4 modes.  The ~2.37e-4 error in the shared expert
+     * at layer 0 compounds exponentially across 43 layers.  Using the model
+     * image pointer (same address in both modes) keeps all tensors bit-
+     * identical for the first 38 layers (issue #37). */
+    ds4_gpu_set_use_host_weights(1);
     bool ok = metal_graph_layer_stage_profile_start(il);
     if (ok) {
         ok = metal_graph_encode_layer_attention_batch(g, model, layer, il, pos0, n_tokens);
@@ -30442,6 +30449,7 @@ static bool metal_graph_encode_layer_batch(
             fprintf(stderr, "ds4: gpu layer %u ffn batch encode failed\n", il);
         }
     }
+    ds4_gpu_set_use_host_weights(0);
     if (ok) {
         ds4_gpu_tensor *tmp = metal_graph_batch_cur_hc(g);
         g->batch_cur_hc_by_tier[g->active_tier] = metal_graph_batch_next_hc(g);
