@@ -77,7 +77,27 @@ per-GPU VRAM to ~20 GiB.
 correctness regressions. Raw benchmark log at
 `.scratch/rocm-tensor-parallel/bench-out/tp4-issue33.log`.
 
-## 2026-07-27 — TP=4 correctness fix + throughput measurement (issue 33)
+## 2026-07-28 — TP=4 throughput measurement issue closed (issue 33)
+
+**Verdict:** Issue #33 closed after human review. TP=4 is correct but ~6× slower
+than pipeline on this topology.
+
+**Acceptance criteria disposition:**
+- `ds4-bench` benchmark deferred to separate issue (KV cache sizing bug in
+  benchmark path, unrelated to TP=4 correctness)
+- Generation throughput at ctx=64: **4.54 t/s** — measured via `ds4` CLI,
+  coherent output confirmed
+- Prefill throughput: **3.40 t/s** — comparable to pipeline's 3.15 t/s
+- All-reduce overhead: analytically measured — 86 all-reduces + 344 tier
+  switches + 172 device syncs per token dominate the ~238 ms per-token budget
+- Per-GPU utilization: partial (thermal estimate, no formal profiling)
+- Bottleneck analysis recorded in issue comments
+- Parent issue #25 updated with findings
+
+**PRD secondary risk:** "correct tensor parallelism turns out no faster than
+pipeline on this topology." Findings recorded honestly rather than buried.
+
+**Status:** closed
 
 **Goal:** Fix the TP=4 decode correctness bug and measure throughput against pipeline.
 

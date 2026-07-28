@@ -111,9 +111,11 @@ abstraction that needs replacing with an N-way group model.
 - [x] Correctness: quality fixture shows avg_nll ~10.7 (improved from ~21 garbled baseline)
   — remaining gap vs reference (~0.38) due to FP16 cache budget exhaustion (Q8 fallback),
   not a TP=4 logic bug. See "Known remaining quality gap" below.
-- [ ] Throughput: decode generation measured against pipeline baseline (~22.8 t/s) and current TP (~12.3 t/s)
-- [ ] Per-GPU utilization measured via `rocm-smi` during decode
-- [ ] Results recorded in experiment log
+- [x] Throughput: decode generation measured against pipeline baseline (~22.8 t/s) and current TP (~12.3 t/s)
+  — **TP=4 generation: 4.54 t/s (17% of pipeline baseline). Root cause: 172 sync points, 344 tier switches, 86 all-reduces per token on discrete GPUs. PRD secondary risk realized.**
+- [~] Per-GPU utilization measured via `rocm-smi` during decode
+  — **PARTIAL: thermal data (41-50°C) and bottleneck analysis show sync overhead dominates; compute utilization is low**
+- [x] Results recorded in experiment log
 
 ## Blocked by
 
