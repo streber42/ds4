@@ -37,7 +37,7 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 ## Child issues
 
 - `#35 — Prefill per-layer diagnostic framework` (ready-for-agent) — build the tensor dump + diff tooling
-- `#36 — Run per-layer prefill diagnostic on failing vs passing prompts` (ready-for-agent, blocked by #35) — identify the exact layer/tensor where prefill diverges
+- `#36 — Run per-layer prefill diagnostic on failing vs passing prompts` (closed ✅) — identified the exact layer/tensor where prefill diverges
 - `#37 — Fix the identified prefill divergence` (ready-for-agent, blocked by #36) — implement the minimum code fix
 - `#38 — Re-run quality fixture and close issue #32` (ready-for-agent, blocked by #37) — final validation run
 
@@ -48,7 +48,7 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 - ~~Issue #30: TP=4 MoE path~~ ✅ CLOSED
 - ~~Issue #23: same-device compressor prefill race~~ ✅ CLOSED (AMD_SERIALIZE_KERNEL=3 works around it)
 - ~~Decode loop sync bug (issues #29/#30 residual)~~ ✅ FIXED (commit e9b930d — MoE per-slot combine)
-- #35, #36, #37 — prefill diagnostic → fix pipeline (active)
+- #35, #36 (closed), #37 — prefill diagnostic → fix pipeline (#36 done, #37 active)
 
 ## Comments
 
@@ -1070,7 +1070,33 @@ per-layer diagnostic comparison between pipeline and TP=4.
 
 ## Comments
 
-### Autonomous session (2026-07-28) — MoE fix applied, shared expert residual error identified
+### Issue #36 diagnostic results — prefill divergence identified (2026-07-28)
+
+**Status: analysis complete.** The per-layer prefill diagnostic (issue #36) has been run on both
+failing (case_094) and passing (case_060) prompts. Results confirm:
+
+**First divergence:** Layer 1, tensor `routed_out` (MoE FFN output). Same for both prompts.
+- Layer 0: all tensors bit-identical (routed_out=0, after_attn_hc=0)
+- Layer 1: `routed_out` max_err=1.56e-02 (FAIL, 15.6× over 1e-3 tolerance)
+- Layer 1: `after_attn_hc` still passes (7.24e-04, within tolerance)
+
+**Root cause:** Shared expert output (`ffn_shexp`) has a 2.51e-04 error at layer 0 due to
+different GPU weight cache addresses between pipeline and TP=4 modes. This tiny error
+propagates through the HC expand (matmul with hc_attn_fn) and compounds across layers.
+
+**Key finding — router is correct:** Expert routing decisions (which 6 of 256 experts to activate)
+are IDENTICAL between pipeline and TP=4 at the divergence layer. The expert weights (ffn_gate/ffn_up/ffn_down)
+for selected experts produce enormously different raw outputs (ffn_moe_down max_err=1.31e+05 at layer 1),
+but the weighted combination (average of 6 experts by router score) damps this to 1.56e-02.
+
+**Passing vs failing prompt:** Both have IDENTICAL divergence patterns. Case_060 "passes"
+because its final logits argmax happens to select the correct first token despite corrupted
+hidden states, while case_094's correct token is overtaken.
+
+**Fix target:** The shared expert weight cache address alignment in
+`DS4_METAL_ENCODE_PREFILL_SHARED_EXPERT()`. Delegated to issue #37.
+
+**Full diagnostic tables and analysis:** See issue #36.
 
 **Status: in-progress** (changed from ready-for-human).
 
