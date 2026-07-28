@@ -15044,6 +15044,22 @@ typedef struct {
     ds4_gpu_tensor *layer_raw_cache_tp3[DS4_MAX_LAYER];
     ds4_gpu_tensor *layer_attn_comp_cache_tp1[DS4_MAX_LAYER];
     ds4_gpu_tensor *layer_attn_comp_cache_tp3[DS4_MAX_LAYER];
+    /* Per-tier compressor/indexer state arrays for ROCm TP=4.
+     * Tier 0 uses the existing non-suffixed arrays; tier 2 reuses _tp suffixed.
+     * During decode all 4 tiers compute attention concurrently, so each tier
+     * needs its own compressor state copy to avoid read-modify-write races. */
+    ds4_gpu_tensor *layer_attn_state_kv_tp[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_state_score_tp[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_state_kv_tp1[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_state_score_tp1[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_state_kv_tp3[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_attn_state_score_tp3[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_index_state_kv_tp[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_index_state_score_tp[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_index_state_kv_tp1[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_index_state_score_tp1[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_index_state_kv_tp3[DS4_MAX_LAYER];
+    ds4_gpu_tensor *layer_index_state_score_tp3[DS4_MAX_LAYER];
 
     /* Speculative decoding scratch.  MTP is allowed to mutate graph state only
      * if the target verifier can either commit it or restore the saved
@@ -15589,7 +15605,18 @@ static void ds4_debug_tp_output_stat_f32(const char *label, ds4_gpu_tensor *t, u
  * copies cur_hc to the destination tier and updates active_tier. */
 static bool metal_graph_set_active_tier_decode(ds4_gpu_graph *g, int tier) {
     if (!g->placement) {
-        /* Single-tier: just keep active_tier at 0; no device switch needed. */
+        /* Single-tier: just keep active_tier at 0; no device switch needed.
+         * ROCm TP=4: g->placement is NULL (all 4 tiers hold every layer),
+         * but we still need to set active_tier and switch GPU device so the
+         * per-tier class-P accessors and kernel dispatches target the correct
+         * rank. */
+        if (g->rocm_tp4) {
+            if (tier < 0 || tier >= DS4_MAX_GPUS) return false;
+            if (tier == g->active_tier) return true;
+            if (ds4_gpu_set_current_device(tier) != 0) return false;
+            g->active_tier = tier;
+            return true;
+        }
         (void)tier;
         return true;
     }
@@ -15877,6 +15904,20 @@ static void metal_graph_free(ds4_gpu_graph *g) {
     }
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->layer_index_state_score[il]);
+    }
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        ds4_gpu_tensor_free(g->layer_attn_state_kv_tp[il]);
+        ds4_gpu_tensor_free(g->layer_attn_state_score_tp[il]);
+        ds4_gpu_tensor_free(g->layer_attn_state_kv_tp1[il]);
+        ds4_gpu_tensor_free(g->layer_attn_state_score_tp1[il]);
+        ds4_gpu_tensor_free(g->layer_attn_state_kv_tp3[il]);
+        ds4_gpu_tensor_free(g->layer_attn_state_score_tp3[il]);
+        ds4_gpu_tensor_free(g->layer_index_state_kv_tp[il]);
+        ds4_gpu_tensor_free(g->layer_index_state_score_tp[il]);
+        ds4_gpu_tensor_free(g->layer_index_state_kv_tp1[il]);
+        ds4_gpu_tensor_free(g->layer_index_state_score_tp1[il]);
+        ds4_gpu_tensor_free(g->layer_index_state_kv_tp3[il]);
+        ds4_gpu_tensor_free(g->layer_index_state_score_tp3[il]);
     }
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->spec_attn_state_kv[il]);
@@ -17271,6 +17312,29 @@ static bool metal_graph_alloc_raw_cap(
                         ds4_gpu_tensor_alloc_ptr_on(layer_tier, attn_width * attn_rows * sizeof(float));
                 }
             }
+            /* ROCm TP=4: allocate per-tier compressor state on tiers 1-3
+             * to avoid read-modify-write races during concurrent decode.
+             * Tier 2 reuses the _tp suffix (same convention as KV caches). */
+            if (g->rocm_tp4) {
+                const size_t attn_state_bytes = (size_t)attn_width * attn_rows * sizeof(float);
+                g->layer_attn_state_kv_tp1[il] = ds4_gpu_tensor_alloc_ptr_on(1, attn_state_bytes);
+                g->layer_attn_state_score_tp1[il] = ds4_gpu_tensor_alloc_ptr_on(1, attn_state_bytes);
+                g->layer_attn_state_kv_tp[il] = ds4_gpu_tensor_alloc_ptr_on(2, attn_state_bytes);
+                g->layer_attn_state_score_tp[il] = ds4_gpu_tensor_alloc_ptr_on(2, attn_state_bytes);
+                g->layer_attn_state_kv_tp3[il] = ds4_gpu_tensor_alloc_ptr_on(3, attn_state_bytes);
+                g->layer_attn_state_score_tp3[il] = ds4_gpu_tensor_alloc_ptr_on(3, attn_state_bytes);
+                if (ratio == 4) {
+                    const uint64_t idx_idx_width = (uint64_t)coff * DS4_N_INDEXER_HEAD_DIM;
+                    const uint64_t idx_idx_rows = (uint64_t)coff * ratio;
+                    const size_t idx_state_bytes = (size_t)idx_idx_width * idx_idx_rows * sizeof(float);
+                    g->layer_index_state_kv_tp1[il] = ds4_gpu_tensor_alloc_ptr_on(1, idx_state_bytes);
+                    g->layer_index_state_score_tp1[il] = ds4_gpu_tensor_alloc_ptr_on(1, idx_state_bytes);
+                    g->layer_index_state_kv_tp[il] = ds4_gpu_tensor_alloc_ptr_on(2, idx_state_bytes);
+                    g->layer_index_state_score_tp[il] = ds4_gpu_tensor_alloc_ptr_on(2, idx_state_bytes);
+                    g->layer_index_state_kv_tp3[il] = ds4_gpu_tensor_alloc_ptr_on(3, idx_state_bytes);
+                    g->layer_index_state_score_tp3[il] = ds4_gpu_tensor_alloc_ptr_on(3, idx_state_bytes);
+                }
+            }
             if (g->layer_attn_state_kv[il]) {
                 state_init_ok = state_init_ok &&
                                 metal_tensor_fill_f32(g->layer_attn_state_kv[il], 0.0f, attn_width * attn_rows);
@@ -17278,6 +17342,33 @@ static bool metal_graph_alloc_raw_cap(
             if (g->layer_attn_state_score[il]) {
                 state_init_ok = state_init_ok &&
                                 metal_tensor_fill_f32(g->layer_attn_state_score[il], DS4_NEG_INF, attn_width * attn_rows);
+            }
+            /* Initialize ROCm TP=4 per-tier compressor state. */
+            if (g->rocm_tp4) {
+                if (g->layer_attn_state_kv_tp1[il]) {
+                    state_init_ok = state_init_ok &&
+                        metal_tensor_fill_f32(g->layer_attn_state_kv_tp1[il], 0.0f, attn_width * attn_rows);
+                }
+                if (g->layer_attn_state_score_tp1[il]) {
+                    state_init_ok = state_init_ok &&
+                        metal_tensor_fill_f32(g->layer_attn_state_score_tp1[il], DS4_NEG_INF, attn_width * attn_rows);
+                }
+                if (g->layer_attn_state_kv_tp[il]) {
+                    state_init_ok = state_init_ok &&
+                        metal_tensor_fill_f32(g->layer_attn_state_kv_tp[il], 0.0f, attn_width * attn_rows);
+                }
+                if (g->layer_attn_state_score_tp[il]) {
+                    state_init_ok = state_init_ok &&
+                        metal_tensor_fill_f32(g->layer_attn_state_score_tp[il], DS4_NEG_INF, attn_width * attn_rows);
+                }
+                if (g->layer_attn_state_kv_tp3[il]) {
+                    state_init_ok = state_init_ok &&
+                        metal_tensor_fill_f32(g->layer_attn_state_kv_tp3[il], 0.0f, attn_width * attn_rows);
+                }
+                if (g->layer_attn_state_score_tp3[il]) {
+                    state_init_ok = state_init_ok &&
+                        metal_tensor_fill_f32(g->layer_attn_state_score_tp3[il], DS4_NEG_INF, attn_width * attn_rows);
+                }
             }
 
             if (ratio == 4) {
@@ -17308,6 +17399,33 @@ static bool metal_graph_alloc_raw_cap(
                 if (g->layer_index_state_score[il]) {
                     state_init_ok = state_init_ok &&
                                     metal_tensor_fill_f32(g->layer_index_state_score[il], DS4_NEG_INF, index_width * index_rows);
+                }
+                /* Initialize ROCm TP=4 per-tier indexer state. */
+                if (g->rocm_tp4) {
+                    if (g->layer_index_state_kv_tp1[il]) {
+                        state_init_ok = state_init_ok &&
+                            metal_tensor_fill_f32(g->layer_index_state_kv_tp1[il], 0.0f, index_width * index_rows);
+                    }
+                    if (g->layer_index_state_score_tp1[il]) {
+                        state_init_ok = state_init_ok &&
+                            metal_tensor_fill_f32(g->layer_index_state_score_tp1[il], DS4_NEG_INF, index_width * index_rows);
+                    }
+                    if (g->layer_index_state_kv_tp[il]) {
+                        state_init_ok = state_init_ok &&
+                            metal_tensor_fill_f32(g->layer_index_state_kv_tp[il], 0.0f, index_width * index_rows);
+                    }
+                    if (g->layer_index_state_score_tp[il]) {
+                        state_init_ok = state_init_ok &&
+                            metal_tensor_fill_f32(g->layer_index_state_score_tp[il], DS4_NEG_INF, index_width * index_rows);
+                    }
+                    if (g->layer_index_state_kv_tp3[il]) {
+                        state_init_ok = state_init_ok &&
+                            metal_tensor_fill_f32(g->layer_index_state_kv_tp3[il], 0.0f, index_width * index_rows);
+                    }
+                    if (g->layer_index_state_score_tp3[il]) {
+                        state_init_ok = state_init_ok &&
+                            metal_tensor_fill_f32(g->layer_index_state_score_tp3[il], DS4_NEG_INF, index_width * index_rows);
+                    }
                 }
             }
         }
@@ -21856,6 +21974,50 @@ static inline ds4_gpu_tensor *metal_graph_tp4_comp_cache(const ds4_gpu_graph *g,
     return g->layer_attn_comp_cache[il];
 }
 
+/* Return the per-tier compressor state arrays for ROCm TP=4.
+ * Tier 0 uses the existing shared arrays (_state_kv[il] / _state_score[il]).
+ * Tier 2 uses the _tp suffix.  Tiers 1 and 3 use _tp1 / _tp3. */
+static inline ds4_gpu_tensor *metal_graph_tp4_attn_state_kv(const ds4_gpu_graph *g, uint32_t il, int tier) {
+    if (!g->rocm_tp4) return g->layer_attn_state_kv[il];
+    switch (tier) {
+        case 0: return g->layer_attn_state_kv[il];
+        case 1: return g->layer_attn_state_kv_tp1[il];
+        case 2: return g->layer_attn_state_kv_tp[il];
+        case 3: return g->layer_attn_state_kv_tp3[il];
+        default: return NULL;
+    }
+}
+static inline ds4_gpu_tensor *metal_graph_tp4_attn_state_score(const ds4_gpu_graph *g, uint32_t il, int tier) {
+    if (!g->rocm_tp4) return g->layer_attn_state_score[il];
+    switch (tier) {
+        case 0: return g->layer_attn_state_score[il];
+        case 1: return g->layer_attn_state_score_tp1[il];
+        case 2: return g->layer_attn_state_score_tp[il];
+        case 3: return g->layer_attn_state_score_tp3[il];
+        default: return NULL;
+    }
+}
+static inline ds4_gpu_tensor *metal_graph_tp4_index_state_kv(const ds4_gpu_graph *g, uint32_t il, int tier) {
+    if (!g->rocm_tp4) return g->layer_index_state_kv[il];
+    switch (tier) {
+        case 0: return g->layer_index_state_kv[il];
+        case 1: return g->layer_index_state_kv_tp1[il];
+        case 2: return g->layer_index_state_kv_tp[il];
+        case 3: return g->layer_index_state_kv_tp3[il];
+        default: return NULL;
+    }
+}
+static inline ds4_gpu_tensor *metal_graph_tp4_index_state_score(const ds4_gpu_graph *g, uint32_t il, int tier) {
+    if (!g->rocm_tp4) return g->layer_index_state_score[il];
+    switch (tier) {
+        case 0: return g->layer_index_state_score[il];
+        case 1: return g->layer_index_state_score_tp1[il];
+        case 2: return g->layer_index_state_score_tp[il];
+        case 3: return g->layer_index_state_score_tp3[il];
+        default: return NULL;
+    }
+}
+
 static bool metal_graph_encode_decode_layer_phase(
         ds4_gpu_graph  *g,
         const ds4_model        *model,
@@ -22272,13 +22434,21 @@ static bool metal_graph_encode_decode_layer_phase(
             ok = false;
         }
         bool comp_state_already_stored = false;
+        /* ROCm TP=4: use per-tier compressor state arrays to avoid
+         * read-modify-write races during concurrent multi-tier decode. */
+        ds4_gpu_tensor *const tp_attn_state_kv = g->rocm_tp4
+            ? metal_graph_tp4_attn_state_kv(g, il, g->active_tier)
+            : g->layer_attn_state_kv[il];
+        ds4_gpu_tensor *const tp_attn_state_score = g->rocm_tp4
+            ? metal_graph_tp4_attn_state_score(g, il, g->active_tier)
+            : g->layer_attn_state_score[il];
         if (ok && !metal_graph_use_reference_compressor_pair_proj()) {
             const int fused_store =
                 ds4_gpu_matmul_f16_pair_compressor_store_tensor(
                         metal_graph_comp_kv_cur(g),
                         metal_graph_comp_sc_cur(g),
-                        g->layer_attn_state_kv[il],
-                        g->layer_attn_state_score[il],
+                        tp_attn_state_kv,
+                        tp_attn_state_score,
                         model->map,
                         model->size,
                         layer->attn_compressor_kv->abs_offset,
@@ -22320,8 +22490,8 @@ static bool metal_graph_encode_decode_layer_phase(
         const uint32_t comp_row = g->layer_n_comp[il];
         if (ok) ok = ds4_gpu_compressor_update_tensor(metal_graph_comp_kv_cur(g),
                                                         metal_graph_comp_sc_cur(g),
-                                                        g->layer_attn_state_kv[il],
-                                                        g->layer_attn_state_score[il],
+                                                        tp_attn_state_kv,
+                                                        tp_attn_state_score,
                                                         metal_graph_attn_comp_update_target(g, il),
                                                         model->map,
                                                         model->size,
@@ -22367,7 +22537,13 @@ static bool metal_graph_encode_decode_layer_phase(
             if (ok) ok = metal_graph_commit_attn_comp_stage(g, il, comp_row, 1);
             DS4_METAL_PROFILE_DECODE_STAGE("compressor_commit");
         }
-        if (ok && emit) g->layer_n_comp[il]++;
+        /* ROCm TP=4: only tier 0 increments the compressed-row counter to
+         * avoid 4× inflation from redundant compressor emits across tiers.
+         * All 4 tiers process the same token position, so emit fires at the
+         * same token on each tier but only one compressed row should be
+         * counted. The per-tier state arrays handle the concurrent state
+         * update — the counter tracks the shared compressed cache. */
+        if (ok && emit && (!g->rocm_tp4 || g->active_tier == 0)) g->layer_n_comp[il]++;
 
         if (ok && ratio == 4) {
             const uint32_t index_width = coff * DS4_N_INDEXER_HEAD_DIM;
@@ -22387,13 +22563,21 @@ static bool metal_graph_encode_decode_layer_phase(
                 ok = false;
             }
             bool index_state_already_stored = false;
+            /* ROCm TP=4: use per-tier indexer state arrays to avoid
+             * read-modify-write races during concurrent multi-tier decode. */
+            ds4_gpu_tensor *const tp_index_state_kv = g->rocm_tp4
+                ? metal_graph_tp4_index_state_kv(g, il, g->active_tier)
+                : g->layer_index_state_kv[il];
+            ds4_gpu_tensor *const tp_index_state_score = g->rocm_tp4
+                ? metal_graph_tp4_index_state_score(g, il, g->active_tier)
+                : g->layer_index_state_score[il];
             if (ok && !metal_graph_use_reference_compressor_pair_proj()) {
                 const int fused_store =
                     ds4_gpu_matmul_f16_pair_compressor_store_tensor(
                             metal_graph_comp_kv_cur(g),
                             metal_graph_comp_sc_cur(g),
-                            g->layer_index_state_kv[il],
-                            g->layer_index_state_score[il],
+                            tp_index_state_kv,
+                            tp_index_state_score,
                             model->map,
                             model->size,
                             layer->indexer_compressor_kv->abs_offset,
@@ -22435,8 +22619,8 @@ static bool metal_graph_encode_decode_layer_phase(
             const uint32_t index_row = g->layer_n_index_comp[il];
             if (ok) ok = ds4_gpu_compressor_update_tensor(metal_graph_comp_kv_cur(g),
                                                             metal_graph_comp_sc_cur(g),
-                                                            g->layer_index_state_kv[il],
-                                                            g->layer_index_state_score[il],
+                                                            tp_index_state_kv,
+                                                            tp_index_state_score,
                                                             g->layer_index_comp_cache[il],
                                                             model->map,
                                                             model->size,
@@ -22497,7 +22681,7 @@ static bool metal_graph_encode_decode_layer_phase(
 #endif
                 DS4_METAL_PROFILE_DECODE_STAGE("indexer_compressor_qat");
             }
-            if (ok && emit) g->layer_n_index_comp[il]++;
+            if (ok && emit && (!g->rocm_tp4 || g->active_tier == 0)) g->layer_n_index_comp[il]++;
             const uint32_t decode_sparse_threshold =
                 metal_graph_decode_indexer_sparse_threshold(g);
             if (ok &&
@@ -24545,13 +24729,22 @@ static bool metal_graph_encode_decode_layer_phase(
     } else if (ok && rocm_tp4_moe) {
         /* ROCm TP=4: each rank's partial = shared_out (full on rank 0, zero on ranks 1-3)
          * + routed_out (owned 64 experts). Store in per-tier buffer; the all-reduce
-         * is called from the outer decode loop after all 4 tiers sync. */
+         * is called from the outer decode loop after all 4 tiers sync.
+         * Only tier 0 includes the shared expert in its partial; tiers 1-3 contribute
+         * only routed expert partials. This avoids 4× over-counting of the shared
+         * expert in the all-reduce (shared weights are replicated across all tiers). */
         const int home_tier = g->active_tier;
         if (ok) {
-            ok = ds4_gpu_add_tensor(g->shared_out_by_tier[home_tier],
-                                     metal_graph_shared_out(g),
-                                     metal_graph_routed_out(g),
-                                     DS4_N_EMBD) != 0;
+            if (home_tier == 0) {
+                ok = ds4_gpu_add_tensor(g->shared_out_by_tier[home_tier],
+                                         metal_graph_shared_out(g),
+                                         metal_graph_routed_out(g),
+                                         DS4_N_EMBD) != 0;
+            } else {
+                ok = ds4_gpu_tensor_copy(g->shared_out_by_tier[home_tier], 0,
+                                          metal_graph_routed_out(g), 0,
+                                          DS4_N_EMBD * sizeof(float)) != 0;
+            }
         }
         /* ROCm TP=4 phase: exit after storing this tier's partial.
          * All-reduce and post-FFN HC expand handled in the outer loop. */
@@ -26934,6 +27127,22 @@ static bool metal_graph_encode_token_raw_swa(
     /* ROCm TP=4 xdev symbols are declared at file scope (see the top of this
      * file, inside the DS4_ROCM_BUILD guard). No need to re-declare here. */
 
+    /* ROCm TP=4: broadcast embedded hidden state from tier 0 to all 4 tiers.
+     * The decode loop reads cur_hc_by_tier[tier] on each tier's iteration;
+     * without this broadcast tiers 1-3 read uninitialized memory for the
+     * embedding, producing garbage attention partials and corrupting the
+     * all-reduce. */
+    if (ok && g->rocm_tp4) {
+        const size_t hc_bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
+        ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+        for (int t = 1; ok && t < 4; t++) {
+            ok = ds4_rocm_xdev_copy(mesh, t,
+                    (void *)g->cur_hc_by_tier[t]->ptr,
+                    0, (const void *)g->cur_hc_by_tier[0]->ptr,
+                    hc_bytes, NULL);
+        }
+    }
+
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         if (g->rocm_tp4) {
             /*
@@ -26970,7 +27179,13 @@ static bool metal_graph_encode_token_raw_swa(
                 const int devs[4] = {0, 1, 2, 3};
                 ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
             }
-            /* All-reduce attention partials on tier 0. */
+            /* All-reduce attention partials on tier 0.
+             * The all-reduce destination MUST NOT alias the source (tier 0's
+             * partial), because ds4_rocm_xdev_allreduce_f32 zeroes the
+             * destination before accumulating — zeroing attn_out_by_tier[0]
+             * would lose tier 0's 32-head contribution.  Stage into the shared
+             * expert buffer (not yet written at this point — Phase 2 hasn't
+             * started), then copy to attn_out_by_tier[0]. */
             if (ok && !metal_graph_set_active_tier_decode(g, 0)) ok = false;
             if (ok) {
                 ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
@@ -26983,11 +27198,17 @@ static bool metal_graph_encode_token_raw_swa(
                     peer_partials[n_peers] = (const float *)g->attn_out_by_tier[t]->ptr;
                     n_peers++;
                 }
+                /* Stage into shared_out_by_tier[0] (no alias with attn_out). */
                 ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
-                        (float *)metal_graph_attn_out(g)->ptr,
+                        (float *)g->shared_out_by_tier[0]->ptr,
                         (const float *)g->attn_out_by_tier[0]->ptr,
                         peer_devs, peer_partials, n_peers,
                         (size_t)DS4_N_EMBD, NULL);
+                if (ok) {
+                    ok = ds4_gpu_tensor_copy(g->attn_out_by_tier[0], 0,
+                                              g->shared_out_by_tier[0], 0,
+                                              (uint64_t)DS4_N_EMBD * sizeof(float)) != 0;
+                }
             }
             /* Broadcast full attn_out from tier 0 to tiers 1-3. */
             for (int tier = 1; ok && tier < 4; tier++) {
