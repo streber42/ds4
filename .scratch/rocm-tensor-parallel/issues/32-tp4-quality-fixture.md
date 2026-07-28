@@ -995,11 +995,58 @@ multi-token cases average much lower. This is consistent with prefill
 logits being wrong (NLL ~10) and decode logits being correct (NLL ~0.4-2.0),
 with the average improving as more decode tokens dilute the prefill error.
 
-**Recommended next step:** Revisit the batch prefill attention TP=4 tier
-sweep plan (see "human-approved implementation plan for batch prefill
-attention" section above). The n_head=16 kernel audit is still the
-blocking prerequisite. With the decode path now correct, the prefill
-path is the sole remaining gap to closing this issue.
+### Live-pair session (2026-07-28, continued) — prefill diagnostics
+
+**HC broadcast experiment (negative result):** Added post-attention batch HC
+broadcast from tier 0 to tiers 1-3 (as recommended by Gemini consultant).
+Quality fixture results are BIT-IDENTICAL to before the broadcast
+(avg_nll=1.725054346). Conclusion: cross-tier HC state propagation is NOT
+the prefill bug — tiers 1-3 already have correct ffn_norm via the existing
+xdev_copy in the batch FFN TP=4 tier sweep.
+
+**Weight replication audit:** All attention-path tensors are ALREADY replicated
+(shard_divisor returns 1 by default for tensors not matching routed MoE
+experts or output head). Only `attn_q_b` and `attn_output_a` were
+previously sharded; commit c2f906d already changed them to return 1.
+There are no additional attention tensors to replicate.
+
+**Async race theory:** `HIP_LAUNCH_BLOCKING=1` test confirmed same results
+(not a race condition).
+
+**Key diagnostic finding:** The prefill NLL is DETERMINISTIC and
+PROMPT-DEPENDENT:
+- Some prompts produce near-reference logits (case_060: avg_nll=0.356)
+- Others produce random-level logits (case_094: avg_nll=10.523)
+- Both runs produce BIT-IDENTICAL scores across all 100 cases
+
+This pattern rules out:
+- Weight visibility (all attention weights replicated)
+- Cross-tier state sync (broadcast experiment negative)
+- Async/race conditions (HIP_LAUNCH_BLOCKING negative)
+- Non-deterministic GPU behavior (bit-identical across runs)
+
+**Remaining hypothesis:** The batch FFN TP=4 MoE computation may produce
+numerically different results than the non-TP MoE for certain expert
+routing patterns. Specifically:
+1. The `ds4_gpu_routed_moe_batch_owned_tensor` filters experts via
+   `moe_filter_owned_pairs_kernel` (marks unowned experts as -1/weight 0)
+2. The standard `routed_moe_launch` then processes the filtered pairs
+3. If the filtering produces different numerical results than the
+   full-expert MoE (e.g., different precision/rounding in the weighted
+   sum), this would explain prompt-dependent NLL variation
+
+**Recommended next step:** Compare per-layer MoE output (routed_out) between
+pipeline and TP=4 for a failing case (case_094) vs a passing case
+(case_060). If the divergence starts in the MoE layer output, the issue
+is in the batch FFN TP=4 MoE path. If it starts in attention, the issue
+is in the batch attention path.
+
+**Consultant panel findings:** Three consultants (Qwen3 9/10, Codex 8/10,
+Grok 8/10) unanimously recommended Option B (weight replication).
+Gemini concurred but warned about cross-tier state propagation.
+The weight replication is already in place; the state propagation
+warning was tested and disproven. The remaining prefill gap requires
+per-layer diagnostic comparison between pipeline and TP=4.
 
 **Updated acceptance criteria:**
 
