@@ -57624,6 +57624,13 @@ static int ds4_engine_open_internal(ds4_engine **out,
                 *out = NULL;
                 return 1;
             }
+            /* ROCm TP=4: per-device cache installation above switched the
+             * current device through every tier, landing on the last one.
+             * Reset to tier 0 so kernels run on device 0 (matching single-tier
+             * behaviour) and the home-tier cuBLAS handle is current. */
+            if (engine_rocm_tp4_requested(e)) {
+                ds4_gpu_set_current_device(0);
+            }
             /* GPU-only multi-tier execution is now wired up
              * (B2-B6: per-tier graph allocation, dispatch loops, boundary
              * copies). CPU-spill placements were rejected by
