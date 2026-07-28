@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -540,3 +540,43 @@ AMD_SERIALIZE_KERNEL=3 \
 ```
 
 Record results and compare against pipeline reference (`q_pipeline_ref_tp4issue32.tsv`, avg_nll 0.374733).
+
+### Autonomous session (2026-07-28) — structural fixes committed, TP=4 quality still outside tolerance
+
+**Status: in-progress -> ready-for-human.** Five structural fixes were implemented and verified in this session. The `make test-rocm` suite passes (all 4 test targets, 6/6 kernel comparisons). The pipeline path is not regressed. However, the TP=4 quality fixture still produces avg_nll ~9-11 (far outside the ±1% tolerance of 0.370-0.378).
+
+**Structural fixes committed:**
+
+1. **Post-prefill KV sync in `ds4_session_sync_internal`** (`ds4.c:60178-60186`):
+   Calls `metal_graph_rocm_tp4_sync_kv_cache` after `metal_graph_prefill_raw_swa` succeeds when `g->rocm_tp4` is set. Without this, per-tier raw caches (`layer_raw_cache_tp1/2/3`) are allocated but never populated with prefill data on the quality fixture path, because `score_official` → `ds4_session_sync` → `ds4_session_sync_internal` bypasses `ds4_session_eval_layer_slice` which had the only sync call.
+
+2. **Per-tier raw caches in the TP=4 decode loop** (`ds4.c:27078,27163`):
+   Changed `g->layer_raw_cache[il]` to `metal_graph_tp4_raw_cache(g, il, tier)` in both Phase 1 (TO_FFN) and Phase 2 (FROM_ATTN_TO_FFN) tier iterations. Each tier now reads/writes its own local per-tier KV cache, eliminating cross-device peer reads during KV operations.
+
+3. **Post-FFN after_ffn_hc broadcast order fix** (`ds4.c:27200-27217`):
+   The `cur_hc`/`after_ffn_hc` swap was happening BEFORE the broadcast to tiers 1-3, causing the broadcast to send the stale previous-token hidden state instead of the new `after_ffn_hc`. Fixed by broadcasting before the swap. Root cause of "first token correct, subsequent tokens garbled" pattern.
+
+4. **Logits_by_tier allocation for ROCm TP=4** (`ds4.c:17452-17470`):
+   `metal_graph_encode_output_head` TP=4 path (line 24857) uses `g->logits_by_tier[t]` for t=1,2,3, but these were never allocated because the allocation at line 17442 is gated on `g->cuda_tp_output` (false for ROCm TP=4). Added a `g->rocm_tp4` block that allocates `logits_by_tier[t]` and `output_norm_by_tier[t]` for tiers 1-3.
+
+5. **Batch MoE tier switch in `metal_graph_set_active_tier_batch`** (`ds4.c:15591-15601`):
+   The function was a no-op for TP=4 (`g->placement` is NULL in TP=4 mode), so the prefill batch MoE tier sweep (lines 30097-30150) never switched devices — all 4 MoE computations ran on tier 0 with device 0's weights, and the resulting MoE partials were incorrect. Added the same `g->rocm_tp4` branch that `metal_graph_set_active_tier_decode` already has.
+
+**Remaining issue — TP=4 quality scores still ~9-11 avg_nll:**
+
+Despite all five fixes, the quality fixture still shows avg_nll ~9-11 (first token correct-ish at "Wealth" vs "We", but subsequent tokens and logit distributions far from reference). The scores are NOT consistent with floating-point reassociation — they indicate a fundamental correctness bug.
+
+**Hypothesis for remaining root cause:**
+
+The prefill (batch) path produces wrong hidden states. The batch attention (`metal_graph_encode_layer_attention_batch`) is TP=4-unaware — it runs on tier 0 with full 128-head attention, but the attention weights are sharded across 4 tiers. Tier 0's device cache only has 25% of the Q_b rows (heads 0-31). While `cuda_model_range_ptr` falls back to the host mapping for uncached ranges, the host-mapped weight data may produce subtly wrong results due to:
+
+- Different Q8 quantization block alignment between the device-cache rows and the host-mapped rows
+- The MoE weight sharding causing similar issues in the batch FFN path (though the batch FFN has a TP=4 tier sweep that should use correctly cached weights)
+
+Alternatively, there may be a subtle issue in the all-reduce accumulating the wrong data.
+
+**Diagnostic steps for human investigator:**
+1. Compare per-layer hidden states between pipeline and TP=4 prefill for the same single-token prompt
+2. Add debug output to compare batch attention output (tier 0 only) with and without TP=4 weight sharding
+3. Verify the Q_b weight offset and row bytes alignment for TP=4 sharding
+4. Check if `cuda_model_range_ptr` returns host-mapped or device-cached pointers for the full output weight tensor during the batch output head call

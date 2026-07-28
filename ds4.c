@@ -15652,6 +15652,17 @@ static bool metal_graph_set_active_tier_decode(ds4_gpu_graph *g, int tier) {
  * paths ignore the argument. */
 static bool metal_graph_set_active_tier_batch(ds4_gpu_graph *g, int tier, uint32_t chunk_tokens) {
     if (!g->placement) {
+        /* Single-tier: just keep active_tier at 0; no device switch needed.
+         * ROCm TP=4: g->placement is NULL (all 4 tiers hold every layer),
+         * but we still need to set active_tier and switch GPU device so the
+         * batch MoE tier sweep launches kernels on the correct device. */
+        if (g->rocm_tp4) {
+            if (tier < 0 || tier >= DS4_MAX_GPUS) return false;
+            if (tier == g->active_tier) return true;
+            if (ds4_gpu_set_current_device(tier) != 0) return false;
+            g->active_tier = tier;
+            return true;
+        }
         (void)tier;
         (void)chunk_tokens;
         return true;
@@ -17525,6 +17536,25 @@ static bool metal_graph_alloc_raw_cap(
         g->logits_by_tier[t] =
             ds4_gpu_tensor_alloc_ptr_on(t,
                                         output_logits_elems * sizeof(float));
+    }
+    /* ROCm TP=4: allocate per-tier logits and output_norm for tiers 1-3
+     * so the vocab-split output head can compute V/4 shards on each tier
+     * and gather them back to tier 0.  output_norm_by_tier[t] is used as
+     * a copy destination for tier 0's output_norm before the shard matmul. */
+    if (g->rocm_tp4) {
+        for (int t = 1; t < 4; t++) {
+            if (t == g->head_tier) continue;
+            if (!g->output_norm_by_tier[t]) {
+                g->output_norm_by_tier[t] =
+                    ds4_gpu_tensor_alloc_ptr_on(t,
+                        (uint64_t)DS4_N_EMBD * sizeof(float));
+            }
+            if (!g->logits_by_tier[t]) {
+                g->logits_by_tier[t] =
+                    ds4_gpu_tensor_alloc_ptr_on(t,
+                        output_logits_elems * sizeof(float));
+            }
+        }
     }
     /*
      * MTP is deliberately outside the normal graph footprint.  A session that
@@ -27171,7 +27201,8 @@ static bool metal_graph_encode_token_raw_swa(
                 ok = metal_graph_encode_decode_layer_phase(
                         g, model, &weights->layer[il],
                         il, pos,
-                        g->layer_raw_cache[il], g->raw_cap, raw_row, n_raw, token,
+                        metal_graph_tp4_raw_cache(g, il, tier), g->raw_cap,
+                        raw_row, n_raw, token,
                         METAL_DECODE_LAYER_TO_FFN);
             }
             /* Barrier: wait for all 4 tiers' attention compute to finish. */
@@ -27255,7 +27286,8 @@ static bool metal_graph_encode_token_raw_swa(
                 ok = metal_graph_encode_decode_layer_phase(
                         g, model, &weights->layer[il],
                         il, pos,
-                        g->layer_raw_cache[il], g->raw_cap, raw_row, n_raw, token,
+                        metal_graph_tp4_raw_cache(g, il, tier), g->raw_cap,
+                        raw_row, n_raw, token,
                         METAL_DECODE_LAYER_FROM_ATTN_TO_FFN);
             }
             /* Barrier: wait for all 4 tiers' MoE compute to finish. */
@@ -27295,12 +27327,11 @@ static bool metal_graph_encode_token_raw_swa(
                         metal_graph_hc_split(g),
                         DS4_N_EMBD, DS4_N_HC) != 0;
             }
-            /* Update cur_hc for tier 0 and broadcast to tiers 1-3. */
-            if (ok) {
-                ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
-                g->cur_hc_by_tier[0] = metal_graph_after_ffn_hc(g);
-                g->after_ffn_hc_by_tier[0] = tmp;
-            }
+            /* Broadcast the new after_ffn_hc from tier 0 to tiers 1-3
+             * BEFORE the cur_hc/after_ffn_hc swap.  The swap renames
+             * after_ffn_hc[0] to cur_hc[0] and recycles the old cur_hc[0]
+             * as the new after_ffn_hc scratch; broadcasting after the swap
+             * would send the stale previous-token hidden state. */
             for (int tier = 1; ok && tier < 4; tier++) {
                 ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
                 size_t bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
@@ -27308,6 +27339,12 @@ static bool metal_graph_encode_token_raw_swa(
                         (void *)g->cur_hc_by_tier[tier]->ptr,
                         0, (const void *)metal_graph_after_ffn_hc(g)->ptr,
                         bytes, NULL);
+            }
+            /* Update cur_hc for tier 0 (swap after_ffn_hc into cur_hc). */
+            if (ok) {
+                ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
+                g->cur_hc_by_tier[0] = metal_graph_after_ffn_hc(g);
+                g->after_ffn_hc_by_tier[0] = tmp;
             }
             if (ok) {
                 const int devs[4] = {0, 1, 2, 3};
@@ -60560,6 +60597,15 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
         snprintf(err, errlen, "%s prefill failed", backend_name);
         s->checkpoint_valid = false;
         return 1;
+    }
+    /* TP=4: sync KV cache from tier 0 to tiers 1-3 after prefill so
+     * that each tier has its own local copy for decode-phase reads. */
+    if (ok && s->graph.rocm_tp4) {
+        ok = metal_graph_rocm_tp4_sync_kv_cache(&s->graph);
+        if (!ok) {
+            snprintf(err, errlen, "TP=4 KV cache sync after prefill failed");
+            return 1;
+        }
     }
     ds4_tokens_copy(&s->checkpoint, prompt);
     s->checkpoint_valid = true;
