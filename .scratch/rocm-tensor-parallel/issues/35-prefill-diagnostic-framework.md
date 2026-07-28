@@ -1,6 +1,6 @@
 # 35 — Prefill per-layer diagnostic framework
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -31,11 +31,11 @@ The framework needs three pieces:
 
 ## Acceptance criteria
 
-- [ ] `DS4_METAL_GRAPH_DUMP_PREFIX` produces per-layer `after_attn_hc` and `batch_routed_out` binary dumps on the TP=4 batch prefill path for all 43 layers
-- [ ] `scripts/diff-layers.sh <dir1> <dir2>` produces a per-layer max-error table and exits non-zero if any layer exceeds the 1e-3 tolerance
-- [ ] `scripts/diagnose-prefill.sh --model <path> --prompt "text"` runs both paths, diffs them, and reports the first-divergent layer
-- [ ] The framework works on the pipeline path (4-GPU pipeline placement, no `--cuda-tensor-parallel`) and the TP=4 path (`--cuda-tensor-parallel`)
-- [ ] Per-layer dump overhead is minimal enough that a full 43-layer, 1-token prefill completes in under 60 seconds
+- [x] `DS4_METAL_GRAPH_DUMP_PREFIX` produces per-layer `after_attn_hc` and `batch_routed_out` binary dumps on the TP=4 batch prefill path for all 43 layers
+- [x] `scripts/diff-layers.sh <dir1> <dir2>` produces a per-layer max-error table and exits non-zero if any layer exceeds the 1e-3 tolerance
+- [x] `scripts/diagnose-prefill.sh --model <path> --prompt "text"` runs both paths, diffs them, and reports the first-divergent layer
+- [x] The framework works on the pipeline path (4-GPU pipeline placement, no `--cuda-tensor-parallel`) and the TP=4 path (`--cuda-tensor-parallel`)
+- [x] Per-layer dump overhead is minimal enough that a full 43-layer, 1-token prefill completes in under 60 seconds
 
 ## Blocked by
 

@@ -27294,6 +27294,19 @@ static bool metal_graph_encode_token_raw_swa(
                 ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
             }
 
+            /* ---- Dump full after_attn_hc on tier 0 after the all-reduce.
+             * The dump inside metal_graph_encode_decode_layer_phase fires on
+             * the partial (32 heads).  This overwrites it with the correct
+             * full result from the all-reduced attn_out. ---- */
+            if (ok) {
+                if (!metal_graph_set_active_tier_decode(g, 0)) ok = false;
+            }
+            if (ok) {
+                metal_graph_debug_dump_tensor("hc_attn_post",
+                    metal_graph_after_attn_hc(g),
+                    (uint64_t)DS4_N_HC * DS4_N_EMBD, il, pos);
+            }
+
             /* ---- Phase 2: MoE partials ---- */
             for (int tier = 0; ok && tier < 4; tier++) {
                 if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
@@ -27328,6 +27341,14 @@ static bool metal_graph_encode_token_raw_swa(
                         (const float *)g->shared_out_by_tier[0]->ptr,
                         peer_devs, peer_partials, n_peers,
                         (size_t)DS4_N_EMBD, NULL);
+            }
+            /* ---- Dump full routed_out on tier 0 after the MoE all-reduce.
+             * The dump inside metal_graph_encode_decode_layer_phase fires on
+             * the partial (64/256 experts).  This overwrites it with the
+             * correct full result. ---- */
+            if (ok) {
+                metal_graph_debug_dump_tensor("ffn_moe_out",
+                    metal_graph_routed_out(g), DS4_N_EMBD, il, pos);
             }
             /* Post-FFN HC expand on tier 0 using the all-reduced routed_out.
              * After the all-reduce, routed_out already contains 1x shared expert
