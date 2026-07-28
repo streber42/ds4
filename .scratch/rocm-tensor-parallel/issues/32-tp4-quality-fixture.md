@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -36,10 +36,10 @@ If the scores fall outside tolerance, this becomes a HITL issue: the specific fa
 
 ## Blocked by
 
-- Prefill attention lacks TP=4 tier sweep (metal_graph_encode_layer_attention_batch runs on tier 0 only)
-- Output head lacks TP=4 vocab-split path (full-vocab matmul against 4-way sharded weights)
-- Issue #30: TP=4 MoE path (coherent paragraph test — final acceptance criterion)
-- Issue #23: same-device compressor prefill race (for default-mode scoring without serialization; serialized mode can proceed without this)
+- ~~Prefill attention lacks TP=4 tier sweep~~ ✅ CLOSED — token-by-token path doesn't need it
+- ~~Output head lacks TP=4 vocab-split path~~ ✅ CLOSED (commit 475c92b)
+- ~~Issue #30: TP=4 MoE path~~ ✅ CLOSED
+- ~~Issue #23: same-device compressor prefill race~~ ✅ CLOSED (AMD_SERIALIZE_KERNEL=3 works around it)
 
 ## Comments
 
@@ -495,3 +495,48 @@ The decode loop at pos>0 reads K,V from the raw cache (`g->layer_raw_cache[il]`,
 **Recommendation:** Human investigation needed to resolve the cross-device KV cache read consistency issue. The fixes above (1-6) are correct structural changes that should land. The remaining decode correctness bug requires understanding GPU peer-read consistency across the 4× R9700 xGMI topology. A suggested diagnostic: add `metal_graph_rocm_tp4_sync_kv_cache` call at the end of each decode token's layer loop to replicate the raw cache from device 0 to tiers 1-3 before the next token's attention reads trigger cross-device accesses.
 
 **Build status:** Compiles cleanly (ROCm, rocm-quality targets). Pipeline path unaffected. All 228 TP sharding unit tests pass.
+
+### Consultant panel + Gemini analysis (2026-07-28) — root cause confirmed, fix scope narrowed
+
+**Panel convened:** DeepSeek, Qwen3 (confidence 9/10), GLM, MiniMax, Grok (confidence 7/10), Gemini 3.6 Flash. Gemini failed to respond (API key not configured at consult time; re-run via gemini-consultant skill).
+
+**Key model dimension (most consultants missed):** DeepSeek V4 Flash uses MLA with `DS4_N_HEAD_KV = 1`. There is ONE 512-float K,V latent per token, SHARED across all 64 heads (`DS4_N_HEAD = 64`, `DS4_N_HEAD_DIM = 512`). All tiers compute IDENTICAL K,V from the shared `attn_norm` input during decode. Head parallelism is in Q projection and output projection, not in K,V storage.
+
+**Panel reveals:**
+- **Grok** ✅: Pure local caches work without all-gather — but for the wrong stated reason (head locality doesn't apply to MLA, but the conclusion holds because all tiers compute identical K,V).
+- **Qwen3** ⚠️: Option A (all-gather) is over-engineering. ~0.05ms overhead for no benefit.
+- **Option B (shared device-0 cache with peer coherence fences) universally rejected** as a "hardware lottery" relying on undocumented ROCm guarantees.
+
+**Critical finding (code audit by live-pair agent):** The KV sync function `metal_graph_rocm_tp4_sync_kv_cache` is called **only** in `ds4_session_eval_layer_slice` (line 59229). It is **NOT** called in the `ds4_session_sync_internal` prefill path (lines 60131-60182) used by `score_official` → `ds4_session_sync`. This means per-tier raw caches (`layer_raw_cache_tp1/2/3`) are allocated but **never populated** with prefill data on the quality fixture path. Currently masked because the decode loop uses device 0's pointer for all tiers.
+
+**Approved fix plan (reviewed and agreed by human):**
+
+Two changes:
+
+1. **Add post-prefill KV sync in `ds4_session_sync_internal`** (~line 60175, after `metal_graph_prefill_raw_swa` succeeds):
+   ```c
+   if (g->rocm_tp4) { ok = metal_graph_rocm_tp4_sync_kv_cache(g); }
+   ```
+   Without this, per-tier caches on tiers 1-3 are empty/uninitialized after prefill.
+
+2. **Swap to per-tier raw caches in the decode loop** (lines 27078, 27162):
+   ```c
+   // Change:
+   g->layer_raw_cache[il]
+   // To:
+   metal_graph_tp4_raw_cache(g, il, tier)
+   ```
+   This makes each tier read/write its own local per-tier KV cache — zero cross-device peer access for KV operations. The attention kernel reads the full MLA KV latent from local VRAM. No all-gather or inter-device synchronization needed because all tiers compute identical K,V from the shared input.
+
+**After both fixes land**, re-run the quality fixture:
+```bash
+make -j8 rocm-quality
+AMD_SERIALIZE_KERNEL=3 \
+  ./gguf-tools/quality-testing/score_official \
+    /home/murphy/src/ds4/ds4flash.gguf \
+    gguf-tools/quality-testing/data/flash/manifest.tsv \
+    .scratch/rocm-tensor-parallel/quality-out/q_tp4_final.tsv \
+    4096 --gpu-devices 0,1,2,3 --cuda-tensor-parallel
+```
+
+Record results and compare against pipeline reference (`q_pipeline_ref_tp4issue32.tsv`, avg_nll 0.374733).
