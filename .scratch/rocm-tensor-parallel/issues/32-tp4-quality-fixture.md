@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -540,6 +540,179 @@ AMD_SERIALIZE_KERNEL=3 \
 ```
 
 Record results and compare against pipeline reference (`q_pipeline_ref_tp4issue32.tsv`, avg_nll 0.374733).
+
+### Live-pair session (2026-07-28) — human-approved implementation plan for batch prefill attention
+
+**Status: ready-for-agent**. Human reviewed and approved the implementation plan below.
+
+**Confirmed root cause of remaining ~9-11 avg_nll:**
+
+`cuda_resolve_weight_ptr` (ds4_cuda.cu:728) returns NULL when the full weight
+range isn't cached on the calling tier. With TP=4 sharding, each tier has only
+25% of `attn_q_b` and `attn_output_a` rows cached. `metal_graph_encode_layer_
+attention_batch` runs entirely on tier 0 with `tp_row_split_attn=false` (gated
+on `g->tp_world == 2`). The matmul calls request the full weight range and
+get NULL → GPU kernel reads garbage → wrong hidden states → KV cache corruption
+→ garbled decode.
+
+**Approved implementation plan:**
+
+**Approach: Tier-sweep the batch attention function's Q_b → output projection
+slice**, mirroring the batch FFN MoE pattern (ds4.c:30068–30179).
+
+The batch attention function is structured in 12 phases (identified by
+`DS4_METAL_PROFILE_ATTN_STAGE` markers):
+
+| Phase | Lines | What | Weights | TP=4 treatment |
+|---|---|---|---|---|
+| `hc_pre` | 27919–27975 | HC mix/split/weighted sum → attn_cur | Replicated | Tier 0 only |
+| `norm` | 27976–27990 | RMSNorm → attn_norm | Replicated | Tier 0 only |
+| `pre_q`/`q_a`/`q_a_norm` | 27991–28052 | Q_a proj + norm → qr, qr_norm | Replicated | Tier 0 only |
+| `q_path`/`kv_path` | 28053–28210 | Q_b proj + head norm + RoPE, KV proj + norm + RoPE + fp8 quant | q_b/Q_b: **SHARDED**, kv/kv_a: Replicated | **Tier sweep starts here** |
+| `compressor` | 28408–28646 | Compressor, indexer setup | Replicated | Tier 0 only |
+| `attention` | 28211–29380 | Attention kernels (raw/mixed/indexed/decode) | Uses Q (sharded heads) + KV (replicated, tier-local copy) | **Inside sweep** |
+| `inv_rope` | 29381–29404 | Inverse RoPE on heads | N/A | **Inside sweep** |
+| `output_proj` | 29405–29522 | Output projection A+B, TP=2 row swap | `attn_output_a`: **SHARDED**, `attn_output_b`: Replicated | **Inside sweep** |
+| `hc_post` | 29523–29570 | HC expand → after_attn_hc | Replicated | **Tier sweep ends, all-reduce, then HC expand on all 4 tiers** |
+
+The tier sweep mirrors the batch FFN pattern:
+
+```c
+if (ok && g->rocm_tp4) {
+    // --- Pre-sweep: Q_a + KV on tier 0 (replicated weights) ---
+    // [existing code, unchanged]
+
+    const int home_tier = g->active_tier;
+    const size_t n_heads_per_tier = DS4_N_HEAD / 4;   // 16
+    const size_t head_bytes = (size_t)n_tokens * n_heads_per_tier * DS4_N_HEAD_DIM * sizeof(float);
+    const size_t embd_bytes = (size_t)n_tokens * DS4_N_EMBD * sizeof(float);
+
+    // --- Tier sweep: Q_b → attention → output projection ---
+    for (int t = 0; ok && t < 4; t++) {
+        metal_graph_set_active_tier_batch(g, t, n_tokens);
+        g->tp_rank = (uint32_t)t;
+
+        // Copy attn_norm from tier 0 if t != 0 (cheap, n_tokens * embd)
+        if (t != 0) {
+            ds4_rocm_xdev_copy(mesh, t,
+                g->batch_attn_norm_by_tier[t]->ptr, home_tier,
+                g->batch_attn_norm->ptr, n_tokens * DS4_N_EMBD * sizeof(float), NULL);
+        }
+
+        // Q_b for this tier's 16 heads → q_by_tier[t]
+        // Uses tier t's sharded Q_b weight cache
+        metal_graph_matmul_q8_0_named_tensor("attn_q_b", il, pos0,
+            q_by_tier[t], model, layer->attn_q_b, q_rank,
+            n_heads_per_tier * DS4_N_HEAD_DIM,
+            batch_attn_norm_by_tier[t], n_tokens);
+        ds4_gpu_head_rms_norm_tensor(q_by_tier[t], n_tokens,
+            n_heads_per_tier, DS4_N_HEAD_DIM, DS4_RMS_EPS);
+        ds4_gpu_rope_tail_tensor(q_by_tier[t], n_tokens,
+            n_heads_per_tier, DS4_N_HEAD_DIM, DS4_N_ROT,
+            pos0, /* ... rope params ... */);
+
+        // KV store to per-tier raw cache (identical data, local copy)
+        // Copy KV from tier 0 to per-tier cache if t != 0
+        if (t == 0) {
+            ds4_gpu_store_raw_kv_batch_tensor(
+                metal_graph_tp4_raw_cache(g, il, 0), kv, ...);
+        } else {
+            ds4_rocm_xdev_copy(mesh, t,
+                metal_graph_tp4_raw_cache(g, il, t)->ptr, 0,
+                metal_graph_tp4_raw_cache(g, il, 0)->ptr,
+                kv_bytes, NULL);
+        }
+
+        // Attention: q_by_tier[t] (16 heads) × per-tier KV → heads_by_tier[t]
+        // Needs head-range-aware kernel call, OR:
+        //   reshape q_by_tier[t] as [n_tokens × 16 × 512]
+        //   call attention kernel with n_head=16, head_dim=512
+        ds4_gpu_attention_prefill_raw_heads_tensor(
+            heads_by_tier[t], model->map, model->size,
+            layer->attn_sinks_offset + t * n_heads_per_tier * sizeof(float),
+            q_by_tier[t],
+            metal_graph_tp4_raw_cache(g, il, t),  // local KV
+            n_tokens, g->raw_window,
+            n_heads_per_tier, DS4_N_HEAD_DIM);
+
+        // Inverse RoPE
+        ds4_gpu_rope_tail_tensor(heads_by_tier[t], n_tokens,
+            n_heads_per_tier, DS4_N_HEAD_DIM, DS4_N_ROT,
+            pos0, /* ... */ true /* inverse */, /* ... */);
+
+        // Output projection: heads_by_tier[t] (16 heads) → attn_out_by_tier[t]
+        // stage A: heads × output_a[t*8192:(t+1)*8192] → attn_low_by_tier[t]
+        // stage B: attn_low_by_tier[t] × output_b (replicated) → attn_out_by_tier[t]
+        metal_graph_attention_output_dense_quant_batch(
+            attn_out_by_tier[t], attn_low_by_tier[t],
+            g, model, layer->attn_output_a, layer->attn_output_b,
+            group_dim, rank, n_groups, DS4_N_EMBD,
+            heads_by_tier[t], n_tokens);
+    }
+
+    // Restore home tier + sync all devices
+    metal_graph_set_active_tier_batch(g, home_tier, n_tokens);
+    ds4_rocm_xdev_sync_all_devices(devs_4, 4);
+
+    // All-reduce attn_out across all 4 tiers
+    // Use staging buffer (can't alias source — same pattern as FFN at line 30170)
+    ds4_rocm_xdev_allreduce_f32(staging, attn_out_by_tier, 4, n_tokens * DS4_N_EMBD, ...);
+    // Copy staging → attn_out_by_tier[home_tier]
+
+    // Broadcast to all other tiers
+    for (int t = 0; t < 4; t++) {
+        if (t == home_tier) continue;
+        ds4_rocm_xdev_copy(mesh, t, attn_out_by_tier[t]->ptr,
+            home_tier, attn_out_by_tier[home_tier]->ptr,
+            n_tokens * DS4_N_EMBD * sizeof(float), NULL);
+    }
+
+    // HC expand on all 4 tiers
+    for (int t = 0; ok && t < 4; t++) {
+        metal_graph_set_active_tier_batch(g, t, n_tokens);
+        ds4_gpu_hc_expand_split_tensor(after_attn_hc_by_tier[t],
+            attn_out_by_tier[t], cur_hc_by_tier[t], hc_split_by_tier[t],
+            DS4_N_EMBD, DS4_N_HC);
+    }
+    metal_graph_set_active_tier_batch(g, home_tier, n_tokens);
+}
+```
+
+**New per-tier batch buffers needed** (allocate in metal_graph_alloc, TP=4 only):
+- `batch_attn_norm_by_tier[4]` — per-tier copy of attn_norm (n_tokens × embd)
+- `batch_q_by_tier[4]` — per-tier Q (n_tokens × 16 × 512 = 32K floats per token)
+- `batch_heads_by_tier[4]` — per-tier attention output (same shape as Q)
+- `batch_attn_out_by_tier[4]` — per-tier output projection result (n_tokens × embd)
+- `batch_attn_low_by_tier[4]` — per-tier intermediate (n_tokens × group_dim)
+- `batch_after_attn_hc_by_tier[4]` — per-tier HC expand result (n_tokens × hc_dim)
+
+**VRAM cost**: ~n_tokens × (embd + 2×16×512 + embd + group_dim + hc_dim) × 4 tiers
+= ~4096 × (7168 + 16384 + 7168 + 2048 + 28672) × 4 = ~1.0 GB for a full 4096-token prefill.
+
+**Key risk — attention kernel head-range support:**
+
+The attention kernels in `ds4_cuda.cu` receive `n_head` as a runtime argument.
+Passing `n_head=16` (instead of 64) should work IF:
+- The kernel launch configuration scales by `n_head` (not hardcoded)
+- The `attn_sinks` offset is adjusted to point to the correct 16-entry slice
+- The kernel's internal head indexing works with variable head count
+
+Mitigation: If the kernel doesn't support variable head count, fall back to
+computing FULL Q on each tier (all 64 heads) by replicating the per-tier
+output. This uses 4× more Q_b matmul compute but produces correct results
+without kernel changes. Optimize later.
+
+**Alternative considered and rejected:**
+
+Replicating `attn_q_b`, `attn_output`, `attn_output_a` across all 4 tiers
+(changing `engine_tp4_shard_divisor` to return 1 for these tensors) would
+avoid the tier sweep entirely. Rejected because:
+- ~3.2 GB VRAM cost per GPU (permanent, not per-call)
+- Doesn't fix the fundamental architecture — the decode loop still needs
+  per-tier head computation for the all-reduce, so this just papers over the
+  prefill path
+- The tier sweep is the correct TP=4 architecture for attention, matching
+  what was already done for MoE
 
 ### Autonomous session (2026-07-28) — structural fixes committed, TP=4 quality still outside tolerance
 
