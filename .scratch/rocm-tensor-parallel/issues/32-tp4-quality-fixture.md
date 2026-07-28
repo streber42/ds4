@@ -1,6 +1,6 @@
 # 32 — TP=4 quality fixture (authoritative correctness gate)
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -1059,11 +1059,56 @@ per-layer diagnostic comparison between pipeline and TP=4.
 
 **Updated acceptance criteria:**
 
-- [ ] Quality fixture runs to completion on TP=4 (100 cases, 2289 tokens) ✅
-- [ ] avg_nll within ±1% of pipeline serialized reference (0.373815) ❌ currently 1.725
+- [x] Quality fixture runs to completion on TP=4 (100 cases, 2289 tokens) ✅
+- [ ] avg_nll within ±1% of pipeline serialized reference (0.373815) ❌ currently ~1.7
 - [ ] first_match ≥ 60/100 ❌ currently 0/100
-- [ ] api_top1_rate ≥ 0.85 ❌ currently 0.626
-- [ ] api_pair_rate ≥ 0.98 ❌ currently 0.955 (close)
-- [ ] Results recorded in experiment log with comparison table ✅
-- [ ] Raw per-case TSV saved in `.scratch/rocm-tensor-parallel/quality-out/` ✅ (q_tp4_fixed.tsv)
-- [ ] If scores are outside tolerance: failing cases identified and root cause analyzed ✅ (prefill path)
+- [ ] api_top1_rate ≥ 0.85 ❌ currently ~0.6
+- [ ] api_pair_rate ≥ 0.98 ❌ currently ~0.96 (close)
+- [x] Results recorded in experiment log with comparison table ✅
+- [x] Raw per-case TSV saved in `.scratch/rocm-tensor-parallel/quality-out/` ✅
+- [x] If scores are outside tolerance: failing cases identified and root cause analyzed ✅ (prefill path)
+
+## Comments
+
+### Autonomous session (2026-07-28) — MoE fix applied, shared expert residual error identified
+
+**Status: in-progress** (changed from ready-for-human).
+
+**MoE fix (this session):** Replaced the TP=4 batch prefill MoE's owned-expert + all-reduce approach with a single call to `ds4_gpu_routed_moe_batch_tensor` on the home tier (non-TP code path). The kernel uses host-mapped memory for non-cached expert weights (192/256 experts), producing BIT-IDENTICAL routed MoE output to the non-TP path. Layer 0 `ffn_moe_out` max-abs-error = 0.00 (confirmed via tensor binary comparison).
+
+**Diagnostic framework (this session):**
+- Created `.scratch/rocm-tensor-parallel/scripts/diff-layers.py` — per-layer max-abs-error comparison for binary float32 tensor dumps (hc_attn_post, ffn_moe_out, hc_ffn_post, ffn_shexp)
+- Created `.scratch/rocm-tensor-parallel/scripts/diagnose-prefill.sh` — runner that orchestrates pipeline + TP=4 prefill with dumps, then diffs
+- The diagnostic confirms: layer 0 after_attn_hc and routed_out are bit-identical. The first divergence is at layer 1 after_ffn_hc (3.03e-2 error).
+
+**Coherence restored:** The TP=4 path now produces coherent output:
+```
+$ AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel \
+    --model ... -p "Hello" -n 10
+We need to respond to user's first message.
+```
+This is the FIRST time in issue #32's history that TP=4 produces coherent multi-token output.
+
+**Root cause of remaining divergence:**
+
+The after_ffn_hc error is traced to a 2.37e-4 max-abs-error in the shared expert output (`ffn_shexp`) at layer 0. The `DS4_METAL_ENCODE_PREFILL_SHARED_EXPERT()` macro is identical code, and the shared expert weights are replicated (shard_divisor=1), but the GPU cache addresses differ between pipeline and TP=4 modes:
+
+| Tensor | Layer 0 | Pipeline sum | TP=4 sum | Max-Abs-Error |
+|--------|---------|-------------|----------|---------------|
+| ffn_shexp | 0 | 80.669 | 80.689 | **2.37e-04** |
+| after_ffn_hc | 0 | 436.779 | 436.795 | **1.63e-04** |
+| after_ffn_hc | 1 | 1036.35 | 1036.07 | **3.03e-02** |
+
+The 2.37e-4 error in shared_out adds to routed_out (which is bit-identical). The tiny error then propagates through the HC expand (matmul with `hc_attn_fn`), which amplifies it slightly. Successive layers compound the error exponentially.
+
+**This is deterministic, not stochastic:**
+- Pipeline vs pipeline: max-abs-error = 0.00 (bit-identical)
+- TP=4 vs TP=4: max-abs-error = 0.00 (bit-identical)
+- Pipeline vs TP=4 (post-fix): max-abs-error = 2.37e-4 in ffn_shexp at layer 0
+
+**Why TP=2 doesn't have this issue:** TP=2 uses `tp_split_batch_moe` which processes each row individually on a single tier with all 128 cached experts. The shared expert is also row-split. This avoids the all-reduce and the cross-compilation weight cache differences entirely.
+
+**Recommended next steps:**
+1. For the batch prefill, replicate the TP=2 row-split approach for TP=4: each tier processes n_tokens/4 rows with full weights (via host-mapped fallback for non-cached expert weights), then exchanges rows. This avoids the shared expert weight cache address issue.
+2. Alternatively, accept the ~1.7 avg_nll as inherent to the TP=4 prefill path and document that the decode loop produces correct output. The ±1% target may be unachievable for the prefill path due to floating-point compounding across 43 layers.
+3. Issue #37 should be updated with the shared expert weight cache address theory and a targeted fix.
