@@ -1,0 +1,1 @@
+id	prompt_tokens	target_tokens	nll	avg_nll	first_match	greedy_lcp	api_ref_tokens	api_target_tokens	api_target_mae	api_target_mean_delta	api_top_items	api_top_mapped	api_top_coverage	api_top1_count	api_top1_match	api_top1_rate	api_topn_ref	api_topn_hit	api_topn_recall	api_top_logprob_count	api_top_mae	api_top_mean_delta	api_pair_total	api_pair_agree	api_pair_rate

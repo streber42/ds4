@@ -30420,6 +30420,17 @@ static bool metal_graph_encode_layer_batch(
             return false;
         }
     }
+    /* Evict the Q8→f16 dequant cache before each batch-prefill layer.
+     * In TP=4 mode the cache accumulates dequant entries for all 43 layers
+     * on device 0, consuming free VRAM until cuda_q8_f16_cache_has_budget
+     * fails ~layer 38 and the f16 cuBLAS attention path silently falls back
+     * to Q8 kernels — producing different arithmetic than the pipeline path
+     * (which spreads layers across 4 devices and never exhausts the reserve).
+     * Each layer uses different weight offsets so inter-layer cache reuse is
+     * nonexistent; clearing per layer wastes no work. */
+#ifdef DS4_ROCM_BUILD
+    ds4_gpu_release_q8_f16_cache();
+#endif
     /* Host-mapped weight pointers for the entire batch prefill to avoid
      * floating-point noise from different device-cache addresses between
      * pipeline and TP=4 modes.  The ~2.37e-4 error in the shared expert
