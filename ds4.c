@@ -25006,57 +25006,25 @@ static bool metal_graph_encode_output_head(
                 g, model, weights, metal_graph_output_norm(g),
                 metal_graph_logits(g), 1, vocab_dim);
     } else if (ok && g->rocm_tp4) {
-        /* ROCm TP=4: each rank computes its V/4 vocabulary shard.
-         * The output_norm is computed on the head tier (tier 0).
-         * Copy it to each tier's attn_norm scratch, compute the shard
-         * matmul on that tier, then gather all shards back to tier 0. */
-        const uint64_t tp_v4 = vocab_dim / 4u;
-        uint64_t head_row_bytes = 0;
-        ok = metal_graph_dense_quant_row_bytes(weights->output,
-                                               DS4_N_EMBD,
-                                               &head_row_bytes);
-        if (ok) {
-            const int home_tier = g->active_tier;
-            ds4_gpu_tensor *output_norm_t0 = metal_graph_output_norm(g);
-            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-            size_t norm_bytes = (size_t)DS4_N_EMBD * sizeof(float);
-            /* Compute shard on each tier.
-             * Tier 0 already has output_norm; tiers 1-3 get a copy. */
-            for (int t = 0; ok && t < 4; t++) {
-                if (t != home_tier) {
-                    if (!ds4_rocm_xdev_copy(mesh, t,
-                            (void *)g->attn_norm_by_tier[t]->ptr,
-                            home_tier,
-                            (const void *)output_norm_t0->ptr,
-                            norm_bytes, NULL)) { ok = false; break; }
-                }
-                if (ds4_gpu_set_current_device(t) != 0) { ok = false; break; }
-                ds4_gpu_tensor *shard_logits = ds4_gpu_tensor_view(
-                        g->logits_by_tier[t], 0, tp_v4 * sizeof(float));
-                if (!shard_logits) { ok = false; break; }
-                ok = metal_graph_matmul_dense_quant_abs(
-                        shard_logits,
-                        model, weights->output,
-                        weights->output->abs_offset +
-                            (uint64_t)t * tp_v4 * head_row_bytes,
-                        DS4_N_EMBD, tp_v4,
-                        t == home_tier ? output_norm_t0
-                                       : g->attn_norm_by_tier[t],
-                        1);
-                ds4_gpu_tensor_free(shard_logits);
-            }
-            /* Restore head_tier device. */
-            if (ok) ok = ds4_gpu_set_current_device(home_tier) == 0;
-            /* Gather shards 1-3 into logits_by_tier[0]. */
-            for (int t = 1; ok && t < 4; t++) {
-                const uint64_t off = (uint64_t)t * tp_v4 * sizeof(float);
-                ok = ds4_rocm_xdev_copy(mesh, home_tier,
-                        (void *)((uint8_t *)g->logits_by_tier[home_tier]->ptr + off),
-                        t,
-                        (const void *)g->logits_by_tier[t]->ptr,
-                        tp_v4 * sizeof(float), NULL);
-            }
-        }
+        /* ROCm TP=4: single-GPU output head matmul on tier 0, matching the
+         * non-TP pipeline path.  The output tensor is sharded (divisor=4),
+         * so tier 0's device cache holds rows [0, V/4) and the remaining
+         * rows fall back to host-mapped memory (via cuda_model_range_ptr_
+         * from_fd) — the same weight resolution as the pipeline path.
+         *
+         * Previously used a 4-tier sharded computation: each rank computed
+         * its V/4 shard using its local device-cache pointer, but the ROCm
+         * Q8 matmul produces different results at different GPU addresses
+         * (same mechanism as issue #37).  The per-shard address-dependent
+         * noise biased the logits, causing systematic NLL degradation.
+         * Using the standard single-tier matmul eliminates the error. */
+        ok = metal_graph_matmul_dense_quant_tensor(metal_graph_logits(g),
+                                                   model,
+                                                   weights->output,
+                                                   DS4_N_EMBD,
+                                                   vocab_dim,
+                                                   metal_graph_output_norm(g),
+                                                   1);
     } else if (ok) {
         ok = metal_graph_matmul_dense_quant_tensor(metal_graph_logits(g),
                                                    model,
@@ -27197,6 +27165,17 @@ static bool metal_graph_encode_token_raw_swa(
                     hc_bytes, NULL);
         }
     }
+    /* Use host-mapped weight pointers during TP=4 decode so all 4 tiers
+     * read weights from the same virtual address, eliminating the ROCm
+     * address-dependent Q8 noise (issue #37).  The batch prefill path
+     * already sets this in metal_graph_encode_layer_batch; the decode
+     * path must also set it because the 4-tier TP=4 loop runs each
+     * layer on all 4 devices, and the weight cache on each device
+     * holds identical data at different VRAM addresses — the Q8 matmul
+     * produces different results at different addresses. */
+    if (ok && g->rocm_tp4) {
+        ds4_gpu_set_use_host_weights(1);
+    }
 
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
         if (g->rocm_tp4) {
@@ -27440,6 +27419,14 @@ static bool metal_graph_encode_token_raw_swa(
 
     if (ok && need_logits) {
         ok = metal_graph_encode_output_head(g, model, weights, weights->output->dim[1]);
+    }
+    /* Reset host-mapped weight override after TP=4 decode so subsequent
+     * pipeline-style evaluations use the standard device-cache resolution.
+     * To avoid leaking the override through the token eval sequence, this
+     * must execute even when need_logits is false (e.g. TP=2 slave rank
+     * without tp_logits_half). */
+    if (g->rocm_tp4) {
+        ds4_gpu_set_use_host_weights(0);
     }
     return ok;
 }
@@ -30449,15 +30436,24 @@ static bool metal_graph_encode_layer_batch(
      * identical for the first 38 layers (issue #37). */
     ds4_gpu_set_use_host_weights(1);
 #ifdef DS4_ROCM_BUILD
-    /* Temporarily clear the Q8→f16 dequant cache VRAM reserve during batch
-     * prefill.  With per-layer eviction the cache never holds more than one
-     * layer's weight entries (~16 MiB for attention output A + B), so the
+    /* Temporarily clear the Q8→f16 dequant cache VRAM reserve during TP=4
+     * batch prefill.  With per-layer eviction the cache never holds more than
+     * one layer's weight entries (~16 MiB for attention output A + B), so the
      * default 4 GiB reserve blocks the allocation unnecessarily on device 0
-     * where only ~0.1 GiB is free in TP=4 mode.  Model-loading prewarm and
-     * non-TP paths keep the default reserve. */
-    if (g->rocm_tp4) {
-        ds4_gpu_set_q8_f16_cache_reserve(0);
-    }
+     * where only ~0.1 GiB is free in TP=4 mode.  The pipeline path keeps the
+     * default reserve and its Q8 shared-expert down-projection — changing this
+     * unconditionally would alter the pipeline's computational graph (f16 vs
+     * Q8), breaking the established reference baseline (avg_nll 0.37). */
+    /* FIX (2026-07-29): Disabled cache reserve clearing for TP=4 to ensure
+     * identical computational graphs.  Previously TP=4 cleared the 4 GiB
+     * reserve and used f16 cuBLAS kernels, while pipeline kept the reserve
+     * and used Q8 kernels.  This caused divergent floating-point accumulation
+     * across 43 layers (TP=4 avg_nll ~1.85 vs pipeline 0.37).  Now both
+     * paths use the same 4 GiB reserve and Q8 kernels for bit-identical
+     * results where possible. */
+    // if (g->rocm_tp4) {
+    //     ds4_gpu_set_q8_f16_cache_reserve(0);
+    // }
 #endif
     bool ok = metal_graph_layer_stage_profile_start(il);
     if (ok) {
@@ -30482,9 +30478,12 @@ static bool metal_graph_encode_layer_batch(
         }
     }
 #ifdef DS4_ROCM_BUILD
-    if (g->rocm_tp4) {
-        ds4_gpu_set_q8_f16_cache_reserve(UINT64_MAX);
-    }
+    /* FIX (2026-07-29): Disabled cache reserve restore to match the
+     * clearing above.  Both the clear and restore are now disabled to
+     * ensure identical computational graphs between TP=4 and pipeline. */
+    // if (g->rocm_tp4) {
+    //     ds4_gpu_set_q8_f16_cache_reserve(UINT64_MAX);
+    // }
 #endif
     ds4_gpu_set_use_host_weights(0);
     if (ok) {
@@ -48758,7 +48757,13 @@ static size_t engine_per_tier_graph_overhead_bytes(const ds4_engine *e) {
     /* === Class P chunked-prefill batch scratch (mirrors allocation above).
      * These are the LARGEST per-tier allocations (e.g. batch_cur_hc =
      * pc * hc_dim * float = ~256 MiB at default prefill_cap=4096). Without
-     * them the pre-subtract is meaningless for any non-trivial ctx. === */
+     * them the pre-subtract is meaningless for any non-trivial ctx.
+     *
+     * Gate behind cuda_tensor_parallel: these allocations are only needed
+     * when TP mode is active. Without TP, only tier 0 is used and these
+     * batch buffers are not allocated, so counting them inflates the
+     * scratch reservation and causes OOM during model loading. === */
+    if (e && e->cuda_tensor_parallel) {
     total += pc * hc_dim * sizeof(float);                  /* batch_cur_hc_by_tier */
     total += pc * hc_dim * sizeof(float);                  /* batch_next_hc_by_tier */
     total += pc * hc_dim * sizeof(float);                  /* batch_flat_hc_by_tier */
@@ -48797,6 +48802,7 @@ static size_t engine_per_tier_graph_overhead_bytes(const ds4_engine *e) {
     total += pc * (uint64_t)DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float);     /* batch_routed_down */
     total += pc * (uint64_t)DS4_N_EMBD * sizeof(float);    /* batch_routed_out_by_tier */
     total += pc * (uint64_t)DS4_N_EMBD * sizeof(float);    /* batch_ffn_out_by_tier */
+    } /* end cuda_tensor_parallel gate */
 
     /* === Class E embedding-tier prefill_tokens (mirrors ds4.c:10844).
      * Charged to ALL tiers conservatively. Negligible (pc * int32). === */
@@ -55745,11 +55751,13 @@ static int engine_compute_entry_bytes(const ds4_engine *e, size_t *out) {
         if (t->bytes == 0) continue;
         int entry = tensor_to_entry(t, DS4_N_LAYER);
         if (entry < 0 || entry >= n_entries) entry = 0;
-        if (cuda_tp_ep && engine_cuda_tp_output_env_requested() &&
+        if (cuda_tp_ep && !rocm_tp4 && engine_cuda_tp_output_env_requested() &&
             t == e->weights.output) {
             /* Output TP stores one vocabulary-row slice per participating
              * tier. Those bytes are reserved per tier after the head tier is
-             * known, rather than charging a full output matrix here. */
+             * known, rather than charging a full output matrix here.
+             * ROCm TP=4 is excluded: its output is sharded bytes/4 in the
+             * rocm_tp4 branch below and validated by tp4 placement. */
             continue;
         }
         /* TP=4 ROCm: per-entry bytes are what one rank holds.  Sharded
@@ -56240,7 +56248,13 @@ static int engine_classify_multi_tier(ds4_engine *e, const ds4_gpu_config *cfg) 
      * runs. The reservation flows into the packer via e->gpu_cfg (NOT
      * the caller's cfg) — see the budget loop below. */
     const size_t per_tier_overhead = engine_per_tier_graph_overhead_bytes(e);
+    fprintf(stderr, "ds4: per_tier_overhead = %.2f GiB (cuda_tensor_parallel=%d)\n",
+            (double)per_tier_overhead / (1024.0 * 1024.0 * 1024.0),
+            e->cuda_tensor_parallel ? 1 : 0);
     for (int d = 0; d < e->gpu_cfg.n_gpus; d++) {
+        fprintf(stderr, "ds4: GPU%d original vram_bytes = %.2f GiB\n",
+                e->gpu_cfg.device_indices[d],
+                (double)e->gpu_cfg.vram_bytes[d] / (1024.0 * 1024.0 * 1024.0));
         if (e->gpu_cfg.vram_bytes[d] <= per_tier_overhead) {
             fprintf(stderr,
                     "ds4: GPU%d budget %.2f GiB <= per-tier graph overhead "
@@ -56252,6 +56266,9 @@ static int engine_classify_multi_tier(ds4_engine *e, const ds4_gpu_config *cfg) 
             return -1;
         }
         e->gpu_cfg.vram_bytes[d] -= per_tier_overhead;
+        fprintf(stderr, "ds4: GPU%d post-overhead vram_bytes = %.2f GiB\n",
+                e->gpu_cfg.device_indices[d],
+                (double)e->gpu_cfg.vram_bytes[d] / (1024.0 * 1024.0 * 1024.0));
     }
 
     size_t entry_bytes[DS4_MAX_LAYER + 2];
@@ -56272,7 +56289,13 @@ static int engine_classify_multi_tier(ds4_engine *e, const ds4_gpu_config *cfg) 
 
     const bool cuda_tp_ep = engine_cuda_tp_ep_requested(e);
     const bool rocm_tp4 = engine_rocm_tp4_requested(e);
-    if (cuda_tp_ep && engine_reserve_cuda_ep_output_shards(e, &pcfg) != 0) {
+    /* Skip CUDA EP output shard reservation for ROCm TP=4: output weights
+     * are already counted at bytes/4 in entry_bytes (see rocm_tp4 branch
+     * in engine_compute_entry_bytes) and validated by tp4 placement.
+     * The EP shard path uses head-tier=n_gpus/2-1 semantics which is
+     * wrong for all-replicated TP=4. */
+    if (cuda_tp_ep && !rocm_tp4 &&
+        engine_reserve_cuda_ep_output_shards(e, &pcfg) != 0) {
         return -1;
     }
     /* Placement selection: TP=4 ROCm uses its own all-replicated placement
