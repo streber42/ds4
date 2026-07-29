@@ -1358,3 +1358,37 @@ VERDICT: Option B — do NOT close at current scores. Reasoning:
 **Consultation outputs:**
 - Consultant panel files: `/home/murphy/.cache/ai-consultants/consultations/20260729_002252_15058885818/`
 - Gemini consultation: run via gemini-consultant skill (2026-07-28, live-pair session)
+
+### Session 2026-07-29 — f16 cuBLAS attention output implemented; quality gap persists at ~1.5 NLL
+
+**Implemented fix:** Instead of the row-split batch prefill refactor (Option B), a much simpler two-part fix was discovered and implemented:
+
+1. **Unconditional `batch_q_half` allocation on ROCm** (`ds4.c:17580-17588`): The f16 attention output buffer was previously gated on `DS4_GPU_ATTN_COMP_CACHE_F16` (always 0 on non-Apple). Allocated unconditionally on ROCm.
+2. **Temporary Q8→f16 cache reserve override** (`ds4.c:30347-30389`): Set the VRAM reserve to 0 during per-layer batch prefill (safe because the f16 cache is evicted per layer). Restored to `UINT64_MAX` after each layer's FFN.
+
+**Why this works instead of the row-split refactor:** The previous assessment estimated 320 MiB per layer for f16 dequant cache — actually only ~16 MiB (2 MiB for attn_output_a + 14 MiB for attn_output_b). The real blocker was: (a) `batch_q_half` never allocated on ROCm, and (b) 4 GiB VRAM reserve blocked even the 16 MiB allocation on device 0 (~100 MiB free).
+
+**Verification:** Built and tested with debug instrumentation. Confirmed that `ds4_gpu_attention_output_q8_batch_f16_tensor` is called (43× per case, once per layer), `g_cublas_ready=1`, `g_quality_mode=0`, `out_h` non-null. All internal steps succeed (f16 cache alloc, kernel launch, cuBLAS GEMM). No cache budget warnings, no `g_q8_f16_disabled_after_oom` activation.
+
+**Quality results despite working f16 path:**
+| Metric | Pipeline ref | TP=4 (this run) | Target |
+|---|---|---|---|
+| avg_nll (case_000) | 0.3747 | 1.5058 | 0.370–0.378 |
+| first_match | 65/100 | 0/100 | ≥60/100 |
+| api_top1_rate | 0.859 | 0.667 | ≥0.85 |
+| api_pair_rate | 0.988 | 0.908 | ≥0.98 |
+
+**Critical finding:** The f16 cuBLAS attention output improvement barely closes the quality gap (~1.72 → ~1.5 NLL, target 0.37). The earlier attribution of the entire gap to "Q8 vs f16 cuBLAS precision" is incorrect. The real quality issue must be elsewhere in the TP=4 batch prefill path.
+
+**Key remaining unknowns:**
+- The per-layer attention and FFN HC expansion path might be missing an all-reduce step. The `tp_row_split_attn` gate (line 29570) only covers TP=2 row-split mode. TP=4 sharded attention output writes to `batch_q_half` directly without all-reduce.
+- The `ds4_tp_shard.h` sharding policy (head sharding, expert sharding, embd column sharding, vocab row sharding) is defined but the actual shard ranges from `ds4_tp_compute_shard_config()` are NOT used by the engine — the functions only appear in test code.
+- Model weights might be partially sharded and partially replicated across GPUs, with the replication masking the absence of all-reduce for some operations.
+
+**Status:** ready-for-human (automated loop could not close the gap despite implementing a working f16 attention output path). The remaining ~1.5 NLL is not an attention output precision issue — deeper investigation of the TP=4 computation graph is needed.
+
+**New action plan (recommended):**
+1. Accept the f16 cuBLAS attention fix (commit `a86750e`) — it's a correct improvement even if insufficient.
+2. Re-diagnose the root cause of the ~1.5 NLL — likely in cross-GPU all-reduce or tensor sharding, not in per-GPU computation precision.
+3. Run layer-by-layer output comparison between single-process (ds4 --rocm) and TP=4 to find the first divergence point.
+4. Once root cause is identified, fix and re-run quality fixture.
