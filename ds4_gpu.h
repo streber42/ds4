@@ -103,6 +103,7 @@ int ds4_gpu_q8_cache_suppressed(void);
 void ds4_gpu_set_q8_cache_suppressed(int suppressed);
 #ifdef DS4_ROCM_BUILD
 void ds4_gpu_release_q8_f16_cache(void);
+void ds4_gpu_set_q8_f16_cache_reserve(uint64_t reserve_bytes);
 #endif
 
 /* Model-file ranges assigned to CUDA devices by the multi-GPU placement

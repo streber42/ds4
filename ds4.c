@@ -17657,6 +17657,16 @@ static bool metal_graph_alloc_raw_cap(
         if (DS4_GPU_ATTN_COMP_CACHE_F16) {
             g->batch_q_half = ds4_gpu_tensor_alloc(pc * q_dim * sizeof(uint16_t));
         }
+#if defined(DS4_ROCM_BUILD)
+        /* ROCm: allocate batch_q_half unconditionally so the attention-output
+         * f16 path (ds4_gpu_attention_output_q8_batch_f16_tensor) and the Q f16
+         * head/rms/rope path can write to it.  The buffer is modest (4-32 MiB
+         * depending on prefill capacity).  On Apple this is covered by the
+         * DS4_GPU_ATTN_COMP_CACHE_F16 guard above. */
+        if (!g->batch_q_half) {
+            g->batch_q_half = ds4_gpu_tensor_alloc(pc * q_dim * sizeof(uint16_t));
+        }
+#endif
         g->prefill_seed_router_selected = ds4_gpu_tensor_alloc(
                 (uint64_t)DS4_N_LAYER * DS4_STREAMING_PREFILL_CACHE_SEED_MAX_TOKENS *
                 DS4_N_EXPERT_USED * sizeof(int32_t));
@@ -30438,6 +30448,17 @@ static bool metal_graph_encode_layer_batch(
      * image pointer (same address in both modes) keeps all tensors bit-
      * identical for the first 38 layers (issue #37). */
     ds4_gpu_set_use_host_weights(1);
+#ifdef DS4_ROCM_BUILD
+    /* Temporarily clear the Q8→f16 dequant cache VRAM reserve during batch
+     * prefill.  With per-layer eviction the cache never holds more than one
+     * layer's weight entries (~16 MiB for attention output A + B), so the
+     * default 4 GiB reserve blocks the allocation unnecessarily on device 0
+     * where only ~0.1 GiB is free in TP=4 mode.  Model-loading prewarm and
+     * non-TP paths keep the default reserve. */
+    if (g->rocm_tp4) {
+        ds4_gpu_set_q8_f16_cache_reserve(0);
+    }
+#endif
     bool ok = metal_graph_layer_stage_profile_start(il);
     if (ok) {
         ok = metal_graph_encode_layer_attention_batch(g, model, layer, il, pos0, n_tokens);
@@ -30460,6 +30481,11 @@ static bool metal_graph_encode_layer_batch(
             fprintf(stderr, "ds4: gpu layer %u ffn batch encode failed\n", il);
         }
     }
+#ifdef DS4_ROCM_BUILD
+    if (g->rocm_tp4) {
+        ds4_gpu_set_q8_f16_cache_reserve(UINT64_MAX);
+    }
+#endif
     ds4_gpu_set_use_host_weights(0);
     if (ok) {
         ds4_gpu_tensor *tmp = metal_graph_batch_cur_hc(g);

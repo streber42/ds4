@@ -294,6 +294,7 @@ static uint64_t g_q8_f16_bytes;
 static int g_q8_f16_disabled_after_oom;
 static int g_q8_f16_disabled_for_multi_model;
 static int g_q8_f16_budget_notice_printed;
+static uint64_t g_q8_f16_reserve_override = UINT64_MAX; /* UINT64_MAX = no override */
 static uint64_t g_model_load_progress_next;
 static double g_model_load_progress_last;
 static int g_model_load_progress_started;
@@ -5091,6 +5092,9 @@ static uint64_t cuda_q8_f16_cache_limit_bytes(void) {
 }
 
 static uint64_t cuda_q8_f16_cache_reserve_bytes(uint64_t total_bytes) {
+    if (g_q8_f16_reserve_override != UINT64_MAX) {
+        return g_q8_f16_reserve_override;
+    }
     const char *env_reserve = getenv("DS4_ROCM_CACHE_RESERVE_MB");
     if (env_reserve && env_reserve[0] != '\0') {
         long long mb = atoll(env_reserve);
@@ -6680,6 +6684,18 @@ extern "C" void ds4_gpu_release_q8_f16_cache(void) {
     cuda_q8_f16_cache_release_all();
     g_q8_f16_disabled_after_oom = 0;
     g_q8_f16_budget_notice_printed = 0;
+}
+
+/* Override the Q8→f16 cache VRAM reserve.  A reserve of UINT64_MAX (the
+ * default) means "use the default logic" (4 GiB / 5 %).  Pass 0 to clear
+ * the reserve entirely (safe when the cache is evicted per layer so at most
+ * one layer's ~16 MiB entries are live at once).  The override is a single
+ * global value (not per-device) — intended for the ROCm TP=4 batch prefill
+ * path where the cache is evicted per layer so the reserve is needlessly
+ * conservative and blocks the attention-output dequant allocation.
+ * Model-loading prewarm and non-TP paths continue to use the default reserve. */
+extern "C" void ds4_gpu_set_q8_f16_cache_reserve(uint64_t reserve_bytes) {
+    g_q8_f16_reserve_override = reserve_bytes;
 }
 
 extern "C" void ds4_gpu_print_memory_report(const char *label) {
