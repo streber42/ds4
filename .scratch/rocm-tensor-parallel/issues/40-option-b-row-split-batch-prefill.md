@@ -125,6 +125,20 @@ Estimated ~800–1200 lines of changes in `ds4.c`:
 - Memory accounting fixes from session 2026-07-29 (Fix 3a/b, uncommitted
   on `gfx1201_tp`) — must be committed first so the fixture can run.
 
+## Follow-up Issues
+
+The Option B row-split implementation runs cleanly but does not close the
+quality gap. The root cause appears deeper — see sibling issues:
+
+- [Issue #41 — Host-mapped MoE weight numerical impact](41-host-mapped-moe-weight-precision.md)
+  Investigate whether `ds4_gpu_routed_moe_batch_tensor` with host-mapped
+  (uncached) MoE weights produces numerically different outputs from
+  fully-cached weights.
+- [Issue #42 — Free VRAM budget for TP=4](42-tp4-vram-budget.md)
+  The `moe_gate` 1024 MiB allocation fails due to VRAM pressure
+  (27.79 GiB budget, 25.94 GiB weights). Reducing per-tier overhead
+  may eliminate the host-mapped fallback.
+
 ## Comments
 
 **Status: ready-for-human (2026-07-31)**
