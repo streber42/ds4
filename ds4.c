@@ -27973,15 +27973,19 @@ static bool metal_graph_encode_layer_attention_batch(
     const bool tp_attn_indexed = zero_prefix && ratio == 4 &&
         tp_attn_n_comp > DS4_N_INDEXER_TOP_K;
     const bool tp_row_split_attn =
-        g->tp_world == 2 &&
+        (g->tp_world == 2 || g->rocm_tp4) &&
         g->tp_batch_rows != n_tokens &&
         (tp_attn_full_raw || tp_attn_static_mixed || tp_attn_indexed) &&
         !metal_graph_directional_steering_attn_enabled(g) &&
         n_tokens >= metal_graph_tp_prefill_split_min();
-    const uint32_t tp_half_rows = (n_tokens + 1u) / 2u;
-    const uint32_t tp_row0 = (tp_row_split_attn && g->tp_rank != 0) ? tp_half_rows : 0;
+    const uint32_t tp_chunk_rows = tp_row_split_attn ?
+        ((g->tp_world == 2) ? (n_tokens + 1u) / 2u :
+         (g->tp_world == 4) ? (n_tokens + 3u) / 4u : n_tokens) :
+        n_tokens;
+    const uint32_t tp_half_rows = (n_tokens + 1u) / 2u; /* TP=2 only */
+    const uint32_t tp_row0 = tp_row_split_attn ? g->tp_rank * tp_chunk_rows : 0;
     const uint32_t tp_rows = tp_row_split_attn ?
-        (g->tp_rank == 0 ? tp_half_rows : n_tokens - tp_half_rows) : n_tokens;
+        (g->tp_rank == g->tp_world - 1 ? n_tokens - tp_row0 : tp_chunk_rows) : n_tokens;
     const bool index_stage_profile =
         glm_graph_env_present("DS4_ROCM_INDEXER_STAGE_PROFILE",
                               "DS4_METAL_INDEXER_STAGE_PROFILE");
@@ -28032,6 +28036,18 @@ static bool metal_graph_encode_layer_attention_batch(
         }
     }
     const bool qkv_rms_fused = !metal_graph_use_reference_qkv_norm();
+    /* In row-split mode (tp_row_split_attn) each tier processes a row slice of
+     * the batch.  The HC pre (RMS norm / sinkhorn / weighted sum) is computed
+     * on ALL n_tokens rows (redundant across tiers but cheap), because the
+     * HC pre functions use n_tokens as the row count and cannot operate on
+     * sliced output views without overflow.  Only Q_b, attention core, and
+     * output projection run on the row slice via tp_q / tp_attn_out below.
+     * The tier's rows appear at the correct position because attn_cur_view
+     * and after_attn_hc_view are row-sliced — but the OUTPUT from the RMS
+     * norm and HC expand for rows outside this tier's range is stale/garbage.
+     * This garbage is corrected by the outer all-gather (see
+     * metal_graph_encode_layer_batch), which copies only the valid rows
+     * from each tier to all others. */
     ds4_gpu_tensor *hc_mix_view = ds4_gpu_tensor_view(
             metal_graph_batch_hc_mix(g), 0, (uint64_t)n_tokens * mix_hc * sizeof(float));
     ds4_gpu_tensor *hc_split_view = ds4_gpu_tensor_view(
@@ -29650,9 +29666,12 @@ static bool metal_graph_encode_layer_attention_batch(
         }
     }
     DS4_METAL_PROFILE_ATTN_STAGE("output_proj");
-    if (ok && tp_row_split_attn) {
+    if (ok && tp_row_split_attn && !g->rocm_tp4) {
         /* Release point for the pipelined row swaps of batch_attn_out: both
-         * ranks reach the HC post expand with identical full tensors. */
+         * ranks reach the HC post expand with identical full tensors.
+         * ROCm TP=4 skips this TP=2-specific exchange; the outer all-gather
+         * in metal_graph_encode_layer_batch handles row collection across
+         * all 4 tiers. */
         if (tp_attn_pipeline) {
             ok = tp_attn_gate_seq != 0 &&
                  ds4_gpu_tp_big_gate_wait(tp_attn_gate_seq) != 0;
@@ -29746,7 +29765,7 @@ static bool metal_graph_encode_layer_ffn_batch(
     const uint64_t mix_hc = 2ull * DS4_N_HC + (uint64_t)DS4_N_HC * DS4_N_HC;
     const uint64_t shared_dim = layer->ffn_gate_shexp->dim[1];
     const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
-    const uint64_t expert_mid_dim = layer->ffn_gate_exps->dim[1];
+    const uint64_t expert_mid_dim DS4_MAYBE_UNUSED = layer->ffn_gate_exps->dim[1];
     const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
@@ -30036,15 +30055,19 @@ static bool metal_graph_encode_layer_ffn_batch(
      * against its local expert half.  For large chunks the replicated shared
      * expert remains row-split; its rows are folded into the local routed
      * partial before the one all-reduce-style bulk exchange. */
-    const bool tp_split_ffn = g->tp_world == 2;
+    const bool tp_split_ffn = g->tp_world == 2 || g->rocm_tp4;
     const bool tp_row_split_ffn =
         tp_split_ffn && g->tp_batch_rows != n_tokens && !keep_ffn_out &&
         !metal_graph_directional_steering_ffn_enabled(g) &&
         n_tokens >= metal_graph_tp_prefill_split_min();
-    const uint32_t tp_half_rows = (n_tokens + 1u) / 2u;
-    const uint32_t tp_row0 = (tp_row_split_ffn && g->tp_rank != 0) ? tp_half_rows : 0;
+    const uint32_t tp_chunk_rows = tp_row_split_ffn ?
+        ((g->tp_world == 2) ? (n_tokens + 1u) / 2u :
+         (g->tp_world == 4 || g->rocm_tp4) ? (n_tokens + 3u) / 4u : n_tokens) :
+        n_tokens;
+    const uint32_t tp_half_rows DS4_MAYBE_UNUSED = (n_tokens + 1u) / 2u; /* TP=2 only */
+    const uint32_t tp_row0 = tp_row_split_ffn ? g->tp_rank * tp_chunk_rows : 0;
     const uint32_t tp_rows = tp_row_split_ffn ?
-        (g->tp_rank == 0 ? tp_half_rows : n_tokens - tp_half_rows) : n_tokens;
+        (g->tp_rank == g->tp_world - 1 ? n_tokens - tp_row0 : tp_chunk_rows) : n_tokens;
     ds4_gpu_tensor *tp_ffn_x = tp_row_split_ffn ?
         metal_graph_tensor_row_range_view(metal_graph_batch_ffn_norm(g), tp_row0, tp_rows,
                                           DS4_N_EMBD) : NULL;
@@ -30195,47 +30218,107 @@ static bool metal_graph_encode_layer_ffn_batch(
                                     (uint32_t)((uint64_t)n_tokens * DS4_N_EMBD)) != 0;
         }
     } else if (ok && g->rocm_tp4) {
-        /* ROCm TP=4 batch prefill MoE: run the full 256-expert MoE on
-         * the home tier using ds4_gpu_routed_moe_batch_tensor (same kernel
-         * as the non-TP path).  Even though only 64 of the 256 expert
-         * weights are cached locally, the kernel's weight resolution falls
-         * back to host-mapped memory for non-cached experts (via
-         * cuda_model_range_ptr_from_fd), producing bit-identical results
-         * to the non-TP path.
+        /* ROCm TP=4 batch prefill MoE.
          *
-         * Previously this path used ds4_gpu_routed_moe_batch_owned_tensor
-         * (4-tier owned experts + all-reduce), but the all-reduce
-         * introduces floating-point accumulation noise vs the full-expert
-         * kernel.  While this noise is tiny per layer (~1e-7), it compounds
-         * exponentially across 43 layers, causing avg_nll to diverge by
-         * ~460% from the pipeline reference.  The host-mapped fallback is
-         * correct and proven by TP=2's existing use of the same approach. */
-        ok = ds4_gpu_routed_moe_batch_tensor(metal_graph_batch_routed_out(g),
-                                               metal_graph_batch_routed_gate(g),
-                                               metal_graph_batch_routed_up(g),
-                                               metal_graph_batch_routed_mid(g),
-                                               metal_graph_batch_routed_down(g),
-                                               model->map, model->size,
-                                               layer->ffn_gate_exps->abs_offset,
-                                               layer->ffn_up_exps->abs_offset,
-                                               layer->ffn_down_exps->abs_offset,
-                                               layer->ffn_gate_exps->type,
-                                               layer->ffn_down_exps->type,
-                                               gate_expert_bytes, gate_row_bytes,
-                                               down_expert_bytes, down_row_bytes,
-                                               (uint32_t)expert_in_dim,
-                                               (uint32_t)down_in_dim,
-                                               (uint32_t)routed_out_dim,
-                                               metal_graph_batch_router_selected(g),
-                                               metal_graph_batch_router_weights(g),
-                                               DS4_N_EXPERT,
-                                               DS4_N_EXPERT_USED,
-                                               DS4_SWIGLU_CLAMP_EXP,
-                                               metal_graph_batch_ffn_norm(g),
-                                               il,
-                                               n_tokens,
-                                               &g->batch_routed_mid_is_f16,
-                                               false) != 0;
+         * Non-row-split (existing): run the full 256-expert MoE on all
+         * n_tokens rows on the home tier via ds4_gpu_routed_moe_batch_tensor.
+         * Even though only 64 of the 256 expert weights are cached locally,
+         * the kernel's weight resolution falls back to host-mapped memory
+         * for non-cached experts (via cuda_model_range_ptr_from_fd),
+         * producing bit-identical results to the non-TP path.
+         *
+         * Row-split (tp_row_split_ffn): each tier processes tp_rows rows
+         * with full 256-expert access via host-mapped fallback.  The row
+         * slice is independent per tier; after all tiers complete, an
+         * all-gather assembles the full row range.  No all-reduce needed
+         * (which introduced FP accumulation noise in the previous 4-tier
+         * owned-expert approach). */
+        const uint32_t moe_rows = tp_row_split_ffn ? tp_rows : n_tokens;
+        ds4_gpu_tensor *moe_out      = NULL;
+        ds4_gpu_tensor *moe_gate     = NULL;
+        ds4_gpu_tensor *moe_up       = NULL;
+        ds4_gpu_tensor *moe_mid      = NULL;
+        ds4_gpu_tensor *moe_down     = NULL;
+        ds4_gpu_tensor *moe_sel      = NULL;
+        ds4_gpu_tensor *moe_wgt      = NULL;
+        ds4_gpu_tensor *moe_ffn_in   = NULL;
+        if (tp_row_split_ffn) {
+            const uint64_t gate_stride = (uint64_t)DS4_N_EXPERT_USED *
+                                         (uint64_t)expert_in_dim;
+            const uint64_t mid_stride  = (uint64_t)DS4_N_EXPERT_USED *
+                                         (uint64_t)down_in_dim;
+            const uint64_t down_stride = (uint64_t)DS4_N_EXPERT_USED *
+                                         (uint64_t)routed_out_dim;
+            const uint64_t sel_stride  = (uint64_t)DS4_N_EXPERT_USED;
+            const uint64_t row_off     = (uint64_t)tp_row0;
+            moe_out = metal_graph_tensor_row_range_view(
+                metal_graph_batch_routed_out(g), tp_row0, tp_rows, DS4_N_EMBD);
+            moe_gate = ds4_gpu_tensor_view(
+                metal_graph_batch_routed_gate(g),
+                row_off * gate_stride * sizeof(float),
+                (uint64_t)tp_rows * gate_stride * sizeof(float));
+            moe_up = ds4_gpu_tensor_view(
+                metal_graph_batch_routed_up(g),
+                row_off * gate_stride * sizeof(float),
+                (uint64_t)tp_rows * gate_stride * sizeof(float));
+            moe_mid = ds4_gpu_tensor_view(
+                metal_graph_batch_routed_mid(g),
+                row_off * mid_stride * sizeof(float),
+                (uint64_t)tp_rows * mid_stride * sizeof(float));
+            moe_down = ds4_gpu_tensor_view(
+                metal_graph_batch_routed_down(g),
+                row_off * down_stride * sizeof(float),
+                (uint64_t)tp_rows * down_stride * sizeof(float));
+            moe_sel = ds4_gpu_tensor_view(
+                metal_graph_batch_router_selected(g),
+                row_off * sel_stride * sizeof(int32_t),
+                (uint64_t)tp_rows * sel_stride * sizeof(int32_t));
+            moe_wgt = ds4_gpu_tensor_view(
+                metal_graph_batch_router_weights(g),
+                row_off * sel_stride * sizeof(float),
+                (uint64_t)tp_rows * sel_stride * sizeof(float));
+            moe_ffn_in = tp_ffn_x;
+            if (!moe_out || !moe_gate || !moe_up || !moe_mid ||
+                !moe_down || !moe_sel || !moe_wgt || !moe_ffn_in) {
+                ok = false;
+            }
+        }
+        if (ok) {
+            ok = ds4_gpu_routed_moe_batch_tensor(
+                    moe_out  ? moe_out  : metal_graph_batch_routed_out(g),
+                    moe_gate ? moe_gate : metal_graph_batch_routed_gate(g),
+                    moe_up   ? moe_up   : metal_graph_batch_routed_up(g),
+                    moe_mid  ? moe_mid  : metal_graph_batch_routed_mid(g),
+                    moe_down ? moe_down : metal_graph_batch_routed_down(g),
+                    model->map, model->size,
+                    layer->ffn_gate_exps->abs_offset,
+                    layer->ffn_up_exps->abs_offset,
+                    layer->ffn_down_exps->abs_offset,
+                    layer->ffn_gate_exps->type,
+                    layer->ffn_down_exps->type,
+                    gate_expert_bytes, gate_row_bytes,
+                    down_expert_bytes, down_row_bytes,
+                    (uint32_t)expert_in_dim,
+                    (uint32_t)down_in_dim,
+                    (uint32_t)routed_out_dim,
+                    moe_sel ? moe_sel : metal_graph_batch_router_selected(g),
+                    moe_wgt ? moe_wgt : metal_graph_batch_router_weights(g),
+                    DS4_N_EXPERT, DS4_N_EXPERT_USED,
+                    DS4_SWIGLU_CLAMP_EXP,
+                    moe_ffn_in ? moe_ffn_in : metal_graph_batch_ffn_norm(g),
+                    il, moe_rows,
+                    &g->batch_routed_mid_is_f16, false) != 0;
+        }
+        if (tp_row_split_ffn) {
+            ds4_gpu_tensor_free(moe_out);
+            ds4_gpu_tensor_free(moe_gate);
+            ds4_gpu_tensor_free(moe_up);
+            ds4_gpu_tensor_free(moe_mid);
+            ds4_gpu_tensor_free(moe_down);
+            ds4_gpu_tensor_free(moe_sel);
+            ds4_gpu_tensor_free(moe_wgt);
+            /* moe_ffn_in = tp_ffn_x is freed at the function epilogue. */
+        }
     } else if (ok) {
         ok = ds4_gpu_routed_moe_batch_tensor(metal_graph_batch_routed_out(g),
                                                metal_graph_batch_routed_gate(g),
@@ -30315,10 +30398,13 @@ static bool metal_graph_encode_layer_ffn_batch(
         ds4_gpu_tensor_free(own_rows);
     }
 
-    if (ok && tp_split_ffn && !tp_split_batch_moe) {
+    if (ok && tp_split_ffn && !tp_split_batch_moe && !g->rocm_tp4) {
         /* All rows contain this rank's routed-expert partial.  Exchange that
          * matrix in one bulk gate, then add in canonical rank order.  The
-         * batch verify path above already performed the equivalent slab gate. */
+         * batch verify path above already performed the equivalent slab gate.
+         * ROCm TP=4 skips this all-reduce: the MoE path above produces the
+         * full 256-expert result (host-mapped), and the outer all-gather
+         * combines row slices across all 4 tiers. */
         const uint64_t bytes =
             (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float);
         ok = metal_graph_ensure_batch_ffn_out(g) &&
@@ -30403,6 +30489,70 @@ static bool metal_graph_encode_layer_ffn_batch(
     return ok;
 }
 
+#ifdef DS4_ROCM_BUILD
+/* ROCm TP=4 all-gather for batch prefill hidden-state rows.
+ *
+ * After each tier has computed its row slice of the post-FFN hidden state
+ * (stored in batch_next_hc_by_tier[tier]), this function copies the valid
+ * rows from each source tier to the other 3 destination tiers so that every
+ * tier holds the complete n_tokens × DS4_N_HC × DS4_N_EMBD result.
+ *
+ * The copy is a deterministic overwrite (not accumulate), so it introduces
+ * no floating-point noise — unlike the all-reduce used in the earlier
+ * sharded-head/expert approach.  The all-gather logic:
+ *   for each source tier s (0..3):
+ *       rows[s*chunk : (s+1)*chunk] are valid on device s
+ *       copy those rows to the same offset on every other device
+ *   after all copies, all 4 devices have identical, complete hidden state
+ *
+ * The mesh must have been initialised and peer access established before
+ * calling this function (ds4_rocm_xdev_init_global_mesh must have succeeded).
+ *
+ * Returns true on success, false on any copy failure. */
+static bool ds4_rocm_tp4_allgather_batch_hc(
+        ds4_gpu_graph        *g,
+        ds4_rocm_xdev_mesh   *mesh,
+        uint32_t              n_tokens) {
+    if (!g || !mesh || n_tokens == 0) return false;
+    bool ok = true;
+
+    /* Compute row partition.  Last tier gets the remainder. */
+    const uint32_t chunk = (n_tokens + 3u) / 4u;
+    const uint64_t row_bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
+
+    for (int src = 0; src < 4 && ok; src++) {
+        const uint32_t src_row0 = (uint32_t)src * chunk;
+        const uint32_t src_rows = (src == 3) ? n_tokens - src_row0 : chunk;
+        const uint64_t src_bytes = (uint64_t)src_rows * row_bytes;
+        if (src_bytes == 0) continue;
+
+        /* Source pointer: tier src's batch_next_hc at the tier's row offset.
+         * The tensor was allocated on device src, so its ptr is valid there. */
+        const float *src_base = (const float *)g->batch_next_hc_by_tier[src]->ptr;
+        const float *src_ptr  = src_base + (uint64_t)src_row0 *
+                                (uint64_t)DS4_N_HC * DS4_N_EMBD;
+
+        for (int dst = 0; dst < 4 && ok; dst++) {
+            if (dst == src) continue;
+
+            float *dst_base = (float *)g->batch_next_hc_by_tier[dst]->ptr;
+            float *dst_ptr  = dst_base + (uint64_t)src_row0 *
+                             (uint64_t)DS4_N_HC * DS4_N_EMBD;
+
+            ok = ds4_rocm_xdev_copy(mesh, dst, dst_ptr,
+                                     src, (const void *)src_ptr,
+                                     src_bytes, NULL) != 0;
+            if (!ok) {
+                fprintf(stderr, "ds4: TP=4 all-gather src=%d dst=%d "
+                        "failed (bytes=%zu)\n",
+                        src, dst, (size_t)src_bytes);
+            }
+        }
+    }
+    return ok;
+}
+#endif /* DS4_ROCM_BUILD */
+
 /* Encode one complete layer for prefill by chaining attention and FFN batches. */
 static bool metal_graph_encode_layer_batch(
         ds4_gpu_graph  *g,
@@ -30454,6 +30604,110 @@ static bool metal_graph_encode_layer_batch(
     // if (g->rocm_tp4) {
     //     ds4_gpu_set_q8_f16_cache_reserve(0);
     // }
+#endif
+#ifdef DS4_ROCM_BUILD
+    if (g->rocm_tp4 && n_tokens > 1 &&
+        n_tokens >= metal_graph_tp_prefill_split_min()) {
+        /* TP=4 row-split batch prefill.
+         *
+         * Iterate over all 4 tiers per layer.  Each tier processes
+         * n_tokens/4 rows with full replicated attention and FFN weights
+         * (no head/expert sharding), leveraging the tp_row_split_attn and
+         * tp_row_split_ffn mechanisms that slice the Q_b / attention core
+         * / MoE tensors to tp_rows rows.  The HC pre/post (RMS norm,
+         * sinkhorn, weighted sum) runs on all n_tokens rows redundantly
+         * on each tier — the HC expand functions use n_tokens as the row
+         * count and cannot operate on sliced output views.  Non-owned
+         * rows in each tier's output buffer contain stale/garbage data.
+         *
+         * After all 4 tiers have completed, an all-gather copies each
+         * tier's valid row slice to the other 3 tiers, replacing the
+         * garbage rows with the correct values.  The all-gather is a
+         * deterministic copy — not an accumulate — so it introduces no
+         * floating-point noise (unlike the all-reduce in the previous
+         * sharded-head/expert approach that caused the ~1.85 avg_nll
+         * divergence from the pipeline reference). */
+        const uint32_t saved_tp_batch_rows  = g->tp_batch_rows;
+        const uint32_t saved_tp_rank        = g->tp_rank;
+        bool tp4_ok = true;
+
+        /* Set tp_batch_rows to a value != n_tokens so the attention and
+         * FFN functions activate their tp_row_split_* paths. */
+        g->tp_batch_rows = 0;
+
+        for (int tier = 0; tier < 4 && tp4_ok; tier++) {
+            if (!metal_graph_set_active_tier_batch(g, tier, n_tokens)) {
+                tp4_ok = false; break;
+            }
+            g->tp_rank = (uint32_t)tier;
+
+            tp4_ok = metal_graph_encode_layer_attention_batch(
+                         g, model, layer, il, pos0, n_tokens);
+            if (!tp4_ok) {
+                fprintf(stderr, "ds4: gpu layer %u attention batch encode "
+                        "failed on tier %d\n", il, tier);
+                break;
+            }
+
+            tp4_ok = metal_graph_encode_layer_ffn_batch(
+                         g, model, layer, il, pos0, n_tokens, NULL, 0);
+            if (!tp4_ok) {
+                fprintf(stderr, "ds4: gpu layer %u ffn batch encode "
+                        "failed on tier %d\n", il, tier);
+                break;
+            }
+        }
+
+        g->tp_batch_rows = saved_tp_batch_rows;
+        g->tp_rank       = saved_tp_rank;
+
+        /* Barrier: all 4 tiers must finish compute before the all-gather
+         * reads peer memory. */
+        if (tp4_ok) {
+            const int devs[4] = {0, 1, 2, 3};
+            tp4_ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+        }
+
+        /* All-gather: copy each tier's valid row slice to the other
+         * 3 tiers so that every tier holds the complete hidden state. */
+        if (tp4_ok) {
+            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+            tp4_ok = ds4_rocm_tp4_allgather_batch_hc(g, mesh, n_tokens);
+        }
+
+        /* Update HC pointers for tier 0 (the home tier).  The all-gather
+         * populated all 4 tiers' batch_next_hc; only the home tier's
+         * cur/next pointers matter for the outer prefill loop. */
+        if (tp4_ok) {
+            if (!metal_graph_set_active_tier_batch(g, 0, n_tokens)) {
+                tp4_ok = false;
+            } else {
+                ds4_gpu_tensor *tmp = metal_graph_batch_cur_hc(g);
+                g->batch_cur_hc_by_tier[0] = metal_graph_batch_next_hc(g);
+                g->batch_next_hc_by_tier[0] = tmp;
+            }
+        }
+
+        ds4_gpu_set_use_host_weights(0);
+
+        /* Ensure the active tier matches the placement for the caller. */
+        if (tp4_ok && g->placement) {
+            tp4_ok = metal_graph_set_active_tier_batch(
+                         g, g->placement[1], n_tokens);
+        }
+
+        if (getenv("DS4_DEBUG_TP_OUTPUT") && tp4_ok) {
+            char lbl[96];
+            const uint64_t hc_dim2 = (uint64_t)DS4_N_HC * DS4_N_EMBD;
+            snprintf(lbl, sizeof(lbl),
+                     "il=%u PREFILL TP4 allgathered tier=%d n_tokens=%u",
+                     il, g->active_tier, n_tokens);
+            ds4_debug_tp_output_stat_f32(lbl, metal_graph_batch_cur_hc(g),
+                                         (uint64_t)n_tokens * hc_dim2);
+        }
+
+        return tp4_ok;
+    }
 #endif
     bool ok = metal_graph_layer_stage_profile_start(il);
     if (ok) {
