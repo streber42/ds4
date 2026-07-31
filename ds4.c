@@ -22104,16 +22104,17 @@ static bool metal_graph_encode_decode_layer_phase(
     const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
-    /* Per-expert byte size from the tensor's actual GGUF size rather than
-     * from dims * row_bytes, because quantization block padding can cause
-     * a slight discrepancy that defeats the strict cache comparison in
-     * cuda_model_range_ptr (the MoE dispatch needs gate_bytes to exactly
-     * match the per-tier shard size installed by engine_install_per_device_
-     * caches, which uses t->bytes/4).  Using bytes / DS4_N_EXPERT guarantees
-     * that 64 * gate_expert_bytes == t->bytes / 4 == the cache shard size. */
-    const uint64_t gate_expert_bytes = layer->ffn_gate_exps->bytes / DS4_N_EXPERT;
+    /* Per-expert byte size for MoE dispatch.
+     * In ROCm TP=4 mode, t->bytes is sharded (holds 64 experts), so dividing
+     * by 64 gives the per-expert shard size. In non-TP pipeline mode, t->bytes
+     * holds all 256 experts, so use expert_mid_dim * gate_row_bytes. */
+    const uint64_t gate_expert_bytes = g->rocm_tp4
+        ? layer->ffn_gate_exps->bytes / (DS4_N_EXPERT / 4u)
+        : expert_mid_dim * gate_row_bytes;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
-    const uint64_t down_expert_bytes = layer->ffn_down_exps->bytes / DS4_N_EXPERT;
+    const uint64_t down_expert_bytes = g->rocm_tp4
+        ? layer->ffn_down_exps->bytes / (DS4_N_EXPERT / 4u)
+        : routed_out_dim * down_row_bytes;
     const bool compressed = ds4_layer_compress_ratio(il) != 0;
     const float freq_base = layer_rope_freq_base(il);
     const float freq_scale = layer_rope_freq_scale(il);
@@ -29769,16 +29770,17 @@ static bool metal_graph_encode_layer_ffn_batch(
     const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
-    /* Compute per-expert byte size from the tensor's actual GGUF size rather
-     * than from dims * row_bytes, because GGUF quantization block padding can
-     * cause a slight discrepancy that defeats the strict cache comparison in
-     * cuda_resolve_weight_ptr (the MoE dispatch's gate_bytes must exactly
-     * match the per-tier shard size installed by engine_install_per_device_
-     * caches, which uses t->bytes/4).  Using bytes / DS4_N_EXPERT guarantees
-     * that 64 * gate_expert_bytes == t->bytes / 4 == the cache shard size. */
-    const uint64_t gate_expert_bytes = layer->ffn_gate_exps->bytes / DS4_N_EXPERT;
+    /* Per-expert byte size for MoE dispatch.
+     * In ROCm TP=4 mode, t->bytes is sharded (holds 64 experts), so dividing
+     * by 64 gives the per-expert shard size. In non-TP pipeline mode, t->bytes
+     * holds all 256 experts, so use expert_mid_dim * gate_row_bytes. */
+    const uint64_t gate_expert_bytes = g->rocm_tp4
+        ? layer->ffn_gate_exps->bytes / (DS4_N_EXPERT / 4u)
+        : expert_mid_dim * gate_row_bytes;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
-    const uint64_t down_expert_bytes = layer->ffn_down_exps->bytes / DS4_N_EXPERT;
+    const uint64_t down_expert_bytes = g->rocm_tp4
+        ? layer->ffn_down_exps->bytes / (DS4_N_EXPERT / 4u)
+        : routed_out_dim * down_row_bytes;
     const bool layer_stage_profile = metal_graph_layer_stage_profile_enabled(il);
     double layer_stage_t0 = layer_stage_profile ? now_sec() : 0.0;
 #define DS4_METAL_PROFILE_FFN_STAGE(name) do { \

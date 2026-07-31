@@ -6150,7 +6150,7 @@ extern "C" void ds4_rocm_activate_tier_blas(int tier) {
         }
     }
     g_hipblaslt = g_hipblaslt_by_tier[tier];
-    g_hipblaslt_ready = g_hipblaslt_ready_by_tier[tier];
+    g_hipblaslt_ready = getenv("DS4_ROCM_DISABLE_HIPBLASLT") ? 0 : g_hipblaslt_ready_by_tier[tier];
 #endif
     g_blas_active_tier = tier;
 }
