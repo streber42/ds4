@@ -134,13 +134,15 @@ Estimated ~800–1200 lines of changes in `ds4.c`:
 - [Issue #42 — Free VRAM budget for TP=4](42-tp4-vram-budget.md)
   (ready-for-agent) — now scoped to include the fix for the mechanism #41
   identified, not just "reduce overhead until moe_gate fits."
-- [Issue #43 — Pipeline VRAM-accounting regression](43-pipeline-vram-accounting-regression.md)
+- [Issue #43 — Pipeline reference baseline not reproducible](43-pipeline-vram-accounting-regression.md)
   (ready-for-agent, new) — **the pipeline reference baseline this issue's
-  target scores are measured against is currently stale.** Re-running it
-  on today's tree gives avg_nll ≈ 1.56, not 0.375 — pipeline mode now hits
-  the same fallback #41 describes, due to a VRAM-accounting regression in
-  commit `414f9fc`. #40's quality gate cannot be meaningfully evaluated
-  until #43 restores a reproducible pipeline baseline.
+  target scores are measured against is currently not reproducible.**
+  Re-running it on today's tree gives avg_nll ≈ 1.56, not 0.375 — pipeline
+  mode now hits the same fallback #41 describes. The regression predates
+  commit `414f9fc` (bisected and disproven — see #43's Comments/Root
+  cause; an earlier attribution to that commit was tested and retracted),
+  so the exact culprit commit is still unknown. #40's quality gate cannot
+  be meaningfully evaluated until #43 finds and fixes it.
 
 The row-split refactor itself (this issue's "What to build") is complete
 and merged. This issue stays open because its acceptance criteria include
@@ -168,10 +170,12 @@ reads for the remainder of the run. See sibling issues:
   won't fix the underlying issue — see #41: the real waste is
   `ds4_gpu_set_use_host_weights` re-fetching weights that are already
   cached, not merely "not enough budget for moe_gate."
-- [Issue #43 — Pipeline VRAM-accounting regression](43-pipeline-vram-accounting-regression.md)
+- [Issue #43 — Pipeline reference baseline not reproducible](43-pipeline-vram-accounting-regression.md)
   New. The pipeline reference baseline (avg_nll=0.374733) is not
-  currently reproducible; a `414f9fc` accounting change starves pipeline
-  mode of the same headroom TP=4 lacks.
+  currently reproducible — confirmed broken (avg_nll≈1.56) as far back as
+  commit `4b40c5d` (2026-07-27), predating `414f9fc`. Needs a proper
+  bisect; a `414f9fc` accounting mismatch is real but was tested and does
+  not explain the regression by itself.
 
 ## Comments
 

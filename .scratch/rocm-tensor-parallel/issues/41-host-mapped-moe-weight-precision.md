@@ -136,24 +136,27 @@ No further per-kernel numeric equivalence test is needed; the existing
 #### Unexpected discovery: pipeline mode is currently affected too
 
 The historical pipeline reference (`q_pipeline_ref_tp4issue32.tsv`,
-avg_nll=0.374733, captured 2026-07-29 07:37) is **stale**. Re-running the
-same 5 cases on today's tree in pipeline mode (no `--cuda-tensor-parallel`)
-gives avg_nll=1.563 — indistinguishable from TP=4's 1.558, with the same
-arena-exhaustion signature. Bisecting by comment/diff inspection: commit
-`414f9fc` ("unblock TP=4 quality fixture with memory accounting fixes",
-2026-07-29 16:21, after the reference was captured) gated the batch-scratch
-line items in `engine_per_tier_graph_overhead_bytes` behind
-`e->cuda_tensor_parallel` — intended to stop pipeline mode over-reserving
-scratch it doesn't need. But `metal_graph_alloc_raw_cap` still
-unconditionally allocates those same `batch_*_by_tier` buffers for every
-`used_tier` regardless of TP mode (ds4.c:17540 loop has no TP gate). So
-pipeline mode's weight packer now believes it has more free VRAM than it
-does, packs the primary selective cache closer to the limit, and leaves
-no headroom for the (already-wasteful) arena mechanism described above —
-the same failure mode TP=4 has, now also on the pipeline path. Filed as
-[issue #43](43-pipeline-vram-accounting-regression.md) since it's a
-distinct, fixable accounting bug rather than part of this investigation's
-scope.
+avg_nll=0.374733) is **not reproducible on the current tree**.
+Re-running the same 5 cases on today's tree in pipeline mode (no
+`--cuda-tensor-parallel`) gives avg_nll=1.563 — indistinguishable from
+TP=4's 1.558, with the same arena-exhaustion signature.
+
+An initial hypothesis (by diff inspection only) blamed commit `414f9fc`
+("unblock TP=4 quality fixture with memory accounting fixes"), which
+gates the batch-scratch line items in `engine_per_tier_graph_overhead_bytes`
+behind `e->cuda_tensor_parallel` while `metal_graph_alloc_raw_cap` still
+allocates those same `batch_*_by_tier` buffers unconditionally — a real
+budget/allocation mismatch. **This was then tested directly (two
+`git worktree` checkouts, rebuilt and run on hardware) and disproven**:
+the same avg_nll≈1.56 pipeline score is already present at `414f9fc`'s
+parent commit and at `4b40c5d` (2026-07-27, two days and ~30 commits
+earlier) — a commit whose own issue-file note claims the pipeline path
+was healthy (0.3747) *that same day*. The `414f9fc` mismatch is real but
+does not explain this regression; the actual introduction point is
+unbisected. Filed as
+[issue #43](43-pipeline-vram-accounting-regression.md) as a distinct
+problem outside this investigation's scope — see that issue for the full
+bisection data and next steps.
 
 #### Scope note
 

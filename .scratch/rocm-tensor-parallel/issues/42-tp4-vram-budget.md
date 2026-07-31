@@ -34,11 +34,27 @@ cache *before* falling through to the arena (i.e., don't set
 the redundant allocation at the source rather than just buying more
 headroom for it. See #41's Comments for the full trace and code path.
 
+**Caution:** this is in tension with issue #37's stated intent. #37 set
+`g_use_host_weights` specifically to force pipeline and TP=4 onto a
+*consistent* resolution path after finding the primary per-device cache
+puts the same weight bytes at *different* VRAM addresses in the two
+configs (2.37e-4 Q8-matmul divergence per #37). #37's own fix comment
+assumed this consistency came from a "model image pointer" shared across
+configs — #41 found that path is dead code, so the real (accidental)
+consistency #37 measured came from both configs draining into the same
+arena/host-register fallback instead. Restoring primary-cache lookups
+when the flag is set could resurrect #37's original divergence unless
+the primary cache is made to put weights at consistent addresses across
+configs too. Whoever implements this fix should re-run #37's per-layer
+diff (`diagnose-prefill.sh`) to confirm no regression.
+
 This VRAM pressure is not TP=4-specific — see
 [issue #43](43-pipeline-vram-accounting-regression.md), which found the
-same fallback now also fires in pipeline mode due to a separate
-accounting regression (`414f9fc`). Any fix here should be validated
-against both TP=4 and pipeline configurations.
+same fallback now also fires in pipeline mode. Note: #43's regression
+predates commit `414f9fc` (an earlier attribution to that commit was
+tested on real hardware and disproven — see #43's Root Cause section);
+the exact introduction point is still unbisected. Any fix here should be
+validated against both TP=4 and pipeline configurations.
 
 ## Problem
 
