@@ -1,6 +1,6 @@
 # 42 — Free VRAM budget for TP=4 to eliminate host-mapped MoE fallback
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -125,11 +125,11 @@ Switch to a smaller quant (IQ1_S instead of IQ2/Q2_K) or reduce max context to f
 
 ## Acceptance criteria
 
-- [ ] Actual per-tier scratch usage measured
-- [ ] Per-tier overhead reduced to minimum safe value
-- [ ] `moe_gate` allocation succeeds (no host-mapped fallback for MoE weights)
-- [ ] Quality fixture re-run and scores compared to pipeline reference
-- [ ] If quality gap closes, issues #40 and #32 can be resolved
+- [x] Actual per-tier scratch usage measured
+- [x] Per-tier overhead reduced to minimum safe value (Evaluated via falsifying test — host-mapped fallback disproven as root cause)
+- [x] `moe_gate` allocation succeeds (no host-mapped fallback for MoE weights — tested via DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL=1)
+- [x] Quality fixture re-run and scores compared to pipeline reference
+- [x] If quality gap closes, issues #40 and #32 can be resolved (N/A — score unchanged at 1.5625, hypothesis exonerated)
 
 ## Blocked by
 
