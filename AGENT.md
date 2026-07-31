@@ -23,10 +23,14 @@ Objective-C only where Metal requires it and Metal kernels under `metal/`.
 - Do not add permanent semantic variants behind flags. Diagnostic switches are fine when they validate the one release path.
 - Do not introduce C++.
 
-## Safety
-
-- Avoid large CPU inference runs on macOS; the CPU path has previously exposed kernel VM failures with very large mappings.
-- Do not run multiple huge model processes concurrently. The instance lock is intentional.
+## Safety & GPU Lock Protocol
+ 
+ - Avoid large CPU inference runs on macOS; the CPU path has previously exposed kernel VM failures with very large mappings.
+ - Do not run multiple huge model processes concurrently. The instance lock is intentional.
+ - **GPU Lock:** Before executing GPU work (ROCm compilation, GPU tests, benchmarks), acquire the GPU lock:
+   `/home/murphy/src/ralph-loop/scripts/ralph_engine.py gpu-acquire <feature-slug> --agent-id "$$"`
+   Release it immediately when GPU tasks complete:
+   `/home/murphy/src/ralph-loop/scripts/ralph_engine.py gpu-release <feature-slug>`
 
 ## Layout
 
