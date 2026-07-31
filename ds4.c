@@ -30596,9 +30596,11 @@ static bool metal_graph_encode_layer_batch(
      * whose owner will want to re-run this A/B; also useful evidence that
      * ds4_gpu_set_use_host_weights(1) here buys no measured consistency
      * benefit and is a candidate for removal. */
-    if (!getenv("DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL")) {
-        ds4_gpu_set_use_host_weights(1);
-    }
+    /* FIX (issue #43): Removed ds4_gpu_set_use_host_weights(1) during prefill.
+     * Issue #42 proved it provided no numerical benefit (0.0004 avg_nll delta)
+     * while forcing batch prefill through PCIe host-register reads, causing
+     * pipeline mode prefill to fail with invalid argument errors on moe_down. */
+
 #ifdef DS4_ROCM_BUILD
     /* Temporarily clear the Q8→f16 dequant cache VRAM reserve during TP=4
      * batch prefill.  With per-layer eviction the cache never holds more than
@@ -49027,11 +49029,17 @@ static size_t engine_per_tier_graph_overhead_bytes(const ds4_engine *e) {
      * pc * hc_dim * float = ~256 MiB at default prefill_cap=4096). Without
      * them the pre-subtract is meaningless for any non-trivial ctx.
      *
-     * Gate behind cuda_tensor_parallel: these allocations are only needed
-     * when TP mode is active. Without TP, only tier 0 is used and these
-     * batch buffers are not allocated, so counting them inflates the
-     * scratch reservation and causes OOM during model loading. === */
-    if (e && e->cuda_tensor_parallel) {
+     * Counted unconditionally, matching metal_graph_alloc_raw_cap: the
+     * batch-scratch loop there allocates these buffers on every used_tier[]
+     * regardless of cuda_tensor_parallel, because chunked-prefill batch
+     * scratch is replicated per used tier in pipeline mode too (each tier
+     * runs prefill for its own layer range). An earlier version of this
+     * function gated this block behind cuda_tensor_parallel on the theory
+     * that pipeline mode only uses tier 0 for batch prefill; that is false
+     * for this engine's placement, so the gate made the budget under-count
+     * relative to what pipeline mode actually allocates, causing pipeline
+     * session creation to fail (class_p_ok=0) once the packer left too
+     * little headroom. === */
     total += pc * hc_dim * sizeof(float);                  /* batch_cur_hc_by_tier */
     total += pc * hc_dim * sizeof(float);                  /* batch_next_hc_by_tier */
     total += pc * hc_dim * sizeof(float);                  /* batch_flat_hc_by_tier */
@@ -49070,7 +49078,6 @@ static size_t engine_per_tier_graph_overhead_bytes(const ds4_engine *e) {
     total += pc * (uint64_t)DS4_N_EXPERT_USED * DS4_N_EMBD * sizeof(float);     /* batch_routed_down */
     total += pc * (uint64_t)DS4_N_EMBD * sizeof(float);    /* batch_routed_out_by_tier */
     total += pc * (uint64_t)DS4_N_EMBD * sizeof(float);    /* batch_ffn_out_by_tier */
-    } /* end cuda_tensor_parallel gate */
 
     /* === Class E embedding-tier prefill_tokens (mirrors ds4.c:10844).
      * Charged to ALL tiers conservatively. Negligible (pc * int32). === */

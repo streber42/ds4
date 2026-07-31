@@ -5117,11 +5117,14 @@ static uint64_t cuda_q8_f16_cache_reserve_bytes(uint64_t total_bytes) {
         return 512ull * 1048576ull;
     }
 
-    /* The expanded Q8->F16 cache is only an acceleration path.  Keep enough
+    /* The expanded Q8->F16 cache is only an acceleration path. Keep enough
      * device memory free for cuBLAS workspaces, transient graph buffers, and
      * driver bookkeeping instead of letting optional cached weights consume the
-     * last few GiB on 96 GiB cards. */
-    const uint64_t min_reserve = 4096ull * 1048576ull;
+     * last few GiB on 96 GiB cards.
+     * Note: for non-SSD-streaming builds where graph scratch is already
+     * pre-allocated via engine_per_tier_graph_overhead_bytes, a 512 MiB
+     * reserve is sufficient and avoids double-reserving memory. */
+    const uint64_t min_reserve = 512ull * 1048576ull;
     const uint64_t pct_reserve = total_bytes / 20u; /* 5% */
     return pct_reserve > min_reserve ? pct_reserve : min_reserve;
 }
