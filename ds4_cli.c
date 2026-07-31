@@ -663,6 +663,10 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
             "ds4: prefill: %.2f t/s, generation: %.2f t/s\n",
             prefill_s > 0.0 ? (double)prompt->len / prefill_s : 0.0,
             decode_s > 0.0 ? (double)generated / decode_s : 0.0);
+    /* Issue #49/#50: print the instrumentation report from a code path
+     * known to complete cleanly -- later engine teardown can abort() on
+     * some configurations, which bypasses the report's atexit handler. */
+    ds4_tp4_instr_report_now();
 
     ds4_session_free(session);
     return 0;

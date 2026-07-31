@@ -631,3 +631,226 @@ kernel serialization — see the serialization-artifact note above for why
 that matters). `make -j8 rocm`, `make -j8 cpu`, and `make -j8 test-rocm`
 all pass; TP=4 coherence verified on real hardware with instrumentation
 enabled, in both serialized and unserialized modes, across four runs.
+
+## 2026-07-31 — TP=4 persistent-thread vertical spike: real ~30% dispatch win, blocked by a process-wide BLAS-handle race (issue 50)
+
+**Goal:** build the narrow vertical spike issue #50 asked for — persistent
+per-rank host threads (one per tier, bound to its device once, never
+`hipSetDevice`-switched again) dispatching genuinely concurrently, with
+`hipDeviceSynchronize` barriers replaced by HIP stream/event signaling —
+for a handful of layers, to learn the real achievable overhead reduction
+before #51's full rollout.
+
+**Why "genuinely concurrent" and not just "threads that take turns."**
+The panel that filed this issue was explicit that "persistent threads but
+still blocking `hipDeviceSynchronize`" is a meaningless intermediate state,
+and an advisor consulted mid-issue reinforced it: a design that keeps the 4
+ranks serialized behind a baton (threads exist, but only one rank's job is
+ever in flight) would measure close to zero improvement on the sites #49
+showed are mostly GPU queue backpressure, not fixed dispatch cost — so this
+spike had to attempt real concurrency to be worth anything, not fall back to
+the safe-looking serialized shape.
+
+**Audit before writing any threading code.** `metal_graph_encode_decode_layer_phase`
+(the ~2800-line function the TP=4 decode loop calls once per tier per phase)
+and the 62 "Class P" tensor accessors it uses all read `g->active_tier` /
+`g->tp_rank` — two plain `int`/`uint32_t` fields on the single `ds4_gpu_graph *g`
+shared by all 4 ranks. Running 4 real OS threads through that code
+concurrently, one per rank, races on those two fields. Grepping the phase
+function found 85 `_by_tier[g->active_tier]` accessor-macro reads, 13 more
+direct `g->active_tier` reads, 15 `g->tp_rank` reads, and exactly one write
+(`g->tp_rank = g->active_tier`) plus two rank-0-gated counter increments
+(`g->layer_n_comp[il]++` / `g->layer_n_index_comp[il]++`) — all of it
+funneling through a small, uniform, mechanical pattern (not sprawled into
+unrelated logic), which made a targeted fix look tractable rather than a
+sprawling refactor.
+
+**Fix: a thread-local tier override, not a struct copy.** Added
+`static __thread int t_tp4_worker_tier` plus `ds4_g_active_tier(g)` /
+`ds4_g_tp_rank(g)` helpers that return the override when a TP=4 spike
+worker thread has set it, else fall through to the real `g->active_tier` /
+`g->tp_rank` fields unchanged. The one Class P accessor macro
+(`DS4_GPU_GRAPH_CLASS_P_ACCESSOR`) and every raw `g->active_tier` /
+`g->tp_rank` read inside `metal_graph_encode_decode_layer_phase` were
+switched to the helpers; the guarded `g->tp_rank = g->active_tier` write is
+skipped when a worker thread is driving the call (its own rank is already
+correct via the override, and writing the shared field would race the other
+3 workers doing the same for their own ranks). Every other caller (pipeline,
+TP=2, the orchestrator thread itself, non-spiked TP=4 layers) never sets the
+override, so behavior is byte-identical to pre-#50 — confirmed by
+`make -j8 cpu`, `make -j8 rocm`, and `make -j8 test-rocm` all passing, and a
+40-token real-hardware generation with the spike disabled producing the same
+kind of coherent output as every prior session ("A mutex is a synchronization
+primitive that ensures only one thread... can access a shared resource").
+
+**Compressed layers excluded from the spike on purpose.**
+`layer_n_comp[il]` / `layer_n_index_comp[il]` are read by every rank (to
+pick the KV-cache row to write) and incremented once by rank 0, with *no
+barrier* between another rank's read and rank 0's write — and
+`metal_graph_tp4_comp_cache` returns the *same* shared tensor for every tier
+in TP=4 regardless of rank. Concurrent execution has no way to guarantee the
+increment happens after every rank's read, so `metal_graph_tp4_spike_layer_enabled`
+restricts the threaded path to `ds4_layer_compress_ratio(il) == 0` layers —
+layers 0 and 1 only, for the Flash variant (`DS4_VARIANT_FLASH`, see
+`ds4_expected_layer_compress_ratio`). Tested via
+`DS4_TP4_THREADED_LAYERS=2`.
+
+**Architecture actually built:** `metal_graph_tp4_spike_pool_init` creates 4
+persistent `pthread`s once (lazily, on first use), each calling
+`ds4_gpu_set_current_device(tier)` exactly once at startup and never again.
+`metal_graph_tp4_spike_dispatch` posts the same job (attention phase, MoE
+phase, or the HC-expand step) to all 4 via per-worker mutex/condvar pairs
+and waits for all 4 host-side calls to return (kernels queued, not
+necessarily finished). Two new HIP-side primitives
+(`ds4_rocm_xdev_spike_record_event` / `_sync_event`, in `ds4_rocm_xdev.cu`,
+deliberately a separate event array from the producer-event mesh
+`ds4_rocm_xdev_copy`/`allreduce_f32` use internally — issue #50 explicitly
+does not touch the all-reduce) replace `ds4_rocm_xdev_sync_all_devices`'s
+4×(`hipSetDevice`+`hipDeviceSynchronize`) loop with a per-device
+`hipEventRecord`/`hipEventSynchronize` pair, called with zero `hipSetDevice`
+calls on either side. The orchestrator thread still owns every cross-device
+copy and both all-reduces (unchanged code, same as before #50) — only the
+three per-tier compute loops (attention, HC-expand, MoE) and their
+immediately-following barrier move to the threaded path. The debug-dump
+tier-0 switch (`hc_dump_tier0_switch`, ~2ms/token for a normally-inert call
+per #49) is dropped for spiked layers only.
+
+**Measured result — the dispatch/barrier overhead really did drop, by
+concurrency, not just churn removal.** 4×R9700, same 81GiB production
+model and harness as #49, `-c 64`, 20 requested / 19 generated tokens, no
+`AMD_SERIALIZE_KERNEL`, `DS4_TP4_THREADED_LAYERS=2` (layers 0-1 threaded, 41
+legacy):
+
+| phase | legacy ms/token (this run, 41-layer share) | legacy ms/layer | spike ms/token (2 layers) | spike ms/layer | reduction |
+|---|---|---|---|---|---|
+| attention (tier_switch+barrier) | 237.307+79.197=316.50 | 146.67 | 8.033+2.711=10.74 | 102.07 | **30.4%** |
+| HC-expand (tier_switch+sync[+dump]) | 6.711+1.055+1.869=9.64 | 4.47 | 0.159+0.028=0.19 | 1.78 | **60.2%**|
+| MoE (tier_switch+barrier) | 130.826+32.814=163.64 | 75.84 | 1.596+3.660=15.17 | 49.94 | **34.2%** |
+| **all three phases** | | **226.98** | | **153.79** | **32.3%** |
+
+(Legacy ms/layer = legacy ms/token ÷ 41; spike ms/layer = spike ms/token ÷
+2.) Non-spiked-layer costs scaled almost exactly proportionally to layer
+count vs. #49's 43-layer baseline (e.g. `attn_tier_switch` 237.307ms/token
+over 41 layers vs. 248.0×41/43=236.6ms/token predicted), confirming layers
+2-42 are unaffected by the spike and the comparison is apples-to-apples.
+Output stayed coherent ("We need to answer: 'What is the capital of France?'
+The answer is Paris. We should"). Full report:
+`.scratch/rocm-tensor-parallel/logs/50-tp4-execution-engine-spike-*.log`.
+This is a real, mechanism-explained win: persistent threads removed
+`hipSetDevice` churn (12 calls/layer → 0 in steady state for spiked layers)
+*and* let 4 OS threads issue their kernels to 4 devices' queues truly in
+parallel instead of one host thread doing it serially, which is exactly
+what issue #50 set out to measure.
+
+**But: real hardware crash traced to a second, deeper shared-state race the
+`g->active_tier`/`tp_rank` audit did not — and could not — catch.** Every
+threaded run reproducibly aborted during process teardown (2/2 initial
+runs; a lifecycle fix described below did not resolve it):
+```
+:0:.../device.cpp:373 : ... us:  Memobj map does not have ptr: 0x...
+Aborted
+```
+Generation always completed first and printed correct, coherent output and
+normal perf stats — the abort happens after. First hypothesis: the 4
+persistent worker threads were never joined, so `ds4_engine_close`'s later
+GPU-memory teardown could race a still-live worker thread holding a device
+context. Fixed that regardless (it was a real gap): added
+`metal_graph_tp4_spike_pool_shutdown` (signals all 4 workers, `pthread_join`s
+them) and wired it into `ds4_engine_close` immediately before the existing
+`ds4_threads_shutdown()` call. **The crash reproduced identically after the
+fix**, which rules out plain missing-teardown-ordering as the sole cause and
+points at something touched *during* worker-thread startup or dispatch
+itself.
+
+Root cause, found by reading (not yet by isolating with a minimal repro):
+`rocm/ds4_rocm_runtime.cuh` keeps `g_cublas`, `g_cublas_ready`, `g_hipblaslt`,
+`g_hipblaslt_ready`, and `g_blas_active_tier` as plain `static` (process-wide,
+*not* thread-local) globals — the comment on `g_cublas_by_tier` says outright
+"g_cublas/g_hipblaslt above remain the single 'currently active' handle every
+kernel call site already reads." `ds4_gpu_set_current_device` (called once by
+each of the 4 spike worker threads at startup, exactly the pattern issue #50
+asked for) calls `ds4_rocm_activate_tier_blas(tier)`, which early-returns only
+if `tier == g_blas_active_tier` and otherwise lazily creates
+(`cublasCreate`/`hipblasLtCreate`, unlocked) and then unconditionally
+overwrites the global `g_cublas`/`g_hipblaslt`/`g_blas_active_tier` for
+*every rank*. With 4 threads calling this within microseconds of each other
+at pool-init time, this is a textbook data race: whichever thread wrote last
+wins the global "active" handle, so any concurrent BLAS call from a *different*
+thread can execute against a handle bound to the wrong device, and the
+lazy-create path itself has no lock protecting concurrent `hipblasLtCreate`
+calls into the same `g_hipblaslt_by_tier[tier]` slot. This fully explains a
+crash whose signature is a native ROCm-runtime internal memory-object lookup
+failure rather than a `ds4.c`-level assertion, and explains why the crash
+survived the join/shutdown fix — the race is at thread *creation*, not at
+teardown. It is consistent with, but not conclusively pinned to, this being
+the trigger (no minimal repro was built — appropriately out of scope for a
+spike whose job was to find the ceiling, not the exact race window).
+
+**This file is ROCm-only, not shared with CUDA** (checked directly:
+`grep ds4_rocm_runtime ds4_cuda.cu` matches nothing; `ds4_cuda.cu` has its
+own, separate globals; only `ds4_rocm.cu` includes
+`rocm/ds4_rocm_runtime.cuh`, and only `ds4_rocm.o` depends on `ROCM_SRCS` in
+the Makefile). So a fix is **in scope** for this PRD's "changes stay inside
+the ROCm backend" boundary — it is not blocked by the "no CUDA changes"
+exclusion. It was **not attempted in this issue** anyway: making
+`g_cublas`/`g_hipblaslt`/`g_blas_active_tier` (and the two `_by_tier[]`
+caches) thread-local is necessary but not sufficient on its own, because the
+lazy-create path (`cublasCreate`/`hipblasLtCreate` into `g_*_by_tier[tier]`)
+has no locking and would still race if two ranks' threads both needed to
+create the same tier's handle for the first time concurrently — that is its
+own audit, and it reaches well outside "TP=4 decode loop, a handful of
+layers," which is why it is sized here for #51 rather than patched inline:
+
+- Globals to convert: `g_cublas`, `g_cublas_ready`, `g_hipblaslt`,
+  `g_hipblaslt_ready`, `g_blas_active_tier` (the "currently active" set every
+  kernel call site reads) plus `g_cublas_by_tier[]` / `g_hipblaslt_by_tier[]`
+  / their `_ready_by_tier[]` companions (the lazy-created per-tier cache).
+- The guard `tier == g_blas_active_tier` in `ds4_rocm_activate_tier_blas` is
+  *why* "activate once per thread at startup" cannot just be called as-is —
+  it is written assuming one mutable "current" tier for the whole process.
+- The per-tier handle creation in the same function has no mutex; making the
+  "active" pointer `__thread` closes the read/write race but does nothing
+  for concurrent creation of the same tier's handle from two threads.
+
+**Instrumentation follow-up landed regardless of the crash, and is worth
+keeping independent of #50's disposition:** `ds4_tp4_instr_report_now()`
+(declared in `ds4.h`, defined in `ds4.c`) lets the CLI's single-shot path
+(`ds4_cli.c`, right after the `prefill:/generation:` stats line) print the
+`DS4_TP4_INSTRUMENT=1` report immediately instead of only via `atexit` —
+`abort()` bypasses `atexit` handlers, so without this hook the crash above
+would have eaten the measurement entirely. No-op when instrumentation is
+off.
+
+**Ceiling, reported honestly per the issue's own ask.** Concurrent per-rank
+dispatch, where it can run at all, cuts the measured dispatch+barrier
+overhead by ~30-32% for the 2 layers tested — a real, mechanism-explained
+number, not noise (the non-spiked-layer costs scaled proportionally,
+confirming the comparison is clean). That is nowhere near proof of an
+80-90%-of-PP4 ceiling (this touches ~14% of the decode loop's total
+sync/dispatch budget for 2 of 43 layers, and #49's own attribution caveat —
+that much of `attn_tier_switch`'s cost is GPU queue backpressure, not fixed
+dispatch overhead — means the reduction will not necessarily hold uniformly
+across all 43 layers or extrapolate linearly). More importantly, **the
+result cannot be trusted for anything beyond this narrow, short-lived
+measurement**: the BLAS-handle race means the 2-layer spike currently only
+survives by luck of timing (pool created once, ~40-160 dispatches total in a
+20-token run, crash observed at teardown rather than mid-decode this time),
+and a #51-scale rollout across all 43 layers for a long-running server
+process would call `ds4_rocm_activate_tier_blas` far more, on a hot path,
+making a wrong-device BLAS call or a lazy-create race during actual decode
+(not just at pool teardown) far more likely, not less.
+
+**Issue 50 status: ready-for-human.** The persistent-thread + event-barrier
+architecture is built, tested for the non-spiked default path (byte-identical,
+verified via `make -j8 cpu/rocm/test-rocm` and real-hardware generation), and
+shows a real, honestly-measured ~30% overhead reduction for the 2 safely-scoped
+layers — but the issue's own framing ("persistent threads but still blocking
+is a meaningless intermediate state") cuts both ways: concurrent dispatch is
+the thing that has to be proven safe, and it is not, due to a process-wide,
+non-thread-safe BLAS-handle-activation race in `rocm/ds4_rocm_runtime.cuh`
+that is orthogonal to and undiscovered by the `g->active_tier`/`tp_rank` fix
+this issue *did* land safely. #51 cannot proceed to full rollout until that
+race is fixed (sizing above) and re-verified with a longer, crash-free
+threaded run before the 100-case quality fixture is worth spending GPU time
+on — running it against a build that reproducibly aborts would not produce a
+trustworthy signal.

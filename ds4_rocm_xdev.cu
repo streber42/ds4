@@ -487,6 +487,47 @@ extern "C" int ds4_rocm_xdev_sync_all_devices(const int *device_ids, int n_devic
     return 1;
 }
 
+/* Issue #50 (TP=4 persistent per-rank threads, vertical spike): one barrier
+ * event per device, lazily created, completely separate from
+ * g_xdev_producer_event[] above -- that array orders cross-device copies and
+ * the all-reduce internals, and #50 explicitly does not touch the all-reduce.
+ * A persistent per-rank worker thread calls ds4_rocm_xdev_spike_record_event
+ * after issuing its phase's kernels, on its own device's default stream; the
+ * orchestrator thread calls ds4_rocm_xdev_spike_sync_event once per rank as
+ * the replacement for ds4_rocm_xdev_sync_all_devices's hipSetDevice +
+ * hipDeviceSynchronize loop. Neither call does hipSetDevice: the worker
+ * thread is already current on its own device (set once at thread start),
+ * and hipEventRecord/hipEventSynchronize do not require the calling thread
+ * to be current on the event's device. */
+#define DS4_TP4_SPIKE_MAX_DEVICES 8
+static pthread_mutex_t g_tp4_spike_event_mutex = PTHREAD_MUTEX_INITIALIZER;
+static hipEvent_t g_tp4_spike_barrier_event[DS4_TP4_SPIKE_MAX_DEVICES];
+static bool g_tp4_spike_barrier_event_ready[DS4_TP4_SPIKE_MAX_DEVICES];
+
+extern "C" int ds4_rocm_xdev_spike_record_event(int device_id) {
+    if (device_id < 0 || device_id >= DS4_TP4_SPIKE_MAX_DEVICES) return 0;
+    if (!g_tp4_spike_barrier_event_ready[device_id]) {
+        pthread_mutex_lock(&g_tp4_spike_event_mutex);
+        if (!g_tp4_spike_barrier_event_ready[device_id]) {
+            /* Created while the calling (worker) thread is current on
+             * device_id, so the event is correctly bound to that device. */
+            if (hipEventCreateWithFlags(&g_tp4_spike_barrier_event[device_id],
+                                         hipEventDisableTiming) == hipSuccess) {
+                g_tp4_spike_barrier_event_ready[device_id] = true;
+            }
+        }
+        pthread_mutex_unlock(&g_tp4_spike_event_mutex);
+    }
+    if (!g_tp4_spike_barrier_event_ready[device_id]) return 0;
+    return hipEventRecord(g_tp4_spike_barrier_event[device_id], 0) == hipSuccess;
+}
+
+extern "C" int ds4_rocm_xdev_spike_sync_event(int device_id) {
+    if (device_id < 0 || device_id >= DS4_TP4_SPIKE_MAX_DEVICES) return 0;
+    if (!g_tp4_spike_barrier_event_ready[device_id]) return 0;
+    return hipEventSynchronize(g_tp4_spike_barrier_event[device_id]) == hipSuccess;
+}
+
 extern "C" int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices) {
     if (g_global_mesh_initialized) {
         ds4_rocm_xdev_destroy_mesh(&g_global_mesh);

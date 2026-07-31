@@ -474,4 +474,12 @@ int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
                                    uint32_t layer_start, uint32_t layer_end,
                                    char *err, size_t errlen);
 
+/* Issue #49/#50: print the TP=4 decode-loop sync/dispatch instrumentation
+ * report (DS4_TP4_INSTRUMENT=1) immediately, instead of waiting for the
+ * atexit handler. No-op if instrumentation is off or nothing was recorded.
+ * Exists so callers that might abort() during later teardown (a signal
+ * from a lower-level runtime bypasses atexit handlers) can still surface
+ * the report from the code path that is known to complete cleanly. */
+void ds4_tp4_instr_report_now(void);
+
 #endif

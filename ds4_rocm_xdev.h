@@ -119,6 +119,30 @@ ds4_rocm_xdev_mesh *ds4_rocm_xdev_get_global_mesh(void);
 int ds4_rocm_xdev_sync_all_devices(const int *device_ids, int n_devices);
 
 /*
+ * Issue #50 (TP=4 persistent per-rank threads, vertical spike) barrier
+ * events. One lazily-created event per device, independent of the
+ * producer-event mesh used internally by ds4_rocm_xdev_copy /
+ * ds4_rocm_xdev_allreduce_f32 -- kept separate so this barrier cannot
+ * perturb all-reduce ordering, which issue #50 explicitly does not touch.
+ *
+ * ds4_rocm_xdev_spike_record_event(device_id): call from a thread whose
+ * current device is already device_id (e.g. a persistent per-rank worker
+ * thread that called hipSetDevice once at startup). Records an event on
+ * that device's default stream marking everything queued so far. Does not
+ * call hipSetDevice.
+ *
+ * ds4_rocm_xdev_spike_sync_event(device_id): call from any thread (no
+ * hipSetDevice needed) to block until device_id's queued work up to its
+ * last recorded event has completed -- the event/stream-scoped replacement
+ * for ds4_rocm_xdev_sync_all_devices's hipSetDevice + hipDeviceSynchronize
+ * loop.
+ *
+ * Both return 1 on success, 0 on failure (including "never recorded").
+ */
+int ds4_rocm_xdev_spike_record_event(int device_id);
+int ds4_rocm_xdev_spike_sync_event(int device_id);
+
+/*
  * Fence a producer device against a consumer that will read its memory
  * directly via a peer-mapped pointer (no explicit xdev copy). Records an
  * event on src_dev's producer (default) stream and makes dst_dev's default
