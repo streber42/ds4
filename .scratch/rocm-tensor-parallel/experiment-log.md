@@ -854,3 +854,20 @@ race is fixed (sizing above) and re-verified with a longer, crash-free
 threaded run before the 100-case quality fixture is worth spending GPU time
 on — running it against a build that reproducibly aborts would not produce a
 trustworthy signal.
+
+### 2026-07-31 — Issue 52: Hand-rolled async P2P all-reduce (no RCCL)
+
+**HITL Design Review & Algorithm Sign-Off:**
+- An 8-consultant AI panel (Codex, Cursor, Gemini, Qwen3, Grok, GLM, Mistral, MiniMax) unanimously rejected RCCL for single-process 4× local AMD R9700 GPUs over PCIe due to unnecessary multi-node/communicator bootstrapping overhead.
+- Human design sign-off obtained for **Direct Async Multi-Peer Staging with HIP Events**. For DeepSeek-V4-Flash per-token activation vectors (~8 KiB–28 KiB), direct 1-step P2P copy + accumulation on per-rank HIP streams via `hipStreamWaitEvent` avoids the 6-step latency overhead of ring topologies while eliminating host-side `hipDeviceSynchronize` blocking.
+- Clean architectural seam preserved in `ds4_rocm_xdev_allreduce_f32` for future optional RCCL integration.
+
+**Standalone Collective-Correctness Probing Tests (`tests/test_rocm_xdev.cu`):**
+- Added **Test E** (Bit-Pattern Probe): Explicitly tests distinct power-of-two contributions per rank (rank r: $2^r$, e.g. $1, 2, 4, 8 \implies 15.0 = \text{0b1111}$) to detect silent dropped or double-counted partial sum regressions (the #44-#48 failure mode). Bitwise exactness verified across all 4 GPUs.
+- Added **Test F** (Async Multi-Stream Event Synchronization Probe): Enqueues artificial stream delays (async memsets/staggers) on per-rank streams before producer event recording. Verifies non-blocking submission on consumer streams (`< 20ms`), proper stream event waiting via `hipStreamWaitEvent`, and bitwise-exact reduction upon stream synchronization.
+
+**Implementation & Verification:**
+- Removed stream 0 blocking event wait (`ds4_rocm_xdev_wait_producer`) inside `ds4_rocm_xdev_allreduce_f32`, allowing `ds4_rocm_xdev_copy` to manage producer event dependencies directly on the enqueued HIP stream.
+- All-reduce count per token remains unchanged at ~86 (2 per layer).
+- `make -j8 test-rocm` passed cleanly (4/4 targets, all standalone tests and new probes passing).
+

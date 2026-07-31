@@ -455,13 +455,6 @@ extern "C" int ds4_rocm_xdev_allreduce_f32(ds4_rocm_xdev_mesh *mesh,
         const float *peer_buf = peer_partials[p];
         if (!peer_buf) return 0;
 
-        /* Ordering: peer's compute kernel wrote peer_buf on peer_dev's default
-         * stream; the copy below is enqueued on my_dev's stream (or the
-         * supplied one). Without the explicit happens-before edge the copy
-         * can race ahead and read stale / partial data -- the same hazard
-         * ds4_rocm_xdev_copy's direct-peer path already guards against. */
-        if (!ds4_rocm_xdev_wait_producer(my_dev, peer_dev)) return 0;
-
         size_t bytes = count * sizeof(float);
         if (!ds4_rocm_xdev_copy(mesh, my_dev, stage, peer_dev, (void *)peer_buf, bytes, stream)) {
             return 0;

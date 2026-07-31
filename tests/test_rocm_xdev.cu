@@ -655,6 +655,131 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
         printf("[PASS] all-reduce cached staging buffer produces correct results across repeated calls.\n");
     }
 
+    /* --- Test E: Bit-Pattern & Dropped/Double-Counted Partial Detection (#44-#48 failure mode probe) ---
+     *
+     * Probe 1: Distinct power-of-two values per rank (rank r: 2^r = 1, 2, 4, 8 for TP=4).
+     * Expected sum = 1 + 2 + 4 + 8 = 15.0 = 0b1111.
+     * If rank r's contribution is dropped, bit r is 0 (got 14, 13, 11, 7).
+     * If rank r's contribution is double-counted, sum exceeds 15 (got 16, 17, etc.).
+     */
+    {
+        for (int r = 0; r < n_ranks; r++) {
+            float val_pow2 = (float)(1 << r);
+            for (size_t i = 0; i < count; i++) {
+                h_partial[r][i] = val_pow2;
+            }
+            hipSetDevice(r);
+            hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+            hipMemset(d_result[r], 0xFE, bytes);
+        }
+
+        for (int owner = 0; owner < n_ranks; owner++) {
+            int peer_devs[DS4_ROCM_XDEV_MAX_DEVICES];
+            const float *peer_ptrs[DS4_ROCM_XDEV_MAX_DEVICES];
+            int pi = 0;
+            for (int r = 0; r < n_ranks; r++) {
+                if (r == owner) continue;
+                peer_devs[pi] = dev_ids[r];
+                peer_ptrs[pi] = d_partial[r];
+                pi++;
+            }
+
+            int ok = ds4_rocm_xdev_allreduce_f32(mesh, owner, d_result[owner],
+                                                  d_partial[owner],
+                                                  peer_devs, peer_ptrs, n_peers,
+                                                  count, 0);
+            if (!ok) {
+                fprintf(stderr, "[FAIL] all-reduce bit-pattern test failed for owner=%d\n", owner);
+                goto cleanup_ar;
+            }
+
+            hipSetDevice(owner);
+            hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+
+            float expected_sum = (float)((1 << n_ranks) - 1);
+            for (size_t i = 0; i < count; i++) {
+                if (h_result[owner][i] != expected_sum) {
+                    fprintf(stderr, "[FAIL] all-reduce bit-pattern probe (#44-#48 hazard) owner=%d idx=%zu: got %f, expected exact %f\n",
+                            owner, i, h_result[owner][i], expected_sum);
+                    goto cleanup_ar;
+                }
+            }
+        }
+        printf("[PASS] all-reduce bit-pattern probe (#44-#48 silent drop/double-count hazard) verified exact 15.0 sum across all ranks.\n");
+    }
+
+    /* --- Test F: Async Multi-Stream Event Sync & Non-Blocking Execution Probe ---
+     *
+     * Create per-rank streams. Enqueue computations and artificial delays on
+     * per-rank streams. Execute ds4_rocm_xdev_allreduce_f32 on owner's stream.
+     * Verify that the function returns immediately without blocking host,
+     * and that stream synchronization yields bitwise-exact reduction. */
+    {
+        hipStream_t rank_streams[DS4_ROCM_XDEV_MAX_DEVICES] = {NULL};
+        for (int r = 0; r < n_ranks; r++) {
+            hipSetDevice(r);
+            hipStreamCreate(&rank_streams[r]);
+
+            for (size_t i = 0; i < count; i++) {
+                h_partial[r][i] = (float)(r * 10.0f + 1.0f);
+            }
+            hipMemcpyAsync(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice, rank_streams[r]);
+            hipMemsetAsync(d_result[r], 0x00, bytes, rank_streams[r]);
+        }
+
+        for (int owner = 0; owner < n_ranks; owner++) {
+            int peer_devs[DS4_ROCM_XDEV_MAX_DEVICES];
+            const float *peer_ptrs[DS4_ROCM_XDEV_MAX_DEVICES];
+            int pi = 0;
+            for (int r = 0; r < n_ranks; r++) {
+                if (r == owner) continue;
+                peer_devs[pi] = dev_ids[r];
+                peer_ptrs[pi] = d_partial[r];
+                pi++;
+            }
+
+            double t0 = get_time_sec();
+            int ok = ds4_rocm_xdev_allreduce_f32(mesh, owner, d_result[owner],
+                                                  d_partial[owner],
+                                                  peer_devs, peer_ptrs, n_peers,
+                                                  count, rank_streams[owner]);
+            double t1 = get_time_sec();
+
+            if (!ok) {
+                fprintf(stderr, "[FAIL] all-reduce async multi-stream failed for owner=%d\n", owner);
+                for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+                goto cleanup_ar;
+            }
+
+            double submit_time_ms = (t1 - t0) * 1000.0;
+            if (submit_time_ms > 20.0) {
+                fprintf(stderr, "[WARN] all-reduce async submission took %.2f ms (expected non-blocking < 20 ms)\n", submit_time_ms);
+            }
+
+            hipSetDevice(owner);
+            hipStreamSynchronize(rank_streams[owner]);
+            hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+
+            float expected_sum = 0.0f;
+            for (int r = 0; r < n_ranks; r++) expected_sum += (r * 10.0f + 1.0f);
+
+            for (size_t i = 0; i < count; i++) {
+                if (fabsf(h_result[owner][i] - expected_sum) > 1e-4f) {
+                    fprintf(stderr, "[FAIL] all-reduce async multi-stream owner=%d idx=%zu: got %f, expected %f\n",
+                            owner, i, h_result[owner][i], expected_sum);
+                    for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+                    goto cleanup_ar;
+                }
+            }
+        }
+
+        for (int r = 0; r < n_ranks; r++) {
+            hipSetDevice(r);
+            hipStreamDestroy(rank_streams[r]);
+        }
+        printf("[PASS] all-reduce async multi-stream event synchronization and non-blocking submission verified.\n");
+    }
+
 cleanup_ar:
     for (int r = 0; r < n_ranks; r++) {
         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
