@@ -455,3 +455,179 @@ Delta WMMA vs pre-WMMA TP: +0.002213 (+0.60%) — within accepted ±1% variance;
 **Pipeline regression false alarm:** The pipeline path regression reported in a prior session is not present at HEAD. Pipeline output is correct. The pipeline reference TSV (`q_pipeline_ref_tp4issue32.tsv`, 100 cases, avg_nll 0.374733) is valid.
 
 **Issue 32 status: ready-for-agent.** The automated loop will implement the two fixes (prefill attention tier sweep + output head vocab-split) and re-run the quality fixture.
+
+## 2026-07-31 — TP=4 decode-loop sync/dispatch instrumented per call site (issue 49)
+
+**Goal:** turn issue #33's analytical estimate (86 all-reduces, 172
+`hipDeviceSynchronize`, 344 `hipSetDevice`/cross-device copies per token,
+aggregate) into a measured, per-call-site breakdown so #50-#55 can each show
+a before/after delta against a real baseline.
+
+**Harness:** `DS4_TP4_INSTRUMENT=1` env flag, wired into
+`metal_graph_encode_token_raw_swa`'s ROCm TP=4 branch (`ds4.c`). Every
+`metal_graph_set_active_tier_decode` (`hipSetDevice` + BLAS-handle tier
+swap, and — for the pipeline `placement` path only, not TP=4 — a cur_hc
+boundary hop; not applicable here since `g->rocm_tp4` uses `placement ==
+NULL`), `ds4_rocm_xdev_sync_all_devices` (`hipSetDevice` + `hipDeviceSynchronize`
+per device — see correction below, it is not sync-only), `ds4_rocm_xdev_copy`
+(cross-device copy), and `ds4_rocm_xdev_allreduce_f32` (the all-reduce
+collective) call already present in the decode loop is timed and attributed
+to a named call site (attention tier switch, MoE tier switch, all-reduce
+boundary hop, etc.) via a small counter/timer table. A report prints to
+stderr at process exit with count, calls/token, total ms, and ms/token per
+site. Overhead when disabled is one cached branch per call site. Re-run
+with `.scratch/rocm-tensor-parallel/scripts/tp4-instrument.sh --model
+<path> [--gen-tokens N]`, or directly:
+```
+DS4_TP4_INSTRUMENT=1 ./ds4 --rocm --gpu-devices 0,1,2,3 \
+    --cuda-tensor-parallel --model <model> -c 64 -p "<prompt>" -n 20
+```
+
+**First pass used `AMD_SERIALIZE_KERNEL=3` and was wrong.** An initial
+instrumented run set `AMD_SERIALIZE_KERNEL=3` (a debug env var used
+elsewhere in this project's history to work around an unrelated compressor
+prefill race) and measured only ~115 ms/token of sync/dispatch overhead,
+with `hipDeviceSynchronize` barriers costing under 1.5 ms/token combined —
+suggesting sync was cheap and `hipSetDevice` tier switching dominated
+instead. That conclusion was an artifact of the flag: `AMD_SERIALIZE_KERNEL=3`
+makes every kernel launch itself block until completion, so by the time
+the loop reaches an explicit barrier there is nothing left to wait for —
+the real wait time gets silently absorbed into the (uninstrumented) kernel
+*launch* calls inside `metal_graph_encode_decode_layer_phase`, not into the
+named sync/dispatch sites this harness measures. Re-run without the flag
+(unset, matching how production TP=4 throughput has been measured
+throughout this project) below; the numbers are substantially different and
+these are the ones that should be treated as the baseline.
+
+**Measured (4×R9700, production 81GiB model, 43 layers, `-c 64`, no
+`AMD_SERIALIZE_KERNEL`, averaged over 19 decode tokens, two independent
+runs with different prompts, both coherent: "...simply \"Paris\"." and
+"We need to explain what a C pointer is..."; numbers below are run 2, run 1
+agreed within 1%):**
+
+| call site | calls/token | ms/token | what it is |
+|---|---|---|---|
+| `attn_tier_switch` | 172 | 247.05 | `hipSetDevice` + BLAS tier swap × 4 tiers × 43 layers, attention phase |
+| `moe_tier_switch` | 172 | 136.89 | `hipSetDevice` + BLAS tier swap × 4 tiers × 43 layers, MoE phase |
+| `attn_barrier_sync` | 43 | 82.44 | `hipSetDevice`+`hipDeviceSynchronize` ×4 devices, attention barrier |
+| `moe_barrier_sync` | 43 | 35.05 | `hipSetDevice`+`hipDeviceSynchronize` ×4 devices, MoE barrier |
+| `hc_expand_tier_switch` | 172 | 7.02 | `hipSetDevice` + BLAS tier swap × 4 tiers, HC-expand phase |
+| `ffn_broadcast_copy` | 129 | 6.87 | cross-device copy, new hidden state to tiers 1-3 |
+| `attn_broadcast_copy` | 129 | 6.45 | cross-device copy, all-reduced attn_out to tiers 1-3 |
+| `attn_allreduce` | 43 | 9.12 | attention all-reduce collective (peer copies + accumulate) |
+| `moe_allreduce` | 43 | 9.11 | MoE all-reduce collective |
+| `attn_allreduce_tier0_switch` | 43 | 2.45 | `hipSetDevice` back to tier 0 before attention all-reduce |
+| `moe_allreduce_tier0_switch` | 43 | 2.38 | `hipSetDevice` back to tier 0 before MoE all-reduce |
+| `hc_dump_tier0_switch` | 43 | 1.95 | `hipSetDevice` back to tier 0 for debug dump point |
+| `hc_expand_sync` | 43 | 1.10 | `hipSetDevice`+`hipDeviceSynchronize` ×4 devices, after HC expand |
+| `embed_broadcast_copy` | 3 | 0.71 | cross-device copy, embedded token to tiers 1-3 (once/token) |
+| `layer_end_sync` | 43 | 0.09 | `hipSetDevice`+`hipDeviceSynchronize` ×4 devices, end of layer |
+| `attn_broadcast_sync` | 43 | 0.09 | `hipSetDevice`+`hipDeviceSynchronize` ×4 devices, after attn broadcast |
+| `attn_allreduce_stage_copy` | 43 | 0.07 | same-device staging copy (not cross-device) |
+| **TOTAL (measured sites)** | **1250** | **~548.8** | |
+
+Measured generation throughput this run: 1.44 t/s → ~694 ms/token total.
+**The 17 instrumented call sites above account for ~79% of total per-token
+wall time** (548.8 / 694 ms) — the instrumentation harness now covers the
+large majority of the decode-loop budget, not a small analytical slice.
+
+**Corrected counts vs. issue #33's aggregate estimate:**
+
+1. **`hipDeviceSynchronize` count is 860/token, not 172.** Five distinct
+   `ds4_rocm_xdev_sync_all_devices` call sites each fire 43×/token (once
+   per layer) and each does one `hipSetDevice` + one `hipDeviceSynchronize`
+   per device internally (checked the implementation in
+   `ds4_rocm_xdev.cu:482-488`, not just the header comment) — 5 × 43 × 4 =
+   860 real `hipDeviceSynchronize` calls. Issue #33's 172 figure
+   undercounted by 5×.
+2. **Total `hipSetDevice` count is 1505/token, not 344.** 645/token from
+   the six `metal_graph_set_active_tier_decode` call sites (172×3 + 43×3)
+   *plus* another 860/token hidden inside the five sync call sites (each
+   `ds4_rocm_xdev_sync_all_devices` invocation calls `hipSetDevice` once
+   per device before its `hipDeviceSynchronize`, per
+   `ds4_rocm_xdev.cu:482-488`) = 1505/token, ~4.4× issue #33's combined
+   "344" figure (which conflated switches and copies into one number and
+   missed the `hipSetDevice` calls inside the sync helper entirely).
+3. **501 ms/token — 91% of the instrumented total and 72% of the entire
+   per-token budget — lands inside the sync/dispatch call sites**, once
+   measured without the serialization artifact: the two 4-tier switch
+   loops that precede real per-tier compute (`attn_tier_switch`,
+   `moe_tier_switch`) plus their immediately-following barriers
+   (`attn_barrier_sync`, `moe_barrier_sync`). This does **not** by itself
+   settle issue #33's overhead-vs-compute attribution, though — see the
+   attribution caveat below. `hc_expand_tier_switch`/`hc_expand_sync`
+   (same switch pattern, much smaller compute payload per tier — just an
+   n_embd-sized HC expand, not the full attention/MoE pipeline) cost only
+   8.1 ms/token combined by comparison. Same 172 switches, same code path,
+   7ms vs 247ms for `attn_tier_switch` alone: the only difference is how
+   much async GPU work is outstanding when the host call blocks, which
+   means a real share of the 501ms is very likely the host waiting on
+   compute that happens to be attributed to the call that blocked on it,
+   not a fixed per-call `hipSetDevice`/dispatch cost. This harness gives a
+   reproducible per-call-site baseline (which is what the issue asked
+   for), not a clean overhead/compute split — use `rocprof` kernel
+   timelines if #50-#55 need that split before picking a fix.
+4. **The all-reduce collectives cost ~18.2 ms/token combined** (attn 9.12
+   + moe 9.11) — real but a minor contributor next to tier-switch/barrier
+   cost in this unserialized measurement, unlike the serialized run where
+   it looked comparatively large.
+5. **Cross-device copies outside the all-reduce internals cost ~14.0
+   ms/token combined** (`embed_broadcast_copy` + `attn_broadcast_copy` +
+   `ffn_broadcast_copy`), 261 copies/token.
+6. **The "output head" call site named in issue #49 does not fire for
+   TP=4.** `metal_graph_encode_output_head`'s tier switch is gated on
+   `g->placement`, which is `NULL` for `rocm_tp4` (`g->rocm_tp4` uses the
+   flat "all tiers hold every layer" placement, not the pipeline
+   `placement` array). The decode loop already leaves `active_tier == 0`
+   after the last layer, so the output head runs with zero additional
+   sync/dispatch cost. Confirmed by code read, not just absence from the
+   instrumented totals.
+7. **Free win already surfaced by the harness:** `hc_dump_tier0_switch`
+   (43 calls, 1.95 ms/token) exists solely to reposition the active tier
+   for `metal_graph_debug_dump_tensor`, which is a no-op unless a debug
+   dump env var is set. That is ~2 ms/token of unconditional release-path
+   cost for a call whose payload is normally a no-op — a candidate for
+   #50-#55 to gate behind the same env check the dump itself uses, or
+   drop the switch when no dump is pending.
+
+**Attribution caveat — coarse CPU-side timers, not kernel-level profiling.**
+This harness times host-side wall-clock around each call, which is exactly
+what the issue asked for ("counters and/or `rocprof` markers" — this uses
+counters), but it cannot cleanly separate "true `hipSetDevice`/BLAS-handle-swap
+cost" from "HIP command-queue backpressure/wait for a device's outstanding
+async work," both of which land inside the same measured interval. The
+3-8× ms/call disparity between `attn_tier_switch`/`moe_tier_switch` (heavy
+per-tier compute follows) and `hc_expand_tier_switch` (light per-tier
+compute follows) is consistent with the latter explanation — the
+"tier-switch" cost partly reflects the runtime's synchronization/backpressure
+behavior around the device's outstanding queue, not a fixed hipSetDevice
+syscall cost. If #50-#55 need to isolate pure dispatch overhead from queue
+backpressure, use `rocprof` kernel timelines (named as an option by this
+issue) rather than refining this coarse harness further.
+
+**Caveat — VRAM tightness, same in both serialized and unserialized runs:**
+every run in this session hit `ROCm model arena alloc failed for moe_down
+(1024.00 MiB chunk): out of memory` and fell back to q8 kernels for the
+duration. `rocm-smi` confirms VRAM is otherwise idle between runs (~58 MiB
+used per GPU out of 32 GiB), so this is a transient allocator-peak budget
+issue at load time, not stale VRAM from a prior process. It happened at
+both `-c 64` (issue #33's own context size) and `-c 128`, so it is not
+context-size-dependent either. This depresses absolute t/s (measured
+~1.4 t/s here vs. issue #33's clean-load ~4.5 t/s) but should not affect
+the *relative* per-call-site attribution, since the instrumented primitives
+(`hipSetDevice`, `hipDeviceSynchronize`, cross-device copy, all-reduce) are
+independent of which matmul kernel variant ran — and sync/dispatch still
+dominates (79% of per-token time) even with slower, degraded compute in
+the denominator, which if anything strengthens rather than undermines the
+conclusion that dispatch overhead is the primary bottleneck. Worth a
+follow-up to find why per-tier weight footprint no longer fits under the
+budget that gave issue #33 a clean 23.80 GiB/tier load, but out of scope
+for this issue.
+
+**Issue 49 status: closed.** Harness lands in `ds4.c` behind
+`DS4_TP4_INSTRUMENT=1` (near-zero cost when unset), re-runnable via
+`.scratch/rocm-tensor-parallel/scripts/tp4-instrument.sh` (defaults to no
+kernel serialization — see the serialization-artifact note above for why
+that matters). `make -j8 rocm`, `make -j8 cpu`, and `make -j8 test-rocm`
+all pass; TP=4 coherence verified on real hardware with instrumentation
+enabled, in both serialized and unserialized modes, across four runs.

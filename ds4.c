@@ -396,6 +396,111 @@ extern int ds4_rocm_xdev_copy(ds4_rocm_xdev_mesh *mesh,
                                int dst_dev, void *dst_ptr,
                                int src_dev, const void *src_ptr,
                                size_t bytes, void *stream);
+
+static double now_sec(void);
+
+/* ---------------------------------------------------------------------
+ * TP=4 decode-loop sync/dispatch instrumentation (issue #49).
+ *
+ * Issue #33 attributed the ~238ms/token TP=4 decode cost mostly to
+ * hipDeviceSynchronize/hipSetDevice/cross-device-copy overhead (86
+ * all-reduces, 172 syncs, 344 tier switches/copies per token, aggregate
+ * estimate) rather than compute. This harness turns that estimate into a
+ * measured, per-call-site count and wall-clock breakdown so #50-#55 can
+ * each report a before/after delta against a real baseline instead of
+ * only an aggregate t/s number.
+ *
+ * Enabled with DS4_TP4_INSTRUMENT=1. Disabled (the default), the only
+ * cost is one cached getenv check per call site. A report is printed to
+ * stderr at process exit summarizing counts/cost per call site and per
+ * decode token.
+ * ------------------------------------------------------------------- */
+#define DS4_TP4_INSTR_MAX_SITES 24
+typedef struct {
+    const char *name;
+    long        calls;
+    double      total_ms;
+} ds4_tp4_instr_site;
+static ds4_tp4_instr_site ds4_tp4_instr_sites[DS4_TP4_INSTR_MAX_SITES];
+static int  ds4_tp4_instr_n_sites = 0;
+static int  ds4_tp4_instr_enabled = -1; /* -1 = not yet checked */
+static long ds4_tp4_instr_tokens = 0;
+static bool ds4_tp4_instr_atexit_registered = false;
+
+static void ds4_tp4_instr_report(void) {
+    if (ds4_tp4_instr_n_sites == 0) return;
+    fprintf(stderr,
+        "ds4: TP=4 decode-loop instrumentation (issue #49) -- %ld token(s)\n",
+        ds4_tp4_instr_tokens);
+    fprintf(stderr, "%-28s %10s %12s %14s %14s\n",
+            "call site", "calls", "calls/token", "total ms", "ms/token");
+    double grand_total_ms = 0.0;
+    long   grand_total_calls = 0;
+    for (int i = 0; i < ds4_tp4_instr_n_sites; i++) {
+        ds4_tp4_instr_site *s = &ds4_tp4_instr_sites[i];
+        double calls_per_tok = ds4_tp4_instr_tokens > 0 ?
+            (double)s->calls / (double)ds4_tp4_instr_tokens : 0.0;
+        double ms_per_tok = ds4_tp4_instr_tokens > 0 ?
+            s->total_ms / (double)ds4_tp4_instr_tokens : 0.0;
+        fprintf(stderr, "%-28s %10ld %12.2f %14.3f %14.3f\n",
+                s->name, s->calls, calls_per_tok, s->total_ms, ms_per_tok);
+        grand_total_ms += s->total_ms;
+        grand_total_calls += s->calls;
+    }
+    fprintf(stderr, "%-28s %10ld %12.2f %14.3f %14.3f\n",
+            "TOTAL", grand_total_calls,
+            ds4_tp4_instr_tokens > 0 ? (double)grand_total_calls / (double)ds4_tp4_instr_tokens : 0.0,
+            grand_total_ms,
+            ds4_tp4_instr_tokens > 0 ? grand_total_ms / (double)ds4_tp4_instr_tokens : 0.0);
+}
+
+static bool ds4_tp4_instr_on(void) {
+    if (ds4_tp4_instr_enabled < 0) {
+        const char *e = getenv("DS4_TP4_INSTRUMENT");
+        ds4_tp4_instr_enabled = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+        if (ds4_tp4_instr_enabled && !ds4_tp4_instr_atexit_registered) {
+            atexit(ds4_tp4_instr_report);
+            ds4_tp4_instr_atexit_registered = true;
+        }
+    }
+    return ds4_tp4_instr_enabled == 1;
+}
+
+/* Call once per decode token (top of metal_graph_encode_token_raw_swa when
+ * g->rocm_tp4) so per-site costs can be normalized to ms/token. */
+static void ds4_tp4_instr_begin_token(void) {
+    if (!ds4_tp4_instr_on()) return;
+    ds4_tp4_instr_tokens++;
+}
+
+static void ds4_tp4_instr_record(const char *name, double t0) {
+    ds4_tp4_instr_site *s = NULL;
+    for (int i = 0; i < ds4_tp4_instr_n_sites; i++) {
+        if (strcmp(ds4_tp4_instr_sites[i].name, name) == 0) { s = &ds4_tp4_instr_sites[i]; break; }
+    }
+    if (!s) {
+        if (ds4_tp4_instr_n_sites >= DS4_TP4_INSTR_MAX_SITES) return;
+        s = &ds4_tp4_instr_sites[ds4_tp4_instr_n_sites++];
+        s->name = name;
+        s->calls = 0;
+        s->total_ms = 0.0;
+    }
+    s->calls++;
+    s->total_ms += (now_sec() - t0) * 1000.0;
+}
+
+/* Time `call_expr` (a statement, may assign into an enclosing `ok`) and
+ * attribute the elapsed wall-clock to `site_name`. No-op overhead beyond
+ * a cached branch when instrumentation is off. */
+#define DS4_TP4_INSTR(site_name, call_expr) do { \
+        if (ds4_tp4_instr_on()) { \
+            double ds4_tp4_t0__ = now_sec(); \
+            call_expr; \
+            ds4_tp4_instr_record((site_name), ds4_tp4_t0__); \
+        } else { \
+            call_expr; \
+        } \
+    } while (0)
 #endif
 
 #ifndef M_PI
@@ -27161,14 +27266,16 @@ static bool metal_graph_encode_token_raw_swa(
      * without this broadcast tiers 1-3 read uninitialized memory for the
      * embedding, producing garbage attention partials and corrupting the
      * all-reduce. */
+    if (g->rocm_tp4) ds4_tp4_instr_begin_token();
     if (ok && g->rocm_tp4) {
         const size_t hc_bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
         ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
         for (int t = 1; ok && t < 4; t++) {
-            ok = ds4_rocm_xdev_copy(mesh, t,
-                    (void *)g->cur_hc_by_tier[t]->ptr,
-                    0, (const void *)g->cur_hc_by_tier[0]->ptr,
-                    hc_bytes, NULL);
+            DS4_TP4_INSTR("embed_broadcast_copy",
+                ok = ds4_rocm_xdev_copy(mesh, t,
+                        (void *)g->cur_hc_by_tier[t]->ptr,
+                        0, (const void *)g->cur_hc_by_tier[0]->ptr,
+                        hc_bytes, NULL));
         }
     }
     /* Use host-mapped weight pointers during TP=4 decode so all 4 tiers
@@ -27206,7 +27313,10 @@ static bool metal_graph_encode_token_raw_swa(
              * all-reduce, then after_ffn_hc is broadcast to all tiers. */
             /* ---- Phase 1: Attention partials ---- */
             for (int tier = 0; ok && tier < 4; tier++) {
-                if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
+                bool switched;
+                DS4_TP4_INSTR("attn_tier_switch",
+                    switched = metal_graph_set_active_tier_decode(g, tier));
+                if (!switched) { ok = false; break; }
                 g->tp_rank = (uint32_t)tier;
                 ok = metal_graph_encode_decode_layer_phase(
                         g, model, &weights->layer[il],
@@ -27218,7 +27328,8 @@ static bool metal_graph_encode_token_raw_swa(
             /* Barrier: wait for all 4 tiers' attention compute to finish. */
             if (ok) {
                 const int devs[4] = {0, 1, 2, 3};
-                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+                DS4_TP4_INSTR("attn_barrier_sync",
+                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
             }
             /* All-reduce attention partials on tier 0.
              * The all-reduce destination MUST NOT alias the source (tier 0's
@@ -27227,7 +27338,12 @@ static bool metal_graph_encode_token_raw_swa(
              * would lose tier 0's 32-head contribution.  Stage into the shared
              * expert buffer (not yet written at this point — Phase 2 hasn't
              * started), then copy to attn_out_by_tier[0]. */
-            if (ok && !metal_graph_set_active_tier_decode(g, 0)) ok = false;
+            if (ok) {
+                bool switched;
+                DS4_TP4_INSTR("attn_allreduce_tier0_switch",
+                    switched = metal_graph_set_active_tier_decode(g, 0));
+                if (!switched) ok = false;
+            }
             if (ok) {
                 ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
                 int peer_devs[3];
@@ -27240,29 +27356,33 @@ static bool metal_graph_encode_token_raw_swa(
                     n_peers++;
                 }
                 /* Stage into shared_out_by_tier[0] (no alias with attn_out). */
-                ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
-                        (float *)g->shared_out_by_tier[0]->ptr,
-                        (const float *)g->attn_out_by_tier[0]->ptr,
-                        peer_devs, peer_partials, n_peers,
-                        (size_t)DS4_N_EMBD, NULL);
+                DS4_TP4_INSTR("attn_allreduce",
+                    ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
+                            (float *)g->shared_out_by_tier[0]->ptr,
+                            (const float *)g->attn_out_by_tier[0]->ptr,
+                            peer_devs, peer_partials, n_peers,
+                            (size_t)DS4_N_EMBD, NULL));
                 if (ok) {
-                    ok = ds4_gpu_tensor_copy(g->attn_out_by_tier[0], 0,
-                                              g->shared_out_by_tier[0], 0,
-                                              (uint64_t)DS4_N_EMBD * sizeof(float)) != 0;
+                    DS4_TP4_INSTR("attn_allreduce_stage_copy",
+                        ok = ds4_gpu_tensor_copy(g->attn_out_by_tier[0], 0,
+                                                  g->shared_out_by_tier[0], 0,
+                                                  (uint64_t)DS4_N_EMBD * sizeof(float)) != 0);
                 }
             }
             /* Broadcast full attn_out from tier 0 to tiers 1-3. */
             for (int tier = 1; ok && tier < 4; tier++) {
                 ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
                 size_t bytes = (size_t)DS4_N_EMBD * sizeof(float);
-                ok = ds4_rocm_xdev_copy(mesh, tier,
-                        (void *)g->attn_out_by_tier[tier]->ptr,
-                        0, (const void *)metal_graph_attn_out(g)->ptr,
-                        bytes, NULL);
+                DS4_TP4_INSTR("attn_broadcast_copy",
+                    ok = ds4_rocm_xdev_copy(mesh, tier,
+                            (void *)g->attn_out_by_tier[tier]->ptr,
+                            0, (const void *)metal_graph_attn_out(g)->ptr,
+                            bytes, NULL));
             }
             if (ok) {
                 const int devs[4] = {0, 1, 2, 3};
-                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+                DS4_TP4_INSTR("attn_broadcast_sync",
+                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
             }
 
             /* ---- HC expand: produce after_attn_hc from the full attn_out. ----
@@ -27271,7 +27391,10 @@ static bool metal_graph_encode_token_raw_swa(
              * full sum from the broadcast.  The HC expand is linear, so it is
              * safe to run independently on each tier after the sync. */
             for (int tier = 0; ok && tier < 4; tier++) {
-                if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
+                bool switched;
+                DS4_TP4_INSTR("hc_expand_tier_switch",
+                    switched = metal_graph_set_active_tier_decode(g, tier));
+                if (!switched) { ok = false; break; }
                 g->tp_rank = (uint32_t)tier;
                 if (ok) {
                     ok = ds4_gpu_hc_expand_tensor(
@@ -27286,7 +27409,8 @@ static bool metal_graph_encode_token_raw_swa(
             }
             if (ok) {
                 const int devs[4] = {0, 1, 2, 3};
-                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+                DS4_TP4_INSTR("hc_expand_sync",
+                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
             }
 
             /* ---- Dump full after_attn_hc on tier 0 after the all-reduce.
@@ -27294,7 +27418,10 @@ static bool metal_graph_encode_token_raw_swa(
              * the partial (32 heads).  This overwrites it with the correct
              * full result from the all-reduced attn_out. ---- */
             if (ok) {
-                if (!metal_graph_set_active_tier_decode(g, 0)) ok = false;
+                bool switched;
+                DS4_TP4_INSTR("hc_dump_tier0_switch",
+                    switched = metal_graph_set_active_tier_decode(g, 0));
+                if (!switched) ok = false;
             }
             if (ok) {
                 metal_graph_debug_dump_tensor("hc_attn_post",
@@ -27304,7 +27431,10 @@ static bool metal_graph_encode_token_raw_swa(
 
             /* ---- Phase 2: MoE partials ---- */
             for (int tier = 0; ok && tier < 4; tier++) {
-                if (!metal_graph_set_active_tier_decode(g, tier)) { ok = false; break; }
+                bool switched;
+                DS4_TP4_INSTR("moe_tier_switch",
+                    switched = metal_graph_set_active_tier_decode(g, tier));
+                if (!switched) { ok = false; break; }
                 g->tp_rank = (uint32_t)tier;
                 ok = metal_graph_encode_decode_layer_phase(
                         g, model, &weights->layer[il],
@@ -27316,10 +27446,16 @@ static bool metal_graph_encode_token_raw_swa(
             /* Barrier: wait for all 4 tiers' MoE compute to finish. */
             if (ok) {
                 const int devs[4] = {0, 1, 2, 3};
-                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+                DS4_TP4_INSTR("moe_barrier_sync",
+                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
             }
             /* All-reduce MoE partials on tier 0. */
-            if (ok && !metal_graph_set_active_tier_decode(g, 0)) ok = false;
+            if (ok) {
+                bool switched;
+                DS4_TP4_INSTR("moe_allreduce_tier0_switch",
+                    switched = metal_graph_set_active_tier_decode(g, 0));
+                if (!switched) ok = false;
+            }
             if (ok) {
                 ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
                 int peer_devs[3];
@@ -27331,11 +27467,12 @@ static bool metal_graph_encode_token_raw_swa(
                     peer_partials[n_peers] = (const float *)g->shared_out_by_tier[t]->ptr;
                     n_peers++;
                 }
-                ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
-                        (float *)metal_graph_routed_out(g)->ptr,
-                        (const float *)g->shared_out_by_tier[0]->ptr,
-                        peer_devs, peer_partials, n_peers,
-                        (size_t)DS4_N_EMBD, NULL);
+                DS4_TP4_INSTR("moe_allreduce",
+                    ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
+                            (float *)metal_graph_routed_out(g)->ptr,
+                            (const float *)g->shared_out_by_tier[0]->ptr,
+                            peer_devs, peer_partials, n_peers,
+                            (size_t)DS4_N_EMBD, NULL));
             }
             /* ---- Dump full routed_out on tier 0 after the MoE all-reduce.
              * The dump inside metal_graph_encode_decode_layer_phase fires on
@@ -27366,10 +27503,11 @@ static bool metal_graph_encode_token_raw_swa(
             for (int tier = 1; ok && tier < 4; tier++) {
                 ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
                 size_t bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
-                ok = ds4_rocm_xdev_copy(mesh, tier,
-                        (void *)g->cur_hc_by_tier[tier]->ptr,
-                        0, (const void *)metal_graph_after_ffn_hc(g)->ptr,
-                        bytes, NULL);
+                DS4_TP4_INSTR("ffn_broadcast_copy",
+                    ok = ds4_rocm_xdev_copy(mesh, tier,
+                            (void *)g->cur_hc_by_tier[tier]->ptr,
+                            0, (const void *)metal_graph_after_ffn_hc(g)->ptr,
+                            bytes, NULL));
             }
             /* Update cur_hc for tier 0 (swap after_ffn_hc into cur_hc). */
             if (ok) {
@@ -27379,7 +27517,8 @@ static bool metal_graph_encode_token_raw_swa(
             }
             if (ok) {
                 const int devs[4] = {0, 1, 2, 3};
-                ok = ds4_rocm_xdev_sync_all_devices(devs, 4);
+                DS4_TP4_INSTR("layer_end_sync",
+                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
             }
             /* Post-layer: dspark capture. */
             if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
