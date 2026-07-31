@@ -1,0 +1,29 @@
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-12 + embedding  (25.0 / 25.8 GB)
+  GPU1: layers 13-25  (24.1 / 25.8 GB)
+  GPU2: layers 26-38  (24.1 / 25.8 GB)
+  GPU3: layers 39-42 + output head  (7.9 / 25.8 GB)
+ds4: per-tier graph scratch reserved: 3.99 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: CUDA tier 0 (device 0) selective weights: 24.93 GiB in 393 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.95 GiB in 400 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.98 GiB in 406 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 7.90 GiB in 129 ranges
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=2.51 GiB reserve=4.00 GiB total=31.86 GiB)
+ds4: ROCm loading model tensors into device cache
+case_000 cases=1 prompt=17 target=24 avg_nll=0.368023 lcp=0 api_target_mae=0.368023 api_top_coverage=100/120 api_top1=0.833 api_topn=0.340 api_pair=0.961
+case_001 cases=2 prompt=18 target=24 avg_nll=0.254690 lcp=18 api_target_mae=0.254690 api_top_coverage=100/120 api_top1=0.917 api_topn=0.260 api_pair=1.000
+case_002 cases=3 prompt=19 target=24 avg_nll=0.299055 lcp=0 api_target_mae=0.299055 api_top_coverage=96/120 api_top1=0.875 api_topn=0.260 api_pair=1.000
+case_003 cases=4 prompt=19 target=24 avg_nll=0.345017 lcp=13 api_target_mae=0.345017 api_top_coverage=97/120 api_top1=0.958 api_topn=0.247 api_pair=1.000
+case_004 cases=5 prompt=15 target=24 avg_nll=0.760364 lcp=2 api_target_mae=0.760364 api_top_coverage=97/120 api_top1=0.625 api_topn=0.268 api_pair=1.000
+summary cases=5 tokens=120 avg_nll=0.405429743 first_match=3 avg_lcp=6.600
+api_summary ref_tokens=120 target_tokens=120 target_mae=0.405429743 target_mean_delta=-0.405429743 top_items=600 top_mapped=490 top_coverage=0.816666667 top1_match=101/120 top1_rate=0.841666667 topn_hit=135/490 topn_recall=0.275510204 top_logprob_count=490 top_mae=7533.674486837 top_mean_delta=7533.475909004 pair_agree=367/370 pair_rate=0.991891892
