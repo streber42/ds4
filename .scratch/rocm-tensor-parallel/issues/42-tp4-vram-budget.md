@@ -48,6 +48,22 @@ the primary cache is made to put weights at consistent addresses across
 configs too. Whoever implements this fix should re-run #37's per-layer
 diff (`diagnose-prefill.sh`) to confirm no regression.
 
+**Before implementing a VRAM-budget fix, run the falsifying test.** The
+link between the fallback and the avg_nll gap is correlational, not yet
+causally isolated — every configuration measured in #41 had the fallback
+firing *and* a broken score, but no run with the fallback absent was
+measured. Run `score_official` with `DS4_ROCM_WEIGHT_PATH_STATS=1` in a
+configuration that reports **zero** "arena-full skip" / "host-register
+PCIe-map" lines (e.g. cap `--gpu-vram` well below the model's per-tier
+footprint so the packer leaves deliberate headroom, accepting SSD
+streaming or a smaller effective model as the cost). If that run still
+scores ≈1.5-2.0, this root cause is exonerated and a VRAM-budget fix here
+will not close the gate — stop and re-open the investigation instead of
+spending hours on this issue's implementation. This check costs one run,
+not a redesign, and four prior "confirmed" fixes in this project (f16
+cuBLAS, cache reserve, row-split, attention gate) each left the score
+unmoved, so verifying before building is cheap insurance.
+
 This VRAM pressure is not TP=4-specific — see
 [issue #43](43-pipeline-vram-accounting-regression.md), which found the
 same fallback now also fires in pipeline mode. Note: #43's regression

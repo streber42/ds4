@@ -37,8 +37,8 @@ The pipeline reference uses fully-cached weights (no TP, no multi-GPU overhead) 
 
 ## Acceptance criteria
 
-- [x] Layer-0 tensor comparison run between TP=4 and pipeline
-- [x] Host-mapped vs cached weight numerical equivalence tested (or root cause identified)
+- [x] Layer-0 tensor comparison run between TP=4 and pipeline — *superseded: the pipeline leg cannot create a session at quality-fixture ctx (see #43), so `diagnose-prefill.sh`'s per-layer diff could not run. The arena OOM firing at layer 0 (see live trace below) localizes divergence to layer 0 directly, which is the information that comparison would have produced.*
+- [x] Host-mapped vs cached weight numerical equivalence tested (or root cause identified) — *root cause identified; see "Scope note" below for what is and isn't directly measured.*
 - [x] Root cause of remaining quality gap identified
 - [x] Issue #40 updated with findings
 
@@ -169,6 +169,30 @@ tensor is already resident there) belongs to
 cover the pipeline regression from #43 — reducing headroom alone won't
 help if `cuda_resolve_weight_ptr` keeps ignoring the primary cache for
 every batch-prefill lookup.
+
+**Important caveat — the link between the fallback and the avg_nll gap is
+correlational, not yet causally isolated.** Every configuration measured
+this session (TP=4 ctx=4096, pipeline ctx=1024, and the two bisection
+commits `414f9fc^`/`4b40c5d`) showed both the fallback firing heavily
+(~970-990 events) *and* avg_nll≈1.56-2.0. No run with **zero** fallback
+events was measured, so there is no direct A/B showing the score returns
+to ~0.37 when the fallback is absent. The mechanism is well-established
+(dead image-path code, global OOM latch, PCIe-mapped reads instead of
+VRAM reads, #37's own 2.37e-4 divergence-from-address-change measurement)
+and is the most parsimonious explanation given that four prior structural
+fixes (f16 cuBLAS attention output, cache-reserve tuning, Option B
+row-split, attention-type gate) each left the score completely unmoved —
+consistent with the real bug living below all of them, in weight
+resolution. But it has not been falsified. **The confirming test**:
+run with `DS4_ROCM_WEIGHT_PATH_STATS=1` in a configuration engineered to
+report zero "arena-full skip" / "host-register PCIe-map" lines (e.g. by
+capping `--gpu-vram` well below the model's per-tier footprint so the
+weight packer leaves deliberate headroom, at the cost of using SSD
+streaming or a smaller effective model). If that run still scores
+≈1.5-2.0, this root cause is exonerated and #42/#43 should stop before
+investing in a VRAM-budget fix. Whoever implements #42 should run this
+check first — it costs one `score_official` run, not a VRAM-budget
+redesign.
 
 #### Instrumentation added
 
