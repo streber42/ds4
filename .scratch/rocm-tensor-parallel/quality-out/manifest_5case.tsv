@@ -1,0 +1,6 @@
+# id	prompt_file	continuation_file	response_file
+case_000	gguf-tools/quality-testing/data/flash/prompts/case_000.txt	gguf-tools/quality-testing/data/flash/continuations/case_000.txt	gguf-tools/quality-testing/data/flash/responses/case_000.json
+case_001	gguf-tools/quality-testing/data/flash/prompts/case_001.txt	gguf-tools/quality-testing/data/flash/continuations/case_001.txt	gguf-tools/quality-testing/data/flash/responses/case_001.json
+case_002	gguf-tools/quality-testing/data/flash/prompts/case_002.txt	gguf-tools/quality-testing/data/flash/continuations/case_002.txt	gguf-tools/quality-testing/data/flash/responses/case_002.json
+case_003	gguf-tools/quality-testing/data/flash/prompts/case_003.txt	gguf-tools/quality-testing/data/flash/continuations/case_003.txt	gguf-tools/quality-testing/data/flash/responses/case_003.json
+case_004	gguf-tools/quality-testing/data/flash/prompts/case_004.txt	gguf-tools/quality-testing/data/flash/continuations/case_004.txt	gguf-tools/quality-testing/data/flash/responses/case_004.json

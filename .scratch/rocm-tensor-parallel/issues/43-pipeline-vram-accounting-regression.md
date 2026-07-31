@@ -35,6 +35,28 @@ never end up with no working inference because of this feature") does
 not currently hold: TP=4 initializes but produces garbled output (the
 quality gap), and pipeline — the fallback — fails to start at all.
 
+## Update (2026-07-31, from issue #42)
+
+#42's falsifying test (env-gating `ds4_gpu_set_use_host_weights(1)` off
+during batch prefill, eliminating 100% of arena/host-register fallback
+events) left pipeline avg_nll unchanged at ~1.56 — see
+[#42's Comments](42-tp4-vram-budget.md). This means the ~1.56 pipeline
+regression this issue is chasing is **not caused by the host-mapped
+weight-resolution fallback** (#41's now-retracted hypothesis). Both
+"fallback active" and "fallback eliminated" configs score ~1.56, so the
+regression is a single, still-unbisected root cause, not two overlapping
+ones. Reframe the bisection in "What to build" below accordingly — it
+does not need to also account for weight-resolution path.
+
+`ds4_gpu_set_use_host_weights(1)` at `ds4.c:30491` is now a candidate for
+removal: #42 found it buys no measured numerical benefit (0.0004 avg_nll
+delta) while forcing every batch-prefill weight lookup through PCIe
+host-register reads, which is plausibly the direct cause of this issue's
+`class_p_ok=0` session-creation failure at ctx=4096. Consider evaluating
+its removal (with its own before/after measurement) as part of this
+issue's fix, using the `DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL` diagnostic
+env-gate #42 left in place at that call site to A/B it first.
+
 ## Root cause: NOT bisected — an earlier attribution to commit 414f9fc was tested and disproven
 
 An earlier version of this issue attributed the regression to commit

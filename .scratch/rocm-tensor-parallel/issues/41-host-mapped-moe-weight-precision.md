@@ -2,6 +2,22 @@
 
 Status: closed
 
+## RETRACTION (2026-07-31, from issue #42)
+
+**The root cause conclusion below is disproven.** #42 ran the exact
+falsifying test this issue's own "Important caveat" section called for:
+env-gate `ds4_gpu_set_use_host_weights(1)` off during batch prefill
+(`DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL=1`) so weight resolution goes through
+the primary per-device cache with **zero** arena-full-skip / host-register
+events (confirmed by grepping the run log for both instrumentation
+strings), in the exact pipeline/ctx=1024/cases-000-004 configuration
+measured here. Result: avg_nll = 1.5625, versus 1.563 with the fallback
+active — unchanged to four significant figures. The host-mapped-fallback
+mechanism described below is real (confirmed by static analysis and live
+instrumentation) but it does **not** explain the quality gap. See
+[issue #42's Comments](42-tp4-vram-budget.md) for the full A/B table and
+reasoning. The root cause of the ~1.5-2.0 avg_nll gap is still open.
+
 ## Parent
 
 `.scratch/rocm-tensor-parallel/issues/32-tp4-quality-fixture.md`

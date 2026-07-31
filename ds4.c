@@ -30583,8 +30583,22 @@ static bool metal_graph_encode_layer_batch(
      * pipeline and TP=4 modes.  The ~2.37e-4 error in the shared expert
      * at layer 0 compounds exponentially across 43 layers.  Using the model
      * image pointer (same address in both modes) keeps all tensors bit-
-     * identical for the first 38 layers (issue #37). */
-    ds4_gpu_set_use_host_weights(1);
+     * identical for the first 38 layers (issue #37).
+     *
+     * DIAGNOSTIC (issue #42): DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL=1 skips this
+     * call so cuda_resolve_weight_ptr falls through to the primary per-device
+     * selective cache instead of the arena/host-register fallback. Used to
+     * falsify issue #41's hypothesis that the fallback path (rather than FP
+     * noise from cache-address differences) causes the ~1.5-2.0 avg_nll gap
+     * — result: falsified, avg_nll unchanged (1.5625 vs 1.563) with zero
+     * fallback events, see #42's Comments. Left in place as a standing
+     * diagnostic switch (off by default, no release-path effect) for #43,
+     * whose owner will want to re-run this A/B; also useful evidence that
+     * ds4_gpu_set_use_host_weights(1) here buys no measured consistency
+     * benefit and is a candidate for removal. */
+    if (!getenv("DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL")) {
+        ds4_gpu_set_use_host_weights(1);
+    }
 #ifdef DS4_ROCM_BUILD
     /* Temporarily clear the Q8→f16 dequant cache VRAM reserve during TP=4
      * batch prefill.  With per-layer eviction the cache never holds more than
