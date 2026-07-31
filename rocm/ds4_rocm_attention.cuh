@@ -36,20 +36,13 @@ __global__ static void attention_prefill_raw_kernel(
     __shared__ float denom;
     float scale = rsqrtf((float)head_dim);
     float local_max = sinks[h];
-    const uint32_t n4 = head_dim >> 2u;
-    const uint32_t tail = n4 << 2u;
     __syncthreads();
+    /* FIX issue #48: scalar dot accumulation restored (same rationale as the
+     * mixed kernels — fa59d97's float4 grouping changes fp32 rounding). */
     for (uint32_t r = threadIdx.x; r < raw_count; r += blockDim.x) {
-        const float4 *kv4 = (const float4 *)(raw_kv + (uint64_t)(raw_start + r) * head_dim);
-        const float4 *q4  = (const float4 *)qh;
+        const float *kvrow = raw_kv + (uint64_t)(raw_start + r) * head_dim;
         float dot = 0.0f;
-        #pragma unroll 16
-        for (uint32_t i = 0; i < n4; i++) {
-            const float4 qv  = q4[i];
-            const float4 kvv = kv4[i];
-            dot += qv.x * kvv.x + qv.y * kvv.y + qv.z * kvv.z + qv.w * kvv.w;
-        }
-        for (uint32_t d = tail; d < head_dim; d++) dot += qh[d] * (raw_kv[(uint64_t)(raw_start + r) * head_dim + d]);
+        for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
         scores[r] = dot * scale;
         local_max = fmaxf(local_max, scores[r]);
     }
@@ -111,20 +104,15 @@ __global__ static void attention_prefill_mixed_kernel(
     float local_max = sinks[h];
     uint32_t n_score = raw_count + visible_comp;
     if (n_score > DS4_ROCM_ATTENTION_PREFILL_MIXED_SCORE_CAP) return;
-    const uint32_t n4 = head_dim >> 2u;
-    const uint32_t tail = n4 << 2u;
 
+    /* FIX issue #48: scalar dot accumulation restored.  The fa59d97 vectorized
+     * float4 variant grouped four products before each add, changing fp32
+     * rounding vs. the reference baseline.  Restores the exact pre-fa59d97
+     * arithmetic (measured effect on the 5-case oracle is <0.1%). */
     for (uint32_t r = threadIdx.x; r < raw_count; r += blockDim.x) {
-        const float4 *kv4 = (const float4 *)(raw_kv + (uint64_t)(raw_start + r) * head_dim);
-        const float4 *q4  = (const float4 *)qh;
+        const float *kvrow = raw_kv + (uint64_t)(raw_start + r) * head_dim;
         float dot = 0.0f;
-        #pragma unroll 16
-        for (uint32_t i = 0; i < n4; i++) {
-            const float4 qv  = q4[i];
-            const float4 kvv = kv4[i];
-            dot += qv.x * kvv.x + qv.y * kvv.y + qv.z * kvv.z + qv.w * kvv.w;
-        }
-        for (uint32_t d = tail; d < head_dim; d++) dot += qh[d] * (raw_kv[(uint64_t)(raw_start + r) * head_dim + d]);
+        for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
         scores[r] = dot * scale;
         local_max = fmaxf(local_max, scores[r]);
     }
@@ -137,15 +125,8 @@ __global__ static void attention_prefill_mixed_kernel(
                 const __half *kvrow = ((const __half *)comp_kv) + (uint64_t)c * head_dim;
                 for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * __half2float(kvrow[d]);
             } else {
-                const float4 *kv4 = (const float4 *)((const float *)comp_kv + (uint64_t)c * head_dim);
-                const float4 *q4  = (const float4 *)qh;
-                #pragma unroll 16
-                for (uint32_t i = 0; i < n4; i++) {
-                    const float4 qv  = q4[i];
-                    const float4 kvv = kv4[i];
-                    dot += qv.x * kvv.x + qv.y * kvv.y + qv.z * kvv.z + qv.w * kvv.w;
-                }
-                for (uint32_t d = tail; d < head_dim; d++) dot += qh[d] * (((const float *)comp_kv)[(uint64_t)c * head_dim + d]);
+                const float *kvrow = ((const float *)comp_kv) + (uint64_t)c * head_dim;
+                for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
             }
             s = dot * scale + add;
         }
@@ -302,20 +283,15 @@ __global__ static void attention_prefill_mixed_range_kernel(
     float local_max = sinks[h];
     uint32_t n_score = raw_count + visible_comp;
     if (n_score > DS4_ROCM_ATTENTION_PREFILL_MIXED_SCORE_CAP) return;
-    const uint32_t n4 = head_dim >> 2u;
-    const uint32_t tail = n4 << 2u;
 
+    /* FIX issue #48: scalar dot accumulation restored.  The fa59d97 vectorized
+     * float4 variant grouped four products before each add, changing fp32
+     * rounding vs. the reference baseline.  Restores the exact pre-fa59d97
+     * arithmetic (measured effect on the 5-case oracle is <0.1%). */
     for (uint32_t r = threadIdx.x; r < raw_count; r += blockDim.x) {
-        const float4 *kv4 = (const float4 *)(raw_kv + (uint64_t)(raw_start + r) * head_dim);
-        const float4 *q4  = (const float4 *)qh;
+        const float *kvrow = raw_kv + (uint64_t)(raw_start + r) * head_dim;
         float dot = 0.0f;
-        #pragma unroll 16
-        for (uint32_t i = 0; i < n4; i++) {
-            const float4 qv  = q4[i];
-            const float4 kvv = kv4[i];
-            dot += qv.x * kvv.x + qv.y * kvv.y + qv.z * kvv.z + qv.w * kvv.w;
-        }
-        for (uint32_t d = tail; d < head_dim; d++) dot += qh[d] * (raw_kv[(uint64_t)(raw_start + r) * head_dim + d]);
+        for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
         scores[r] = dot * scale;
         local_max = fmaxf(local_max, scores[r]);
     }
@@ -328,15 +304,8 @@ __global__ static void attention_prefill_mixed_range_kernel(
                 const __half *kvrow = ((const __half *)comp_kv) + (uint64_t)c * head_dim;
                 for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * __half2float(kvrow[d]);
             } else {
-                const float4 *kv4 = (const float4 *)((const float *)comp_kv + (uint64_t)c * head_dim);
-                const float4 *q4  = (const float4 *)qh;
-                #pragma unroll 16
-                for (uint32_t i = 0; i < n4; i++) {
-                    const float4 qv  = q4[i];
-                    const float4 kvv = kv4[i];
-                    dot += qv.x * kvv.x + qv.y * kvv.y + qv.z * kvv.z + qv.w * kvv.w;
-                }
-                for (uint32_t d = tail; d < head_dim; d++) dot += qh[d] * (((const float *)comp_kv)[(uint64_t)c * head_dim + d]);
+                const float *kvrow = ((const float *)comp_kv) + (uint64_t)c * head_dim;
+                for (uint32_t d = 0; d < head_dim; d++) dot += qh[d] * kvrow[d];
             }
             s = dot * scale + add;
         }
@@ -1743,9 +1712,18 @@ __global__ static void attention_prefill_sp_online_kernel(
                 float4 k1 = kv4[lane + 32u];
                 float4 k2 = kv4[lane + 64u];
                 float4 k3 = kv4[lane + 96u];
+                /* Each lane holds 16 of the 512 dims (4 float4s at lane,
+                 * lane+32, lane+64, lane+96), so dot4_f32 sums only a per-lane
+                 * partial.  Reduce the 32 partials with warp_sum_f32 (result
+                 * lands in lane 0), then broadcast to all lanes so every lane
+                 * uses the same full 512-dim score in the online softmax.
+                 * (FIX issue #48: the previous __shfl_sync(score, 0) broadcast
+                 * lane 0's 16-element partial, corrupting the attention scores
+                 * and collapsing prefill quality.) */
                 float score = (dot4_f32(qv[0], k0) + dot4_f32(qv[1], k1) +
                                dot4_f32(qv[2], k2) + dot4_f32(qv[3], k3))
                               * scale;
+                score = warp_sum_f32(score);
                 score = __shfl_sync(FULL_WARP_MASK, score, 0);
 
                 const double sd = (double)score;

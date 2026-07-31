@@ -128,6 +128,28 @@ extern "C" int ds4_gpu_attention_prefill_raw_heads_tensor(ds4_gpu_tensor *heads,
      * 768 tokens.  Raw KV only (no compressed KV support needed here). */
     if (n_tokens > 1 && head_dim == 512 && !g_quality_mode) {
         dim3 grid(n_tokens, (n_head + 7u) / 8u, 1);
+        /* The two-pass heads8 kernel (attention_static_mixed_heads8_online_kernel)
+         * is the arithmetic that produced the project's pipeline reference
+         * baseline (avg_nll 0.374733 / cases 000-004 0.4054).  Commit fa59d97
+         * replaced it with the single-pass double-precision online kernel
+         * (attention_prefill_sp_online_kernel), whose different FP
+         * accumulation corrupts the reference (0.405 -> 1.56 avg_nll on the
+         * 5-case oracle) — issue #48.  Use the heads8 kernel for the sequences
+         * it can handle (<= 768 tokens, matching the pre-fa59d97 condition) and
+         * the single-pass kernel (bug-fixed: full warp sum of the dot) only
+         * for longer sequences where heads8 returns without writing.
+         * DS4_ROCM_ATTN_OLD_KERNEL=1 forces heads8 for A/B diagnostics. */
+        if (getenv("DS4_ROCM_ATTN_OLD_KERNEL") ||
+            (window != 0u ? window : n_tokens) <= 768u) {
+            attention_static_mixed_heads8_online_kernel<<<grid, 256>>>(
+                    (float *)heads->ptr,
+                    sinks,
+                    (const float *)q->ptr,
+                    (const float *)raw_kv->ptr,
+                    (const float *)raw_kv->ptr,
+                    n_tokens, 0, window, 1, n_head, head_dim);
+            return cuda_ok(cudaGetLastError(), "attention heads8 online launch");
+        }
         attention_prefill_sp_online_kernel<<<grid, 256>>>(
                 (float *)heads->ptr,
                 sinks,

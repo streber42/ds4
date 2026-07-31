@@ -22105,15 +22105,20 @@ static bool metal_graph_encode_decode_layer_phase(
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
     /* Per-expert byte size for MoE dispatch.
-     * In ROCm TP=4 mode, t->bytes is sharded (holds 64 experts), so dividing
-     * by 64 gives the per-expert shard size. In non-TP pipeline mode, t->bytes
-     * holds all 256 experts, so use expert_mid_dim * gate_row_bytes. */
+     * t->bytes always holds the full DS4_N_EXPERT-expert tensor (not a shard):
+     * the TP=4 device cache installs a per-tier shard of t->bytes / 4 (64
+     * experts) at abs_offset + tier * shard_bytes.  So per-expert size is
+     * bytes / DS4_N_EXPERT for both modes, and 64 * gate_expert_bytes ==
+     * t->bytes / 4 == the TP=4 cache shard size.  Non-TP pipeline mode instead
+     * uses the dims-based size (expert_mid_dim * gate_row_bytes) as the anchor
+     * reference did, because there the cache holds all 256 experts and the
+     * dims-based size must match the strict range lookup exactly. */
     const uint64_t gate_expert_bytes = g->rocm_tp4
-        ? layer->ffn_gate_exps->bytes / (DS4_N_EXPERT / 4u)
+        ? layer->ffn_gate_exps->bytes / DS4_N_EXPERT
         : expert_mid_dim * gate_row_bytes;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
     const uint64_t down_expert_bytes = g->rocm_tp4
-        ? layer->ffn_down_exps->bytes / (DS4_N_EXPERT / 4u)
+        ? layer->ffn_down_exps->bytes / DS4_N_EXPERT
         : routed_out_dim * down_row_bytes;
     const bool compressed = ds4_layer_compress_ratio(il) != 0;
     const float freq_base = layer_rope_freq_base(il);
@@ -29771,15 +29776,20 @@ static bool metal_graph_encode_layer_ffn_batch(
     const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
     const uint64_t gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
     /* Per-expert byte size for MoE dispatch.
-     * In ROCm TP=4 mode, t->bytes is sharded (holds 64 experts), so dividing
-     * by 64 gives the per-expert shard size. In non-TP pipeline mode, t->bytes
-     * holds all 256 experts, so use expert_mid_dim * gate_row_bytes. */
+     * t->bytes always holds the full DS4_N_EXPERT-expert tensor (not a shard):
+     * the TP=4 device cache installs a per-tier shard of t->bytes / 4 (64
+     * experts) at abs_offset + tier * shard_bytes.  So per-expert size is
+     * bytes / DS4_N_EXPERT for both modes, and 64 * gate_expert_bytes ==
+     * t->bytes / 4 == the TP=4 cache shard size.  Non-TP pipeline mode instead
+     * uses the dims-based size (expert_mid_dim * gate_row_bytes) as the anchor
+     * reference did, because there the cache holds all 256 experts and the
+     * dims-based size must match the strict range lookup exactly. */
     const uint64_t gate_expert_bytes = g->rocm_tp4
-        ? layer->ffn_gate_exps->bytes / (DS4_N_EXPERT / 4u)
+        ? layer->ffn_gate_exps->bytes / DS4_N_EXPERT
         : expert_mid_dim * gate_row_bytes;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
     const uint64_t down_expert_bytes = g->rocm_tp4
-        ? layer->ffn_down_exps->bytes / (DS4_N_EXPERT / 4u)
+        ? layer->ffn_down_exps->bytes / DS4_N_EXPERT
         : routed_out_dim * down_row_bytes;
     const bool layer_stage_profile = metal_graph_layer_stage_profile_enabled(il);
     double layer_stage_t0 = layer_stage_profile ? now_sec() : 0.0;
@@ -30578,7 +30588,16 @@ static bool metal_graph_encode_layer_batch(
      * Each layer uses different weight offsets so inter-layer cache reuse is
      * nonexistent; clearing per layer wastes no work. */
 #ifdef DS4_ROCM_BUILD
-    ds4_gpu_release_q8_f16_cache();
+    /* Eviction is TP=4-only (FIX issue #48): the comment above describes a
+     * TP=4 VRAM-exhaustion problem, but clearing the dequant cache per layer
+     * also changes pipeline prefill FP arithmetic vs. the reference baseline
+     * (~0.6% on the 5-case oracle).  The pipeline spreads layers across 4
+     * devices and never exhausts the reserve, so it must keep the cache.
+     * DS4_ROCM_KEEP_Q8F16_CACHE=1 additionally forces the skip for A/B
+     * diagnostics. */
+    if (g->rocm_tp4 && !getenv("DS4_ROCM_KEEP_Q8F16_CACHE")) {
+        ds4_gpu_release_q8_f16_cache();
+    }
 #endif
     /* Host-mapped weight pointers for the entire batch prefill to avoid
      * floating-point noise from different device-cache addresses between
