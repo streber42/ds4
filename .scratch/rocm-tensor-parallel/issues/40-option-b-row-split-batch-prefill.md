@@ -1,6 +1,6 @@
 # 40 — Option B: row-split batch prefill refactor (close quality gate)
 
-Status: ready-for-agent (blocked on #41, #42)
+Status: ready-for-human (blocked on #41, #42)
 
 ## Parent
 
@@ -149,6 +149,18 @@ quality gap. The root cause appears deeper — see sibling issues:
   may eliminate the host-mapped fallback.
 
 ## Comments
+
+**Ralph loop, 2026-07-31 (00:34 run):** No code changes this invocation. #40's
+build scope (row-split refactor) is complete per `435fa93`; nothing left to
+implement. The quality gate genuinely fails (avg_nll 1.7196 vs target
+0.370–0.378, first_match 0/100 — see "Quality Results" below) and root cause
+is owned by #41/#42, both still open. Setting status to `ready-for-human`
+instead of `in-progress`: the engine's `recover_orphaned_in_progress` resets
+any `in-progress` issue with no matching `.worktrees/` dir back to
+`ready-for-agent` on every run, which was causing this issue to be
+re-selected and burn empty invocations (two prior runs tonight, 00:19 and
+00:34, both produced nothing). `ready-for-human` is exempt from that reset
+path. No checkboxes changed.
 
 **Correction (2026-07-31, human review):** The comment below was written as
 if the implementation were still uncommitted and untested ("unable to
