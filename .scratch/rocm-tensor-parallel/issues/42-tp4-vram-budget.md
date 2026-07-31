@@ -6,6 +6,39 @@ Status: ready-for-agent
 
 `.scratch/rocm-tensor-parallel/issues/32-tp4-quality-fixture.md`
 `.scratch/rocm-tensor-parallel/issues/40-option-b-row-split-batch-prefill.md`
+`.scratch/rocm-tensor-parallel/issues/41-host-mapped-moe-weight-precision.md` (closed — root cause)
+
+## Update (2026-07-31, from issue #41)
+
+Issue #41's investigation confirmed the mechanism behind this OOM and
+found it is larger than "moe_gate specifically doesn't fit": every
+weight tensor resolved during batch prefill — attention, router, shared
+expert, and MoE alike — goes through this same arena/host-mapped-fallback
+path, because `ds4_gpu_set_use_host_weights(1)` (set unconditionally at
+the top of `metal_graph_encode_layer_batch`) bypasses the primary,
+already-populated per-device selective weight cache entirely during batch
+prefill and re-resolves everything via this separate arena instead.
+That arena duplicates VRAM already spent on the primary cache and
+overflows almost immediately (observed: layer 0, not deep into the
+network). Once it overflows, the failure is permanent for the rest of
+the process (`g_model_cache_full` is a global latch, not per-device).
+
+**Implication for this issue's fix options:** Option A (reduce per-tier
+overhead) will buy some headroom but the real waste is the redundant
+arena copy of data that's already cached — freeing ~1 GiB via overhead
+tuning may just delay the OOM by a few layers rather than eliminate it.
+A fix that makes `cuda_resolve_weight_ptr` check the primary selective
+cache *before* falling through to the arena (i.e., don't set
+`g_use_host_weights` blindly, or have `cuda_model_range_ptr` try
+`ds4_gpu_lookup_cache_strict` even when the flag is set) would eliminate
+the redundant allocation at the source rather than just buying more
+headroom for it. See #41's Comments for the full trace and code path.
+
+This VRAM pressure is not TP=4-specific — see
+[issue #43](43-pipeline-vram-accounting-regression.md), which found the
+same fallback now also fires in pipeline mode due to a separate
+accounting regression (`414f9fc`). Any fix here should be validated
+against both TP=4 and pipeline configurations.
 
 ## Problem
 

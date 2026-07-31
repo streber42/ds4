@@ -4850,6 +4850,16 @@ static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, 
                 char *dev_ptr = (char *)reg_dev + reg_delta;
                 g_model_ranges.push_back({model_map, offset, bytes, dev_ptr, (void *)reg_addr, (char *)reg_dev, reg_bytes, 1, 0});
                 g_model_range_by_offset[offset] = g_model_ranges.size() - 1u;
+                if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
+                    static uint64_t registered = 0;
+                    registered++;
+                    int dev = -1;
+                    (void)cudaGetDevice(&dev);
+                    fprintf(stderr, DS4_GPU_LOG_PREFIX "host-register PCIe-map #%llu dev=%d for %s "
+                            "(%.2f MiB, offset=%.2f GiB)\n",
+                            (unsigned long long)registered, dev, what ? what : "weights",
+                            (double)bytes / 1048576.0, (double)offset / 1073741824.0);
+                }
                 return dev_ptr;
             }
             fprintf(stderr, DS4_GPU_LOG_PREFIX "model range map pointer failed for %s: %s\n",
@@ -5788,7 +5798,18 @@ static uint64_t cuda_model_arena_chunk_bytes(uint64_t need) {
 
 static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     if (bytes == 0) return NULL;
-    if (g_model_cache_full) return NULL;
+    if (g_model_cache_full) {
+        if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
+            static uint64_t skipped = 0;
+            skipped++;
+            int dev = -1;
+            (void)cudaGetDevice(&dev);
+            fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
+                    (unsigned long long)skipped, dev, what ? what : "weights",
+                    (double)bytes / 1048576.0);
+        }
+        return NULL;
+    }
     const uint64_t align = 256u;
     const uint64_t aligned = (bytes + align - 1u) & ~(align - 1u);
 

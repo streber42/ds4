@@ -1,6 +1,6 @@
 # 40 — Option B: row-split batch prefill refactor (close quality gate)
 
-Status: ready-for-human (blocked on #41, #42)
+Status: ready-for-human (blocked on #42, #43)
 
 ## Parent
 
@@ -123,30 +123,55 @@ Estimated ~800–1200 lines of changes in `ds4.c`:
 ## Blocked by
 
 - [Issue #41 — Host-mapped MoE weight numerical impact](41-host-mapped-moe-weight-precision.md)
-  (in-progress) — root-cause investigation for the remaining ~1.72 avg_nll
-  gap.
+  (closed 2026-07-31) — root cause **confirmed**: `ds4_gpu_set_use_host_weights(1)`
+  is set unconditionally for every batch-prefill layer (both TP=4 and
+  pipeline), which bypasses the primary pre-loaded VRAM weight cache and
+  re-resolves every weight through a separate, VRAM-hungry arena that
+  exhausts almost immediately (layer 0) and permanently falls back to
+  PCIe host-register reads for the rest of the run. This is the actual
+  mechanism behind the ~1.72 avg_nll gap — see #41's Comments for the
+  live-instrumented trace.
 - [Issue #42 — Free VRAM budget for TP=4](42-tp4-vram-budget.md)
-  (ready-for-agent) — eliminate the host-mapped MoE weight fallback
-  suspected to be causing the gap.
+  (ready-for-agent) — now scoped to include the fix for the mechanism #41
+  identified, not just "reduce overhead until moe_gate fits."
+- [Issue #43 — Pipeline VRAM-accounting regression](43-pipeline-vram-accounting-regression.md)
+  (ready-for-agent, new) — **the pipeline reference baseline this issue's
+  target scores are measured against is currently stale.** Re-running it
+  on today's tree gives avg_nll ≈ 1.56, not 0.375 — pipeline mode now hits
+  the same fallback #41 describes, due to a VRAM-accounting regression in
+  commit `414f9fc`. #40's quality gate cannot be meaningfully evaluated
+  until #43 restores a reproducible pipeline baseline.
 
 The row-split refactor itself (this issue's "What to build") is complete
 and merged. This issue stays open because its acceptance criteria include
 closing the quality gate, which has not happened — see the 2026-07-31
-human review note in `## Comments` below.
+human review note in `## Comments` below, and the 2026-07-31 #41 findings
+above: the row-split architecture was never the problem, so no code
+change in *this* issue will close the gate. The fix lives in #42/#43.
 
 ## Follow-up Issues
 
 The Option B row-split implementation runs cleanly but does not close the
-quality gap. The root cause appears deeper — see sibling issues:
+quality gap. **Root cause identified 2026-07-31 (issue #41): it was never
+the row-split architecture.** Every batch-prefill weight lookup, in both
+TP=4 and pipeline mode, bypasses the pre-loaded VRAM weight cache via
+`ds4_gpu_set_use_host_weights(1)` and re-resolves through a small arena
+that overflows at layer 0, permanently falling back to PCIe host-register
+reads for the remainder of the run. See sibling issues:
 
 - [Issue #41 — Host-mapped MoE weight numerical impact](41-host-mapped-moe-weight-precision.md)
-  Investigate whether `ds4_gpu_routed_moe_batch_tensor` with host-mapped
-  (uncached) MoE weights produces numerically different outputs from
-  fully-cached weights.
+  Closed. Root cause confirmed with a live instrumented trace (~970-990
+  fallback weight resolutions per 5-case run, starting at layer 0).
 - [Issue #42 — Free VRAM budget for TP=4](42-tp4-vram-budget.md)
   The `moe_gate` 1024 MiB allocation fails due to VRAM pressure
-  (27.79 GiB budget, 25.94 GiB weights). Reducing per-tier overhead
-  may eliminate the host-mapped fallback.
+  (27.79 GiB budget, 25.94 GiB weights). Reducing per-tier overhead alone
+  won't fix the underlying issue — see #41: the real waste is
+  `ds4_gpu_set_use_host_weights` re-fetching weights that are already
+  cached, not merely "not enough budget for moe_gate."
+- [Issue #43 — Pipeline VRAM-accounting regression](43-pipeline-vram-accounting-regression.md)
+  New. The pipeline reference baseline (avg_nll=0.374733) is not
+  currently reproducible; a `414f9fc` accounting change starves pipeline
+  mode of the same headroom TP=4 lacks.
 
 ## Comments
 
