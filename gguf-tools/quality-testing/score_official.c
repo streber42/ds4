@@ -21,6 +21,7 @@ static void die(const char *msg) {
 static void usage(const char *prog) {
     fprintf(stderr,
             "usage: %s MODEL manifest.tsv OUT.tsv [ctx] "
+            "[--cpu] [-t N|--threads N] "
             "[--ssd-streaming] [--ssd-streaming-cold] "
             "[--ssd-streaming-cache-experts N|NGB] "
             "[--ssd-streaming-preload-experts N] "
@@ -532,6 +533,8 @@ int main(int argc, char **argv) {
     const char *gpu_devices_arg = NULL;
     const char *gpu_vram_arg = NULL;
     bool cuda_tensor_parallel = false;
+    bool use_cpu = false;
+    int n_threads = 0;
 
     for (int i = 4; i < argc; i++) {
         const char *arg = argv[i];
@@ -541,6 +544,10 @@ int main(int argc, char **argv) {
             gpu_vram_arg = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--cuda-tensor-parallel")) {
             cuda_tensor_parallel = true;
+        } else if (!strcmp(arg, "--cpu")) {
+            use_cpu = true;
+        } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
+            n_threads = parse_positive_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--ssd-streaming")) {
             ssd_streaming = true;
         } else if (!strcmp(arg, "--ssd-streaming-cold")) {
@@ -570,12 +577,13 @@ int main(int argc, char **argv) {
 
     ds4_engine_options opt = {
         .model_path = model_path,
+        .backend = use_cpu ? DS4_BACKEND_CPU :
 #ifdef __APPLE__
-        .backend = DS4_BACKEND_METAL,
+        DS4_BACKEND_METAL,
 #else
-        .backend = DS4_BACKEND_CUDA,
+        DS4_BACKEND_CUDA,
 #endif
-        .n_threads = 0,
+        .n_threads = n_threads,
         .ssd_streaming_cache_experts = ssd_streaming_cache_experts,
         .ssd_streaming_cache_bytes = ssd_streaming_cache_bytes,
         .ssd_streaming_preload_experts = ssd_streaming_preload_experts,
