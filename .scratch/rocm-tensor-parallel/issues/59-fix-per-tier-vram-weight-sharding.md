@@ -37,7 +37,8 @@ fast VRAM.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/62-remeasure-quality-fixture-on-head.md`
+*(nothing — `#62`'s HEAD re-measurement is done; human disposition is to
+proceed directly to this issue)*
 
 ## Comments
 
@@ -84,3 +85,28 @@ above come from logs timestamped 04:44–05:46, which predate commits `1fe4829`
 and `0cb9cf3`. The per-tier figure is corroborated across both the full and
 discriminator runs so is very likely still current, but re-confirm it on a HEAD
 build before sizing the fix.
+
+**2026-08-01 — Confirmed current on HEAD; escalated. Cleared to start, human
+disposition (option 2 of #62's proposed next steps: proceed straight here,
+no further TP=4 retries).** `#62` re-ran the fixture against the post-`1fe4829`/
+post-`0cb9cf3` HEAD build and the 25.94 GiB/tier figure and per-tier VRAM
+pressure are still live — confirmed via the same four `CUDA tier N ...
+selective weights: 25.94 GiB in 1328 ranges` lines in both new TP=4 runs.
+
+The situation is worse than the caveat above anticipated: this issue is no
+longer just about reclaiming ~5.7 GiB for throughput/headroom. Both HEAD TP=4
+runs hit `ds4: ROCm model arena alloc failed for moe_down (1024.00 MiB
+chunk): out of memory` **before any case was scored** (same tensor
+deterministically both times), and what happens after that failure varies:
+one run crashed outright (`case_019 logits failed at target token 21`), the
+other completed all 100 cases but with avg_nll 16.43 (median 16.36, every
+case in the ≥2 bucket) — garbage output, not drift. `q8 fp16 cache budget
+exhausted` warnings went 860 → 4300 between the two runs, consistent with
+worsening fragmentation against the same ~0.35 GiB free-VRAM margin.
+
+This means AC3 ("verification run confirms `arena alloc failed` warnings are
+gone") is now the load-bearing acceptance criterion, not a nice-to-have — a
+model that cannot reliably allocate `moe_down` is not a smaller quality gap,
+it's an unusable TP=4 path. `#58` stays blocked on this issue per the human's
+call: its race hypothesis can't be evaluated against a config that can't
+reliably initialize in the first place.

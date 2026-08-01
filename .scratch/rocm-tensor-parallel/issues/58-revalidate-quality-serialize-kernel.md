@@ -36,9 +36,32 @@ cached VRAM pointers.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/62-remeasure-quality-fixture-on-head.md`
+`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
 
 ## Comments
+
+**2026-08-01 — #62's HEAD re-measurement disposition: stay blocked, re-pointed
+at #59.** (Human: proceed straight to #59, no further TP=4 retries on #62.)
+
+`#62` re-ran the fixture on HEAD (post-`1fe4829`/`0cb9cf3`) and found neither
+of the outcomes anyone expected. Two TP=4 attempts, both hitting `arena alloc
+failed for moe_down` before any case scored: one crashed at case 19/100, one
+completed all 100 cases at avg_nll 16.43 (median 16.36, **every case in the
+≥2 bucket**) — ~44x the PRD bar, ~20x worse than the old 0.7607 figure this
+issue's "What to build" cites. That number is now even less usable as this
+issue's target than the stale 0.7607 was.
+
+The distribution-shape argument against this issue's compressor-race premise
+(recorded below, from the old artifacts) is *not* the whole story anymore:
+the new result's determinism is split — same failing tensor both times
+(favors #59: VRAM pressure), but a different consequence each time, crash vs.
+silent corruption (the run-to-run variance that would favor this issue's
+race hypothesis). Re-pointed `Blocked by` from `#62` to `#59` per the human's
+decision: run `#59` first regardless, since the VRAM-driven alloc failure
+gates everything downstream either way, and re-evaluate this issue's premise
+once TP=4 can produce a stable run at all. AC3 (`g_use_host_weights`
+alignment) remains valid and independent of this — worth splitting out if
+picked up before the rest of this issue is unblocked.
 
 **2026-08-01 — Re-scoped on audit; premise is now in doubt.** (Human
 authorization given to override prior dispositions and make issues reflect

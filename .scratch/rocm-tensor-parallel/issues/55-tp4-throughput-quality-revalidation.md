@@ -99,3 +99,22 @@ reopened — two of its acceptance criteria were checked without basis, includin
 the quality one. Full evidence in `experiment-log.md`, "Audit of the 0.7607
 TP=4 quality number".
 
+**2026-08-01 — `#62` result: serialize-agreement question answered (pipeline
+side); TP=4 side now has a different, worse problem.** The open question in
+the audit above — whether `q_pipeline_51` and `q_tp4_51` ran under the same
+`AMD_SERIALIZE_KERNEL` setting — is answered for the pipeline half: a HEAD
+run explicitly forced to `AMD_SERIALIZE_KERNEL=3` reproduces `q_pipeline_51`'s
+0.3692 bit-for-bit, so that historical run was serialized too. The 0.37 side
+of the old 0.37-vs-0.76 comparison was not invalidated by a serialize
+mismatch.
+
+The TP=4 side can no longer be checked the same way, because HEAD's TP=4 path
+does not currently produce a stable measurement at all under
+`AMD_SERIALIZE_KERNEL=3` — two attempts hit `arena alloc failed for moe_down`
+before scoring and then diverged into a crash (case 19/100) and a completed-
+but-garbage run (avg_nll 16.43, every case ≥2). This issue's AC4 stays
+genuinely unmet, now for a different and more serious reason than staleness.
+Human disposition: proceed to `#59` (VRAM sharding) before any further attempt
+to re-validate this issue's quality AC. Full detail in `experiment-log.md`,
+"Issue 62: Re-measured HEAD, found a third outcome."
+

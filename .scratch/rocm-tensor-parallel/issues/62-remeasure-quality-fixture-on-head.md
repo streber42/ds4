@@ -1,6 +1,6 @@
 # 62 — Re-measure the 100-case quality fixture on HEAD under a controlled serialize setting
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -118,11 +118,21 @@ stay open pending #59.
 
 Full detail, per-case tables, and the reasoning trail: see the
 `experiment-log.md` entry "Issue 62: Re-measured HEAD, found a third
-outcome." Status left `ready-for-human` — this is a materially worse and
-different finding than the issue anticipated, and needs a human call on
-next steps (retry TP=4 more times to build a distribution over the
-crash/corruption split? proceed straight to #59? something else) before
-this issue can close.
+outcome."
+
+**2026-08-01 — Human disposition: proceed directly to `#59`, no further TP=4
+retries on this issue.** Two runs (one crash, one 44x-bar garbage, both
+gated by the same deterministic `arena alloc failed for moe_down`) are
+sufficient evidence that TP=4 cannot currently produce a usable measurement,
+and that #59's VRAM budgeting is implicated regardless of how the
+crash-vs-corruption split resolves. Disposition written into `#58` (re-
+blocked on `#59`, its race hypothesis deferred until TP=4 can initialize
+reliably), `#59` (escalated — AC3, "arena alloc failed warnings gone", is
+now load-bearing, not a nice-to-have), and `#55` (serialize-agreement
+question answered on the pipeline side; TP=4 side blocked on the same
+finding). This issue is done: it produced a trustworthy pipeline number and
+established, with primary evidence, that no trustworthy TP=4 number
+currently exists.
 
 ## Notes for whoever picks this up
 
