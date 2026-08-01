@@ -1,6 +1,6 @@
 # 51 — Roll out the persistent-thread/async-stream execution engine to all 43 layers
 
-Status: closed
+Status: ready-for-agent
 
 ## Parent
 
@@ -42,6 +42,8 @@ collective is #52's job, deliberately kept separate and HITL-gated.
 `.scratch/rocm-tensor-parallel/issues/50-tp4-execution-engine-spike.md`
 `.scratch/rocm-tensor-parallel/issues/56-tp4-threaded-teardown-crash.md`
 `.scratch/rocm-tensor-parallel/issues/57-tp4-compressed-cache-concurrency-race.md`
+`.scratch/rocm-tensor-parallel/issues/58-revalidate-quality-serialize-kernel.md`
+`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
 
 ## Comments
 
@@ -135,3 +137,27 @@ don't require #51 itself to close first:
 
 The BLAS thread-safety fix from this issue was committed as a standalone,
 correct, tested contribution despite not unblocking the issue on its own.
+
+**2026-08-01 — Human disposition (Sean): reopened.** Commit `04ec7be`
+(issue #53's own commit — "Overlap layer N+1 compute with layer N's
+all-reduce") flipped this issue's `Status` to `closed` and, in the same
+change, un-gated `metal_graph_tp4_spike_layer_enabled`'s default from
+opt-in to all 43 layers — i.e. it silently did this issue's rollout job
+under a different issue's commit message, with no comment here and no
+quality re-verification backing the close. That closure had no basis:
+the disposition recorded immediately above this entry is still the real
+one (open, blocked on `#56`/`#57`, re-attempt full rollout once both
+close), and both of those closed 2026-08-01. The default-on code change
+itself is not being reverted — a real full 100-case run now exists
+(`q_tp4_51.tsv`/`.log`, also referenced from #55) and shows `avg_nll`
+0.7607 against pipeline's 0.3692, so the rollout is real but not yet
+passing quality. That gap is now tracked by `#58` (isolate root cause:
+`AMD_SERIALIZE_KERNEL=3` / issue #23 compressor-prefill race) and `#59`
+(per-tier VRAM sharding, likely contributor via the q8 fallback path).
+Status reset to `ready-for-agent`; `Blocked by` below gets `#58` and
+`#59` added so re-dispatch waits for both, same literal-only-dependency
+pattern this issue already required once for `#56`/`#57`. See
+`.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md`
+for the issue that was carrying this same investigation forward and got
+GPU-blocked (human doing manual testing on the same hardware) before it
+could finish.

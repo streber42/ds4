@@ -1172,4 +1172,49 @@ disposition of both issues.
   - Per-GPU Utilization (`rocm-smi`): ~3-4% busy during decode (bound by host stream dispatch / PCIe latency).
 - **Human Disposition**: Human requested to hold Issue #55 open for further investigation.
 
+### 2026-08-01 — Issue 60: rollout re-blocked on #58/#59; #51's unauthorized closure reverted
+
+**Goal (per #60):** re-verify #57's counter hoisting, un-gate `DS4_TP4_THREADED_LAYERS`
+to all 43 layers by default, and confirm process exit and quality on real hardware.
+
+**What actually happened:** the agent dispatched to #60 got GPU-lock-blocked mid-task
+(human was running manual tests on the same 4x R9700 hardware concurrently) and left no
+`## Comments`, no experiment-log entry, and an uncommitted working tree mixing #60's own
+edits with unrelated #61 (all-reduce stream fencing) work. Picked up cold in a human
+pairing session; findings below are from reading the artifacts it left, not a fresh run.
+
+- **AC1 (default-on) already true, but not via #60.** `metal_graph_tp4_spike_layer_enabled`
+  already defaults to all 43 layers. That landed in commit `04ec7be`, under issue #53's
+  commit message, which *also* flipped `#51`'s `Status` to `closed` with no quality
+  re-verification — despite `#51`'s own prior disposition explicitly saying it couldn't
+  close until quality was reconfirmed. Reverted: `#51` reset to `ready-for-agent` with a
+  Comments entry explaining the reversion; its default-on code change is being kept
+  (see next point for why).
+- **AC4 (quality passing) fails on the only real full-scale evidence.** `q_tp4_51.tsv`/`.log`
+  in `quality-out/` — a genuine 100-case run of the current all-43-layers build, the same
+  data underlying #55's revalidation entry above — shows `avg_nll` 0.7607 against the
+  pipeline baseline's 0.3692, roughly 2x, well outside the 0.370-0.378 PRD band.
+- **The layer-count discriminator sweep the stuck agent left behind
+  (`q_tp4_51_disc_{2,20,35,40,42,43}layer.*`) is not reliable evidence of anything.** It was
+  run against an uncommitted edit that changed the whole-token-dispatch gate from
+  `metal_graph_tp4_spike_layer_enabled(0)` (true once ≥1 layer threaded) to
+  `metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)` (true only when all 43 are
+  threaded) — collapsing every intermediate `DS4_TP4_THREADED_LAYERS` setting to the
+  legacy non-threaded path. Confirmed empirically: `disc_2layer` and `disc_off` are
+  bit-identical to 9 decimal places (`avg_nll` 0.329336222, `top1_match` 63/72, `top_mae`
+  7550.068849724, ...), which a genuinely concurrent multi-GPU all-reduce would not
+  reproduce run-to-run — proof `disc_2layer` silently took the non-threaded path. That
+  edit, plus the unrelated #61 diff it was mixed in with, has been `git stash`ed
+  (message: "issue-61 wip (stream fencing) + regressive #60 gate-line edit, GPU-blocked
+  mid-task"), not committed and not discarded, for whoever picks up #61 next.
+- **AC2/AC3/AC5/AC6 were never attempted** — no clean GPU-lock window this round.
+
+**Disposition (Sean, human pairing session):** `#60` re-blocked on `#58` (isolate the
+`avg_nll` regression's root cause: `AMD_SERIALIZE_KERNEL=3` vs issue #23's compressor-
+prefill race) and `#59` (per-tier VRAM sharding — every quality-out log from this
+session shows `q8 fp16 cache budget exhausted` fallback warnings, consistent with VRAM
+pressure as a contributor). `#51` likewise re-blocked on `#58`/`#59` in addition to its
+existing `#56`/`#57`. Status left as `ready-for-agent` on both, not `closed` — re-attempt
+once `#58` and `#59` land.
+
 
