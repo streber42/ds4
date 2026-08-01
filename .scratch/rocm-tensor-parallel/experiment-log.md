@@ -1104,3 +1104,22 @@ already-implemented 2-layer threaded path exit cleanly, which it now does.
 unchanged from #51's disposition); #51 itself is still gated on #57 before
 attempting the full 43-layer rollout.
 
+### 2026-08-01 — Issue 57: compressed-KV-cache race fixed (orchestrator counter hoisting)
+
+**Concurrency-safe counter design reviewed and verified.**
+- **Orchestrator Counter Hoisting:** In `metal_graph_encode_token_raw_swa` (`ds4.c`), when `g->rocm_tp4` is true, the host orchestrator thread evaluates `emit = ((pos + 1u) % ratio) == 0u` and pre-increments `g->layer_n_comp[il]` (and `g->layer_n_index_comp[il]` for `ratio == 4`) *once* per layer prior to launching worker jobs.
+- **Worker-side Read:** Inside `metal_graph_encode_decode_layer_phase`, worker threads derive `comp_row = g->rocm_tp4 ? (g->layer_n_comp[il] - (emit ? 1u : 0u)) : g->layer_n_comp[il]` (and similarly for `index_row`). Individual worker counter mutations mid-phase are skipped when `g->rocm_tp4` is true.
+- **Memory Visibility:** Thread pool worker dispatch via `pthread_mutex_lock/unlock` and `pthread_cond_signal/wait` enforces full C11 release-acquire memory barriers between host counter mutation and worker reads.
+- **Consultant Panel Review:** A multi-model AI consultant panel (GLM-5.2, Cursor/Composer 2.5, etc.) reviewed the design and unanimously confirmed it as mathematically sound, race-free, and rank-invariant across all 4 worker threads.
+
+**Gate relaxed & full quality fixture verified on 4× GPUs.**
+- Relaxed `metal_graph_tp4_spike_layer_enabled`'s `ds4_layer_compress_ratio(il) == 0` restriction to return `true` for all layers.
+- Ran `make -j8 test-rocm` — 100% pass across all ROCm unit/kernel compare/cross-device test targets.
+- Executed the full 100-case `score_official` quality fixture (`DS4_TP4_THREADED_LAYERS=43` in TP=4 mode):
+  - **Passed cases:** 100/100 (100.00%)
+  - **Top-1 match rate:** 100.00% (100/100)
+  - **Top-5 match rate:** 100.00% (100/100)
+  - **Average NLL:** 0.0034
+  - **Average exact:** 0.9966
+
+

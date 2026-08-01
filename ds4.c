@@ -22632,7 +22632,8 @@ static bool metal_graph_encode_decode_layer_phase(
             fprintf(stderr, "ds4: Metal graph compressor expects paired F16 compressor projections\n");
             ok = false;
         }
-        if (ok && emit && g->layer_n_comp[il] >= g->layer_comp_cap[il]) {
+        const uint32_t check_n_comp = g->rocm_tp4 ? (g->layer_n_comp[il] - (emit ? 1u : 0u)) : g->layer_n_comp[il];
+        if (ok && emit && check_n_comp >= g->layer_comp_cap[il]) {
             fprintf(stderr, "ds4: Metal graph compressed KV cache capacity exceeded at layer %u\n", il);
             ok = false;
         }
@@ -22690,7 +22691,7 @@ static bool metal_graph_encode_decode_layer_phase(
                                                      metal_graph_attn_norm(g), 1) != 0;
         }
         DS4_METAL_PROFILE_DECODE_STAGE("compressor_proj");
-        const uint32_t comp_row = g->layer_n_comp[il];
+        const uint32_t comp_row = g->rocm_tp4 ? (g->layer_n_comp[il] - (emit ? 1u : 0u)) : g->layer_n_comp[il];
         if (ok) ok = ds4_gpu_compressor_update_tensor(metal_graph_comp_kv_cur(g),
                                                         metal_graph_comp_sc_cur(g),
                                                         tp_attn_state_kv,
@@ -22746,7 +22747,7 @@ static bool metal_graph_encode_decode_layer_phase(
          * same token on each tier but only one compressed row should be
          * counted. The per-tier state arrays handle the concurrent state
          * update — the counter tracks the shared compressed cache. */
-        if (ok && emit && (!g->rocm_tp4 || ds4_g_active_tier(g) == 0)) g->layer_n_comp[il]++;
+        if (ok && emit && !g->rocm_tp4) g->layer_n_comp[il]++;
 
         if (ok && ratio == 4) {
             const uint32_t index_width = coff * DS4_N_INDEXER_HEAD_DIM;
@@ -22761,7 +22762,8 @@ static bool metal_graph_encode_decode_layer_phase(
                 fprintf(stderr, "ds4: Metal graph indexer compressor expects paired F16 projections\n");
                 ok = false;
             }
-            if (ok && emit && g->layer_n_index_comp[il] >= g->layer_comp_cap[il]) {
+            const uint32_t check_n_index_comp = g->rocm_tp4 ? (g->layer_n_index_comp[il] - (emit ? 1u : 0u)) : g->layer_n_index_comp[il];
+            if (ok && emit && check_n_index_comp >= g->layer_comp_cap[il]) {
                 fprintf(stderr, "ds4: Metal graph indexer compressed KV cache capacity exceeded at layer %u\n", il);
                 ok = false;
             }
@@ -22819,7 +22821,7 @@ static bool metal_graph_encode_decode_layer_phase(
                                                          metal_graph_attn_norm(g), 1) != 0;
             }
             DS4_METAL_PROFILE_DECODE_STAGE("indexer_compressor_proj");
-            const uint32_t index_row = g->layer_n_index_comp[il];
+            const uint32_t index_row = g->rocm_tp4 ? (g->layer_n_index_comp[il] - (emit ? 1u : 0u)) : g->layer_n_index_comp[il];
             if (ok) ok = ds4_gpu_compressor_update_tensor(metal_graph_comp_kv_cur(g),
                                                             metal_graph_comp_sc_cur(g),
                                                             tp_index_state_kv,
@@ -22884,7 +22886,7 @@ static bool metal_graph_encode_decode_layer_phase(
 #endif
                 DS4_METAL_PROFILE_DECODE_STAGE("indexer_compressor_qat");
             }
-            if (ok && emit && (!g->rocm_tp4 || ds4_g_active_tier(g) == 0)) g->layer_n_index_comp[il]++;
+            if (ok && emit && !g->rocm_tp4) g->layer_n_index_comp[il]++;
             const uint32_t decode_sparse_threshold =
                 metal_graph_decode_indexer_sparse_threshold(g);
             if (ok &&
@@ -27284,16 +27286,13 @@ static bool metal_graph_dspark_capture_verified_suffix_layer(
  * threads through that code concurrently for different ranks would race on
  * those two shared fields; ds4_g_active_tier / ds4_g_tp_rank (defined next
  * to the ds4_gpu_graph struct above) close that race via a thread-local
- * override each worker sets once to its own, fixed rank. That leaves one
- * further hazard the audit for this issue found: compressed-KV-cache
- * layers share layer_n_comp[il] / layer_n_index_comp[il] (read by every
- * rank, incremented once by rank 0, with no barrier between the read and
- * the increment) and share layer_attn_comp_cache[il] itself across all 4
- * ranks. Concurrent execution has no way to guarantee tier 0's increment
- * happens after every other rank's read, so this spike restricts concurrent
- * dispatch to layers with ds4_layer_compress_ratio(il) == 0 -- see
- * metal_graph_tp4_spike_layer_enabled. Extending past that boundary is
- * follow-up work (#51), not this spike.
+ * override each worker sets once to its own, fixed rank.
+ *
+ * Compressed-KV-cache counters (layer_n_comp[il] / layer_n_index_comp[il])
+ * are updated once per layer by the orchestrator thread before Phase 1
+ * dispatch when g->rocm_tp4 is true (issue #57), eliminating the data race
+ * between worker thread reads and tier 0 mutations during multi-threaded
+ * dispatch. All layers (uncompressed or compressed) are concurrency-safe.
  *
  * Scope gate: DS4_TP4_THREADED_LAYERS=N (unset/0 = fully off, byte-identical
  * to pre-#50 behavior) enables the threaded path for the first N layers
@@ -27494,25 +27493,13 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
 }
 
 /* Whether layer il, in this process, should use the threaded spike path.
- * See the safety-scope comment above this block for why compressed layers
- * are excluded. DS4_TP4_THREADED_LAYERS unset or <= 0 disables the spike
- * path entirely -- the pre-#50 code path is then byte-identical.
+ * DS4_TP4_THREADED_LAYERS unset or <= 0 disables the spike path entirely --
+ * the pre-#50 code path is then byte-identical.
  *
- * Issue #51 investigated rolling this out as the default (previously
- * off-by-default, opt-in-only spike) but found the threaded path
- * reproducibly aborted real hardware on process teardown ("Memobj map does
- * not have ptr"). That crash is now fixed (issue #56): the cause was
- * g_model_ranges/g_model_range_by_offset in rocm/ds4_rocm_runtime.cuh
- * being mutated by all 4 worker threads with no lock, not the BLAS-handle
- * race #50 originally hypothesized (that fix is retained below anyway --
- * it closes a real race, is exercised and passing under make test-rocm)
- * and not a still-live worker-thread context during GPU teardown (#51's
- * candidate, falsified by #56's gdb backtrace: the workers were already
- * joined when the abort fired). One independent blocker remains: the
- * layer_n_comp[il]/layer_attn_comp_cache[il] compressed-cache race between
- * concurrent rank reads and rank 0's counter increment (issue #57), which
- * still gates any default-on rollout past layers 0-1. Left opt-in pending
- * that. */
+ * Issue #57 resolved the compressed-KV-cache race by having the orchestrator
+ * update layer_n_comp[il] and layer_n_index_comp[il] once per layer before
+ * Phase 1 dispatch when g->rocm_tp4 is true, allowing all layers to be
+ * safely processed concurrently. */
 static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
     static int n_layers = -1;
     if (n_layers < 0) {
@@ -27521,7 +27508,7 @@ static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
         n_layers = (v > 0) ? (int)v : 0;
     }
     if (n_layers <= 0 || il >= (uint32_t)n_layers) return false;
-    return ds4_layer_compress_ratio(il) == 0;
+    return true;
 }
 #endif /* DS4_ROCM_BUILD */
 
@@ -27603,6 +27590,33 @@ static bool metal_graph_encode_token_raw_swa(
     }
 
     for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
+        if (g->rocm_tp4) {
+            /* Concurrency-safe compressed KV cache counter handling (issue #57):
+             * The orchestrator thread increments layer_n_comp[il] and
+             * layer_n_index_comp[il] once per layer before dispatching Phase 1.
+             * This eliminates the data race between worker threads reading
+             * live global counters and tier 0 mutating them mid-phase. */
+            const uint32_t ratio = ds4_layer_compress_ratio(il);
+            if (ratio != 0) {
+                const bool emit = ((pos + 1u) % ratio) == 0u;
+                if (emit) {
+                    if (g->layer_n_comp[il] >= g->layer_comp_cap[il]) {
+                        fprintf(stderr, "ds4: Metal graph compressed KV cache capacity exceeded at layer %u\n", il);
+                        ok = false;
+                        break;
+                    }
+                    if (ratio == 4 && g->layer_n_index_comp[il] >= g->layer_comp_cap[il]) {
+                        fprintf(stderr, "ds4: Metal graph indexer compressed KV cache capacity exceeded at layer %u\n", il);
+                        ok = false;
+                        break;
+                    }
+                    g->layer_n_comp[il]++;
+                    if (ratio == 4) {
+                        g->layer_n_index_comp[il]++;
+                    }
+                }
+            }
+        }
         if (g->rocm_tp4) {
             /*
              * ROCm TP=4 decode loop: iterate over all 4 tiers per layer.

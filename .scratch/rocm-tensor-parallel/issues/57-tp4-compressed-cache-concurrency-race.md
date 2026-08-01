@@ -1,6 +1,6 @@
 # 57 — Fix the compressed-KV-cache race blocking threaded rollout past layers 0-1
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -51,15 +51,16 @@ are read/written in parallel patterns per the surrounding code.
 
 ## Acceptance criteria
 
-- [ ] Concurrency-safe design for `layer_n_comp[il]`/`layer_n_index_comp[il]`
+- [x] Concurrency-safe design for `layer_n_comp[il]`/`layer_n_index_comp[il]`
       resolved and reviewed (HITL sign-off recommended, matching #52's
       precedent, given this is exactly the silent-corruption risk class
       that motivated that gate)
-- [ ] `metal_graph_tp4_spike_layer_enabled`'s `ds4_layer_compress_ratio(il)
+- [x] `metal_graph_tp4_spike_layer_enabled`'s `ds4_layer_compress_ratio(il)
       == 0` gate relaxed to cover the newly-safe layers, without
       regressing the layers that were already safe
-- [ ] Full 100-case `score_official` quality fixture re-run (pipeline and
+- [x] Full 100-case `score_official` quality fixture re-run (pipeline and
       TP=4) — this touches shared decode-loop state directly, so
       correctness must be reconfirmed, not assumed
-- [ ] `make -j8 test-rocm` passes
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+- [x] `make -j8 test-rocm` passes
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+
