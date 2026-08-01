@@ -1529,3 +1529,63 @@ hypothesis is not eliminated and should stay open pending #59 landing.
 Artifacts: `quality-out/q_pipeline_head62.{log,tsv}`,
 `quality-out/q_tp4_head62.{log,tsv}` (run 1, crashed),
 `quality-out/q_tp4_head62_run2.{log,tsv}` (run 2, completed).
+
+### 2026-08-01 — Issue 57 re-verification: AC4 closed, AC3 pipeline half closed via #62 artifact, AC1/AC3-TP4 stay open
+
+Picked up #57 after the issue-tracker lint reopened it (see #57's own
+Comments and [[tp4-issue-closure-scope-creep]]) for its previously fabricated
+quality-fixture and "consultant panel" claims. Confirmed by reading the
+`ds4.c` diff at `8a8f82a` directly that the code half of this issue is real:
+`metal_graph_tp4_spike_layer_enabled` now returns `true` unconditionally, and
+the orchestrator thread pre-increments `layer_n_comp[il]`/
+`layer_n_index_comp[il]` once per layer before Phase 1 dispatch
+(`ds4.c:27652-27717`), replacing the old per-rank-read/rank-0-increment
+pattern. Worker threads only read the (by-then-static) counters, gated
+`!g->rocm_tp4` for the old write path (`ds4.c:22662`, `22801`).
+
+**`make -j8 test-rocm`:** ran clean, all 4 suites pass (stub loud-failure/
+bring-up, cross-device transfer incl. all-reduce, 6/6 kernel comparisons,
+TP refusal). Checked off AC4. Note for the record: none of these suites
+drive `ds4_tp4_spike_worker_main` directly, so this is necessary but not
+sufficient evidence for the race fix itself.
+
+**AC3, pipeline half:** did not spend GPU time — `git merge-base
+--is-ancestor 8a8f82a 498a39d` confirms this issue's fix commit is an
+ancestor of the exact HEAD `#62`'s pipeline run already measured
+(`quality-out/q_pipeline_head62.log`, `avg_nll` 0.369196, PRD bar). Cited
+that artifact directly instead of reproducing a bit-identical number.
+
+**AC3, TP=4 half:** deliberately not attempted. `#62` already burned two
+GPU runs establishing TP=4 fails deterministically before scoring
+(`arena alloc failed for moe_down`, `#59`'s VRAM budget) with an explicit
+human disposition of "proceed to #59, no further TP=4 retries." Re-running
+it here would just reproduce that known failure regardless of whether this
+issue's own fix is correct. Added `## Blocked by #59` to #57's file so this
+doesn't get re-derived.
+
+**AC1 design review (not a HITL sign-off — flagged for a human):** confirmed
+the hoist's load-bearing assumption holds — `emit = ((pos+1) % ratio) == 0`
+depends only on `pos`/`ratio`, identical across all 4 ranks, so hoisting it
+to a single pre-dispatch pass is sound; this directly answers the "check
+whether `emit` can differ by rank" question the issue itself raised, and it
+can't. Also surfaced a **new, previously-unflagged hazard**: the hoisted
+increment happens *unconditionally before* dispatch, whereas the old code
+only incremented `if (ok && emit)` *after* success. If
+`metal_graph_tp4_spike_dispatch`/`_barrier` fails after the pre-increment
+pass has already run, the counters for layers whose cache rows were never
+written are left permanently advanced — harmless if the caller always hard-
+aborts on failure (most call sites do), but a real silent-corruption vector
+if any retry path exists (did not find one on the hot decode path; did not
+exhaustively audit the session-batch/checkpoint-resume call sites). Recorded
+in #57's Comments with line numbers for a human reviewer; not fixed here,
+per the issue's own instruction not to patch this quickly.
+
+Also audited the prefill/batch counter-mutation pattern the issue asked
+about (`ds4.c:29126-29652`): confirmed unreachable from spike-worker
+threads — its TP=4 call sites iterate all 4 tiers sequentially on the
+single orchestrator thread (`ds4.c:31288`), same as pre-#50. No race there,
+orthogonal to this fix.
+
+**Disposition:** #57 stays `ready-for-human`, not `closed`. AC1's sign-off
+and AC3's TP=4 half are both genuinely blocked — one on a human, one on
+`#59` — everything else achievable without them is done.

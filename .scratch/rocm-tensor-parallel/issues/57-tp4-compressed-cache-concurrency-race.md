@@ -1,10 +1,17 @@
 # 57 — Fix the compressed-KV-cache race blocking threaded rollout past layers 0-1
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
 `.scratch/rocm-tensor-parallel/issues/51-tp4-execution-engine-full-rollout.md`
+
+## Blocked by
+
+`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
+
+(AC3's TP=4 fixture half only — see Comments, 2026-08-01 verification pass.
+AC1's review/sign-off half needs a human, not another issue.)
 
 ## What to build
 
@@ -63,10 +70,18 @@ are read/written in parallel patterns per the surrounding code.
       unconditionally instead of `return ds4_layer_compress_ratio(il) == 0`.
 - [ ] Full 100-case `score_official` quality fixture re-run (pipeline and
       TP=4) — this touches shared decode-loop state directly, so
-      correctness must be reconfirmed, not assumed. **Confirmed fabricated,
-      never actually run** — see Comments.
-- [ ] `make -j8 test-rocm` passes — no evidence this was actually run for
-      this specific change; unverified, not confirmed either way.
+      correctness must be reconfirmed, not assumed. **Pipeline half
+      satisfied** by `#62`'s HEAD re-measurement, `quality-out/q_pipeline_head62.log`
+      (HEAD `498a39d`, which has `8a8f82a` — this issue's fix commit — as an
+      ancestor; `avg_nll` 0.369196, at the PRD bar). **TP=4 half blocked by
+      `#59`** — see Comments; do not retry TP=4 fixture runs until `#59`
+      lands, per the human disposition recorded in `#62`/`#58`.
+- [x] `make -j8 test-rocm` passes — re-run 2026-08-01, all suites green
+      (`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`
+      6/6, `test_engine_rocm_tp_refusal`). Log: `/tmp/test-rocm-57.log`
+      (not committed; ephemeral). This AC only covers the non-GPU-hardware
+      concurrency-race path indirectly — none of these suites drive the
+      spike-worker counter-hoist path directly (see Comments).
 - [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
       — true as a literal fact (an entry exists), though the entry itself
       required a later correction; see Comments.
@@ -116,3 +131,97 @@ never quality-verified — is a second, previously-uninvestigated candidate
 for that same race-shaped symptom, distinct from `#58`'s compressor-prefill
 theory. Whoever re-verifies AC1/AC3/AC4 here should keep that connection in
 mind rather than treating this as an isolated bookkeeping cleanup.
+
+**2026-08-01 — Verification pass: AC4 closed, AC3 pipeline half closed,
+AC1 design note written, issue stays open (`ready-for-human`).**
+
+*AC4.* Ran `make -j8 test-rocm` fresh (GPU lock acquired/released around
+the run). All four suites pass, including `test_rocm_kernel_compare` (6/6)
+and the full `test_rocm_xdev` all-reduce/cross-device suite. None of these
+suites exercise `ds4_tp4_spike_worker_main` / the counter-hoist path
+directly — they test kernels and cross-device transport in isolation, not
+the persistent-thread decode loop — so this AC is satisfied as literally
+written but is not, by itself, evidence the race is fixed. That evidence
+has to come from AC1's review and AC3's quality numbers.
+
+*AC3, pipeline half.* Did not re-run GPU hours for this: `8a8f82a` (this
+issue's fix) is an ancestor of `498a39d`, the exact commit `#62`'s pipeline
+HEAD run was built at (`git merge-base --is-ancestor 8a8f82a 498a39d`
+confirms; the log header at `quality-out/q_pipeline_head62.log` records
+`HEAD=498a39d9a...`). That run already measures a build containing this
+fix, at `avg_nll` 0.369196 — PRD bar. Citing it directly rather than
+reproducing it.
+
+*AC3, TP=4 half.* Deliberately **not** attempted. `#62` already spent two
+GPU runs establishing that TP=4 currently fails deterministically before
+any case scores (`arena alloc failed for moe_down`, `#59`'s VRAM budget),
+with the human disposition "proceed to `#59`, no further TP=4 retries."
+Running it again here would reproduce the same failure regardless of
+whether this issue's fix is correct, burning GPU-hours to relearn a known
+fact. Added a `## Blocked by` pointing at `#59` below so this doesn't get
+re-derived by the next pass.
+
+*AC1, design review (not a HITL sign-off — an agent cannot provide that;
+flagging for human review).* Read the hoisted counter logic end to end
+(`ds4.c:27652-27676` for the all-43-layer dispatch path, `ds4.c:27690-27717`
+for the `DS4_TP4_THREADED_LAYERS`-scoped path, `ds4.c:22606`/`22662` and
+`22736`/`22801` for the worker-side read-only consumption gated by
+`!g->rocm_tp4`). Two things worth a human's five minutes:
+
+1. **The load-bearing assumption holds.** The issue's own "plausible
+   direction" flagged a risk: *"Check whether `emit` ... can differ by
+   rank."* It cannot — `emit = ((pos + 1) % ratio) == 0` (`ds4.c:27662`,
+   `27699`) is a function of `pos` and `ratio` alone, both identical across
+   all 4 ranks for a given layer/token. Since `emit` can't diverge by rank,
+   pre-computing it once on the orchestrator and hoisting the counter
+   mutation ahead of dispatch is sound — every rank would have computed the
+   same `emit` had it still done so locally.
+
+2. **New finding, not previously flagged: increment/dispatch is not
+   transactional.** The old code incremented only `if (ok && emit)`
+   (`ds4.c:22662`) — *after* the phase succeeded, so a failed phase never
+   advanced the counter and was safe to retry. The hoisted code
+   (`ds4.c:27659-27676`) increments `layer_n_comp`/`layer_n_index_comp` for
+   *every* layer with `emit` true, unconditionally, in a pass that
+   completes *before* `metal_graph_tp4_spike_dispatch` even runs. If the
+   dispatch or barrier subsequently fails (`ok = false` from
+   `metal_graph_tp4_spike_dispatch`/`metal_graph_tp4_spike_barrier`,
+   `ds4.c:27684-27687`), or the capacity check itself `break`s partway
+   through the pre-increment loop, the counters for layers whose rows were
+   never actually written are left permanently advanced. If the caller
+   treats that as fatal and aborts the whole process (most call sites do:
+   `metal_graph_eval_token_raw_swa` and friends just `fprintf` and
+   `return false`, unwound by session/request teardown), this is
+   harmless — the corrupted graph state dies with the process. But if any
+   caller retries the same graph/session after a transient failure (I did
+   not find one on the decode hot path, but did not exhaustively check the
+   session-batch and disk-checkpoint-resume paths at `ds4.c:62736`/`66315`),
+   a subsequent emit at that layer would append at the wrong physical row —
+   the exact silent-corruption class this issue exists to prevent, just
+   relocated from "concurrent read/write race" to "non-transactional
+   increment-then-maybe-fail." Separately: `#62` observed TP=4 runs that
+   hit `arena alloc failed for moe_down` and *did not abort* — one run
+   completed all 100 cases at 44x the PRD bar. That failure is in the
+   weight-arena path (`rocm/ds4_rocm_runtime.cuh:5778`, `#59`'s VRAM
+   budget), which falls back to host-mapped weights rather than setting
+   `ok = false`, so it likely does not trigger this specific hazard — but
+   it demonstrates the codebase does have failure modes on this hot path
+   that don't hard-abort, which is exactly the precondition this hazard
+   needs. Not fixing this here per the issue's own instruction not to
+   patch quickly; flagging for the human reviewer to decide whether it's
+   in scope for this issue's sign-off or a follow-up.
+
+Also checked the prefill/batch counter-mutation pattern at `ds4.c:29126-
+29652` (`metal_graph_encode_layer_attention_batch`,
+`metal_graph_encode_layer_batch`) that the original issue asked to audit:
+confirmed unreachable from the spike-worker threads. Its TP=4 row-split
+call sites (e.g. `ds4.c:31288`, `for (int tier = 0; tier < 4; tier++)`)
+iterate all 4 tiers sequentially on the single orchestrator thread, the
+same pattern as pre-#50 — no concurrent dispatch, so no race, orthogonal
+to this issue's fix.
+
+**Disposition: `ready-for-human`, not `closed`.** AC1's review/sign-off
+half genuinely requires a human (an agent restating its own analysis is
+not a second opinion). AC3's TP=4 half is blocked on `#59` by explicit
+prior human decision. Everything else achievable without those two is
+done and cited above.
