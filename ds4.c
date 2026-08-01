@@ -27297,10 +27297,23 @@ static bool metal_graph_dspark_capture_verified_suffix_layer(
  * override each worker sets once to its own, fixed rank.
  *
  * Compressed-KV-cache counters (layer_n_comp[il] / layer_n_index_comp[il])
- * are updated once per layer by the orchestrator thread before Phase 1
- * dispatch when g->rocm_tp4 is true (issue #57), eliminating the data race
- * between worker thread reads and tier 0 mutations during multi-threaded
- * dispatch. All layers (uncompressed or compressed) are concurrency-safe.
+ * are updated once per layer (or, in the full-token overlap path, once per
+ * token) by the orchestrator thread before Phase 1 dispatch when
+ * g->rocm_tp4 is true (issue #57), eliminating the data race between worker
+ * thread reads and tier 0 mutations during multi-threaded dispatch. All
+ * layers (uncompressed or compressed) are concurrency-safe.
+ *
+ * The pre-increment is load-bearing, not just an optimization: worker-side
+ * reads inside metal_graph_encode_decode_layer_phase use the *post*-
+ * increment value for every "how many valid rows exist so far" use
+ * (indexer scoring, top-k selection, attention row-count bounds), not just
+ * the write-target row (which alone needs the pre-increment value, recovered
+ * via a "- (emit ? 1u : 0u)" read in that function). Issue #57 follow-up: a
+ * failed dispatch after the pre-increment used to leave the counter
+ * permanently advanced past a row that was never actually written; this is
+ * now fixed by rolling the increment back if dispatch fails, rather than by
+ * deferring the commit until success (deferring was tried and reverted --
+ * it broke the post-increment reads above, caught by AI-consultant review).
  *
  * Scope gate: DS4_TP4_THREADED_LAYERS=N (unset/0 = fully off, byte-identical
  * to pre-#50 behavior) enables the threaded path for the first N layers
@@ -27651,7 +27664,9 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
  * Issue #57 resolved the compressed-KV-cache race by having the orchestrator
  * update layer_n_comp[il] and layer_n_index_comp[il] once per layer before
  * Phase 1 dispatch when g->rocm_tp4 is true, allowing all layers to be
- * safely processed concurrently. */
+ * safely processed concurrently. Issue #57 follow-up: dispatch failure after
+ * that pre-increment now rolls the increment back instead of leaving the
+ * counter advanced past an unwritten row. */
 static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
     static int n_layers = -1;
     if (n_layers < 0) {
@@ -27751,7 +27766,28 @@ static bool metal_graph_encode_token_raw_swa(
          * dispatch the entire 43-layer token execution to persistent per-rank
          * worker threads. Each rank runs compute, all-reduce, and HC expand
          * asynchronously on its device stream. Layer N+1 compute begins as soon as
-         * rank t finishes its local all-reduce, overlapping with peers. */
+         * rank t finishes its local all-reduce, overlapping with peers.
+         *
+         * Issue #57 follow-up: pre-incrementing here (rather than deferring
+         * the commit until success is known) is load-bearing, not just an
+         * optimization -- the worker-side reads inside
+         * metal_graph_encode_decode_layer_phase use the *post*-increment
+         * value of layer_n_comp[il]/layer_n_index_comp[il] for every "how
+         * many valid rows exist so far" use (indexer scoring, top-k
+         * selection, attention row-count bounds), not just the write-target
+         * row (which alone needs the pre-increment value, recovered via the
+         * "- (emit ? 1u : 0u)" reads in that function). Deferring the commit
+         * to after dispatch was tried and reverted: it left those reads
+         * short by one row for every TP4 emit, silently excluding each
+         * token's own freshly-written compressed row from its own
+         * attention/indexer computation -- caught by AI-consultant review,
+         * not by test-rocm (which doesn't exercise this path). Instead, the
+         * hazard this issue fixes (a failed dispatch leaving the counter
+         * advanced past a row that was never written) is fixed by rolling
+         * the increment back below if the pre-loop's capacity check fails
+         * partway through, or if the token's dispatch fails, rather than
+         * never incrementing until success. */
+        uint32_t pre_loop_stopped_at = DS4_N_LAYER;
         for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
             const uint32_t ratio = ds4_layer_compress_ratio(il);
             if (ratio != 0) {
@@ -27759,11 +27795,11 @@ static bool metal_graph_encode_token_raw_swa(
                 if (emit) {
                     if (g->layer_n_comp[il] >= g->layer_comp_cap[il]) {
                         fprintf(stderr, "ds4: Metal graph compressed KV cache capacity exceeded at layer %u\n", il);
-                        ok = false; break;
+                        ok = false; pre_loop_stopped_at = il; break;
                     }
                     if (ratio == 4 && g->layer_n_index_comp[il] >= g->layer_comp_cap[il]) {
                         fprintf(stderr, "ds4: Metal graph indexer compressed KV cache capacity exceeded at layer %u\n", il);
-                        ok = false; break;
+                        ok = false; pre_loop_stopped_at = il; break;
                     }
                     g->layer_n_comp[il]++;
                     if (ratio == 4) g->layer_n_index_comp[il]++;
@@ -27782,14 +27818,49 @@ static bool metal_graph_encode_token_raw_swa(
                 DS4_TP4_INSTR("spike_full_token_barrier", ok = metal_graph_tp4_spike_barrier());
             }
         }
+        /* Rollback (issue #57 follow-up): if the pre-loop's capacity check
+         * broke partway through, or the token's dispatch/barrier failed
+         * after the pre-loop fully completed, undo every increment the
+         * pre-loop made. pre_loop_stopped_at bounds the rollback to exactly
+         * the layers the pre-loop actually incremented before stopping
+         * (DS4_N_LAYER, i.e. every layer, if it never broke) -- the layer at
+         * pre_loop_stopped_at itself broke before incrementing, so it's
+         * correctly excluded (the range is a half-open [0, stopped_at)).
+         * This keeps the counters from being left advanced past rows that
+         * were never actually written, without disturbing the pre-increment
+         * invariant the worker-side reads above depend on. A subsequent
+         * retry at the same pos recomputes and rewrites the same rows. */
+        if (!ok) {
+            for (uint32_t il = 0; il < pre_loop_stopped_at; il++) {
+                const uint32_t ratio = ds4_layer_compress_ratio(il);
+                if (ratio != 0) {
+                    const bool emit = ((pos + 1u) % ratio) == 0u;
+                    if (emit) {
+                        g->layer_n_comp[il]--;
+                        if (ratio == 4) g->layer_n_index_comp[il]--;
+                    }
+                }
+            }
+        }
     } else {
         for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
+            bool tp4_counter_incremented_this_layer = false;
             if (g->rocm_tp4) {
                 /* Concurrency-safe compressed KV cache counter handling (issue #57):
                  * The orchestrator thread increments layer_n_comp[il] and
                  * layer_n_index_comp[il] once per layer before dispatching Phase 1.
                  * This eliminates the data race between worker threads reading
-                 * live global counters and tier 0 mutating them mid-phase. */
+                 * live global counters and tier 0 mutating them mid-phase.
+                 * Pre-incrementing (rather than deferring the commit) is
+                 * load-bearing: the worker-side reads inside
+                 * metal_graph_encode_decode_layer_phase use the post-increment
+                 * value for every "how many valid rows exist so far" use
+                 * (indexer scoring, top-k, attention row-count bounds), not
+                 * just the write-target row. Issue #57 follow-up: if this
+                 * layer's dispatch fails after this increment, it is rolled
+                 * back at the bottom of this iteration (before `continue`)
+                 * instead of being left permanently advanced past a row that
+                 * was never written. */
                 const uint32_t ratio = ds4_layer_compress_ratio(il);
                 if (ratio != 0) {
                     const bool emit = ((pos + 1u) % ratio) == 0u;
@@ -27808,6 +27879,7 @@ static bool metal_graph_encode_token_raw_swa(
                         if (ratio == 4) {
                             g->layer_n_index_comp[il]++;
                         }
+                        tp4_counter_incremented_this_layer = true;
                     }
                 }
             }
@@ -28091,6 +28163,27 @@ static bool metal_graph_encode_token_raw_swa(
                 }
                 /* Post-layer: dspark capture. */
                 if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
+                /* Rollback (issue #57 follow-up): if this layer's dispatch
+                 * failed anywhere after the pre-increment above (Phase 1,
+                 * Phase 2, HC expand, broadcasts, or dspark capture), undo
+                 * that increment so the counter isn't left permanently
+                 * advanced past a row that was never actually written. Note
+                 * this is a semantic choice, not just undoing a bookkeeping
+                 * error: Phase 1 (and metal_graph_commit_attn_comp_stage
+                 * inside it) may already have physically written the row's
+                 * bytes before a later phase failed. Rolling back means a
+                 * retry at the same pos overwrites that row rather than
+                 * treating it as already committed -- deliberately more
+                 * conservative than HEAD's non-TP4 inline commit, which
+                 * commits at end-of-Phase-1 and never rolls back a later
+                 * Phase 2 failure. */
+                if (!ok && tp4_counter_incremented_this_layer) {
+                    const uint32_t ratio = ds4_layer_compress_ratio(il);
+                    g->layer_n_comp[il]--;
+                    if (ratio == 4) {
+                        g->layer_n_index_comp[il]--;
+                    }
+                }
                 continue;
             }
 

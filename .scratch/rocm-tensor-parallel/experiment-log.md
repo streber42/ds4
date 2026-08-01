@@ -1752,3 +1752,186 @@ requires one of the two new-issue-sized changes above, neither safe to
 attempt inside this audit issue. AC4 (`make -j8 test-rocm`) passes but
 against an unmodified tree — reported as the clean-tree baseline, not as
 evidence of a fix. Issue set to `ready-for-human`.
+
+## 2026-08-01 — #57 non-transactional counter-increment hazard fixed via rollback (issue 57 follow-up)
+
+A human/agent pairing session reopened #57's AC1 sign-off after the
+2026-08-01 lint pass surfaced a new hazard in the counter-hoist fix
+(`8a8f82a`): the orchestrator incremented `layer_n_comp[il]`/
+`layer_n_index_comp[il]` *before* dispatching each layer (or, in the
+full-token overlap path, before dispatching the whole token) rather than
+after confirming that dispatch succeeded. A failed dispatch would leave
+the counter permanently advanced past a row that was never actually
+written — harmless on every hard-abort call site found, but a latent
+silent-corruption hazard on any future retry path.
+
+**First attempt (reverted): deferred commit.** The initial fix moved the
+`++` to *after* dispatch success is confirmed, and simplified the
+`comp_row`/`index_row`/capacity-check reads in
+`metal_graph_encode_decode_layer_phase` to drop their
+`- (emit ? 1u : 0u)` compensation, reasoning that the race-safety property
+only requires the counter be *unmutated* during the dispatch window, not
+pre-incremented. `make -j8 test-rocm` passed against this version. Ran it
+by the AI-consultants panel (7/10 responded: Gemini, Codex, Mistral,
+Cursor, Qwen3, Grok, MiniMax) before asking for human sign-off — Cursor
+flagged, and the synthesis confirmed, that this was wrong: the same
+`metal_graph_encode_decode_layer_phase` function also reads
+`g->layer_n_comp[il]`/`g->layer_n_index_comp[il]` **directly, with no
+compensation**, at several points *during Phase 1* — the sparse-threshold
+gate (`ds4.c:22802-22804`), indexer scoring/top-k (`22853`, `22860`,
+`22869`, `22874`, `22882`), and the selected-row count (`22920-22922`) —
+all of which need the *post*-increment "total valid rows including the one
+just written" value, matching HEAD's non-TP4 inline-increment behavior and
+the original (`8a8f82a`) TP4 pre-increment behavior. Deferring the commit
+to after dispatch left these reads short by exactly one row for every TP4
+emit: the current token's own freshly-compressed row was silently excluded
+from its own indexer/attention computation. A real, systematic correctness
+regression, caught by the panel before it was ever offered for human
+sign-off — `test-rocm` did not catch it because none of its suites drive
+this code path (a standing caveat on every #57 pass to date, see below).
+
+**Actual fix (kept): pre-increment + rollback on failure.** Reverted the
+read-side changes back to the exact `8a8f82a`/HEAD form (`git show
+HEAD:ds4.c` confirms the four read sites are now byte-identical to HEAD).
+The counter is still incremented *before* dispatch, preserving the
+load-bearing "post-increment reads are correct during Phase 1" invariant.
+The actual delta over `8a8f82a` is: if dispatch/barrier subsequently fails,
+**roll the increment back** instead of leaving it stranded.
+- Per-layer dispatch path (`ds4.c:~27742-28085`): a new
+  `tp4_counter_incremented_this_layer` flag, set when the pre-increment
+  happens, gates a decrement added just before `continue` at the bottom of
+  the iteration, firing only when `!ok`. Rolling back here is a semantic
+  choice, not just undoing bookkeeping: Phase 1 (including
+  `metal_graph_commit_attn_comp_stage`) may already have physically written
+  the row's bytes before a later phase (Phase 2, HC expand, dspark capture)
+  failed. This is deliberately more conservative than HEAD's non-TP4 inline
+  commit, which commits at end-of-Phase-1 and never rolls back a later
+  Phase 2 failure.
+- Full-token overlap path (`ds4.c:~27663-27740`, all-43-layers case): the
+  pre-loop still increments (restored to `8a8f82a` behavior). A new
+  `full_token_dispatched` flag gates a rollback pass after
+  `metal_graph_tp4_spike_barrier()`, run only when dispatch was attempted
+  and `!ok`: it mirrors the pre-loop's ratio/emit computation with `--`
+  instead of `++`. Safe to decrement unconditionally for every emit-true
+  layer because dispatch is only reached when the pre-loop completed
+  without breaking (every emit-true layer really was incremented).
+
+**Scope note, not overclaiming:** this makes the *counter* transactional
+w.r.t. dispatch failure. It does not make full request/session retry after
+a failed token safe in general — `ds4_gpu_compressor_update_tensor`
+mutates recurrent compressor state (`tp_attn_state_kv`/
+`tp_attn_state_score`) in place, non-idempotently, and that is unchanged
+by this fix. Pre-existing, out of scope here.
+
+**Verification:** `make -j8 test-rocm` re-run under the GPU lock against
+this corrected version (the earlier green run was against the deferred-
+commit version that got reverted, so it doesn't count as evidence for this
+one). All four suites pass (`test_rocm_tp_stubs`, `test_rocm_xdev`,
+`test_rocm_kernel_compare` 6/6, `test_engine_rocm_tp_refusal`). Same
+standing caveat as every prior #57 pass: none of these suites drive the
+spike-worker counter-commit/rollback path directly, so this is necessary,
+not sufficient, evidence. AC3's TP=4 quality-fixture half remains blocked
+on #59 per prior human disposition — not re-attempted here.
+
+**Takeaway for future passes on this file:** the near-miss above is the
+most useful thing in this entry. A plausible-sounding simplification
+("the invariant is just 'don't mutate during dispatch', not 'pre-
+increment'") was wrong in a way that only showed up by tracing every read
+site of the counter, not by running the test suite. Anyone touching
+`layer_n_comp`/`layer_n_index_comp` again should grep all read sites in
+`metal_graph_encode_decode_layer_phase` first, not just the ones near
+whatever they're changing.
+
+**Round 2 consultant review, and one more real gap found (`ds4.c`
+~`27667-27722`).** Ran the pre-increment+rollback version by the panel
+again (`/ai-consultants:consult`, 7/10 responded: Gemini, Codex, Mistral,
+Cursor, Qwen3, Grok, MiniMax). Both Cursor (8/10 confidence) and Qwen3
+(9/10) independently confirmed the Round-1 read-side bug does not
+reoccur — the read sites are byte-identical to `8a8f82a`/HEAD, verified by
+diff. Both also flagged a second, narrower gap: in the full-token overlap
+path, if the pre-loop's capacity check breaks partway through (layer `k`
+exceeds `layer_comp_cap[il]`), layers `0..k-1` had already been
+incremented before the break, and the (at-the-time) rollback only fired
+when `full_token_dispatched` was true — so a capacity-break never rolled
+those back. This is the same hazard class the issue exists to fix, just
+triggered by a capacity check instead of a dispatch/barrier failure — and
+it was **pre-existing in `8a8f82a`/HEAD**, not introduced by this
+session's fix (confirmed via `git show HEAD:ds4.c`), so it had gone
+unnoticed since the original #57 fix landed.
+
+**Fixed:** replaced the `full_token_dispatched` bool with
+`pre_loop_stopped_at` (defaults to `DS4_N_LAYER`, set to `il` at the
+capacity-check `break`). The rollback trigger is now just `if (!ok)`,
+bounded to `[0, pre_loop_stopped_at)` — a single mechanism that correctly
+covers both the capacity-break case (rolls back exactly the layers that
+were incremented before the break) and the dispatch/barrier-failure case
+(rolls back all 43, since `pre_loop_stopped_at` stays `DS4_N_LAYER` when
+the pre-loop completes cleanly). Re-ran `make -j8 test-rocm` under the GPU
+lock a third time against this version; all four suites still pass
+(`/tmp/test-rocm-57-followup-v3.log`, ephemeral).
+
+**Other panel concerns checked and refuted, not acted on:**
+- Qwen3 claimed a "counter underflow on partial capacity check" — that if
+  `layer_n_comp[il]`'s capacity check passes and increments but
+  `layer_n_index_comp[il]`'s subsequently fails, only `layer_n_comp` would
+  be incremented while rollback decrements both unconditionally. Checked
+  directly against the code in both dispatch paths: both capacity checks
+  (`layer_n_comp` then `layer_n_index_comp`, when `ratio == 4`) run
+  *before either counter is incremented* — this ordering is unchanged from
+  `8a8f82a`. The scenario Qwen3 described cannot occur; false positive.
+- Qwen3 also claimed a "data race on barrier failure" — that workers might
+  still be executing when the orchestrator's rollback touches the
+  counters. Checked against `ds4_tp4_spike_worker_main`/
+  `metal_graph_tp4_spike_dispatch`/`metal_graph_tp4_spike_barrier`:
+  `dispatch()` blocks on each worker's `job_done` flag, which every worker
+  sets unconditionally (regardless of `result_ok`) immediately after
+  finishing its synchronous, host-side C code — including every host-side
+  read of the counters inside `metal_graph_encode_decode_layer_phase`.
+  `barrier()` runs strictly after `dispatch()` already returned, and only
+  waits on GPU-side completion events for kernels already queued; it never
+  gates host-side counter access, which the GPU kernels don't touch
+  anyway (the counters are plain host struct fields, not device memory).
+  So by the time rollback runs, no worker thread can still be reading or
+  writing the counters, regardless of whether `barrier()` returned `ok` or
+  not. False positive.
+- Cursor separately noted the full-token rollback is "all-or-nothing" on a
+  mid-token worker failure — decrementing counters for layers whose rows
+  may already be physically written by workers that got further than the
+  one that failed (workers aren't synchronized per-layer in this path, by
+  #53/#60's design). This is not a bug, it's the documented, deliberate
+  conservative choice already called out in the inline comment: a retry
+  overwrites those rows rather than trusting a partial commit.
+- Both panels reiterated the standing caveat that `test-rocm` doesn't
+  exercise the spike-worker counter-commit/rollback path directly — no new
+  information, already documented on every #57 pass to date.
+
+**Round 3 consultant review: fix confirmed, no new bugs.** Ran the
+`pre_loop_stopped_at` version by the panel a third time (7/10 responded:
+Gemini, Codex, Mistral, Cursor, Qwen3, Grok, MiniMax; same three —
+Kimi/GLM/DeepSeek — failed on availability, not disagreement). Both Cursor
+(8/10) and Qwen3 (9/10) independently confirmed: the `pre_loop_stopped_at`
+fix closes the Round 2 capacity-break gap completely; both Round 2
+"false positive" re-checks (asymmetric capacity-check ordering; barrier-
+failure race) hold up under independent re-verification; and the per-layer
+path has no equivalent gap (each layer's capacity check breaks before that
+layer's own increment, and prior layers are already fully resolved —
+committed or rolled back — by their own iteration before the loop can
+reach a later layer's check). No new correctness bugs found. Two
+non-blocking notes, both already covered:
+- Cursor re-raised the full-token path's "blunt all-or-nothing rollback"
+  (a barrier failure after a successful dispatch still rolls back every
+  emit-true layer, even ones whose rows a fast-finishing worker may have
+  already committed) — this is the same documented, deliberate tradeoff
+  from the Round 2 note above, not a new finding.
+- Qwen3/synthesis suggested a defensive `layers_incremented` counter
+  instead of relying on `ok` being true on entry to the rollback block —
+  not a bug (the enclosing `if (ok && g->rocm_tp4 && ...)` guard already
+  guarantees `ok == true` at that point), just a robustness nicety. Not
+  applied — `ok`'s invariant here is structural, not implicit.
+
+Three independent rounds of AI-consultant review (10 consultant-calls
+total, ~21 individual responses) is the review depth this session applied
+before returning to the human for AC1 sign-off. Combined with `make -j8
+test-rocm` passing on the final version, this is the evidence being
+presented for that sign-off — not a substitute for it, per the issue's own
+requirement that AC1's actual sign-off has to come from a human.
