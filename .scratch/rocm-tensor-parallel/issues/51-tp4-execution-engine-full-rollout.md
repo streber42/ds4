@@ -1,6 +1,6 @@
 # 51 — Roll out the persistent-thread/async-stream execution engine to all 43 layers
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -40,10 +40,20 @@ collective is #52's job, deliberately kept separate and HITL-gated.
 ## Blocked by
 
 `.scratch/rocm-tensor-parallel/issues/50-tp4-execution-engine-spike.md`
+`.scratch/rocm-tensor-parallel/issues/56-tp4-threaded-teardown-crash.md`
+`.scratch/rocm-tensor-parallel/issues/57-tp4-compressed-cache-concurrency-race.md`
 
 ## Comments
 
-**Status: ready-for-human.** This issue was picked up in a tangled state:
+**2026-08-01 — Human disposition (Sean):** left open rather than closed.
+Status reset to `ready-for-agent`, but `Blocked by` now literally lists
+`#56` and `#57` (in addition to `#50`) so the scheduler cannot re-dispatch
+this until both of those close — per the literal-only `Blocked by`
+semantics that already bit this issue once (see #53's missing dependency,
+below). Once #56 and #57 both land, re-attempt the full 43-layer rollout
+under this same issue rather than opening a new one.
+
+**Status: ready-for-human (superseded above).** This issue was picked up in a tangled state:
 the previous autonomous run (a different harness, `gemini-3.6-flash-high`
 via "antigravity-cli") timed out mid-task and left uncommitted changes,
 and issue #53 — which should have declared `Blocked by: #51` but didn't —
