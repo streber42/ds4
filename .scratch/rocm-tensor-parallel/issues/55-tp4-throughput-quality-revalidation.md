@@ -1,11 +1,12 @@
 # 55 — Full throughput + quality re-validation against the PP=4 baseline
 
-Status: ready-for-human
+Status: open
 
 ## Parent
 
 `.scratch/rocm-tensor-parallel/issues/33-tp4-throughput-measurement.md`
 `.scratch/rocm-tensor-parallel/issues/48-revalidate-quality-fixture-real-target.md`
+
 
 ## What to build
 
@@ -51,8 +52,10 @@ per-issue quality-fixture re-runs alone.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/53-tp4-overlap-compute-allreduce.md`
-`.scratch/rocm-tensor-parallel/issues/54-tp4-moe-collective-audit.md`
+`.scratch/rocm-tensor-parallel/issues/58-revalidate-quality-serialize-kernel.md`
+`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
+`.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md`
+`.scratch/rocm-tensor-parallel/issues/61-eliminate-allreduce-host-sync-barriers.md`
 
 ## Comments
 
