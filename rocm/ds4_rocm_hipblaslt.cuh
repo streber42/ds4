@@ -2,8 +2,8 @@
  * Included from ds4_cuda.cu under __HIP_PLATFORM_AMD__ to keep ROCm
  * planning/cache code out of the CUDA host runtime body. */
 
-static hipblasLtHandle_t g_hipblaslt;
-static int g_hipblaslt_ready;
+static thread_local hipblasLtHandle_t g_hipblaslt;
+static thread_local int g_hipblaslt_ready;
 struct cuda_hipblaslt_gemm_plan {
     uint32_t out_dim;
     uint32_t n_tok;

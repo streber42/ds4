@@ -27490,7 +27490,24 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
 /* Whether layer il, in this process, should use the threaded spike path.
  * See the safety-scope comment above this block for why compressed layers
  * are excluded. DS4_TP4_THREADED_LAYERS unset or <= 0 disables the spike
- * path entirely -- the pre-#50 code path is then byte-identical. */
+ * path entirely -- the pre-#50 code path is then byte-identical.
+ *
+ * Issue #51 investigated rolling this out as the default (previously
+ * off-by-default, opt-in-only spike) but found the threaded path still
+ * reproducibly aborts real hardware on process teardown ("Memobj map does
+ * not have ptr") -- the same crash #50 found, now confirmed (via a
+ * threading-off discriminator run with the same rewritten teardown code
+ * completing cleanly) to be triggered specifically by activating the
+ * persistent worker threads, not by the BLAS-handle race #50 hypothesized
+ * as the sole cause (that fix is retained below anyway -- it closes a real
+ * race, is exercised and passing under make test-rocm, and is inert while
+ * this path stays opt-in). Root cause is still open; see the issue #51
+ * Comments and experiment-log for what was ruled out and what's untested.
+ * A second, independent blocker (the layer_n_comp[il]/
+ * layer_attn_comp_cache[il] compressed-cache race between concurrent rank
+ * reads and rank 0's counter increment) also still gates any default-on
+ * rollout past layers 0-1, even once the crash is fixed. Left opt-in
+ * pending both. */
 static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
     static int n_layers = -1;
     if (n_layers < 0) {

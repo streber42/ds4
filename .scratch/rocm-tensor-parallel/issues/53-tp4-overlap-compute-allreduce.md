@@ -32,3 +32,4 @@ blocking, not the underlying communication latency itself.
 ## Blocked by
 
 `.scratch/rocm-tensor-parallel/issues/52-tp4-hand-rolled-async-allreduce.md`
+`.scratch/rocm-tensor-parallel/issues/51-tp4-execution-engine-full-rollout.md`

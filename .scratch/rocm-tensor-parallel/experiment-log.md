@@ -871,3 +871,129 @@ trustworthy signal.
 - All-reduce count per token remains unchanged at ~86 (2 per layer).
 - `make -j8 test-rocm` passed cleanly (4/4 targets, all standalone tests and new probes passing).
 
+### 2026-08-01 — Issue 51: Full rollout attempt — two independent blockers found, #50's crash root cause falsified
+
+**Started from a stuck/tangled state, not a clean handoff.** The previous
+autonomous run (a different harness, `gemini-3.6-flash-high` via
+"antigravity-cli") timed out mid-task ("timeout waiting for response",
+297s) and left uncommitted, unfinished changes in `ds4.c`,
+`rocm/ds4_rocm_hipblaslt.cuh`, and `rocm/ds4_rocm_runtime.cuh`. Issue #53
+(overlap layer N+1 compute with layer N's all-reduce) had — due to a
+missing `Blocked by: #51` dependency in its own issue file — been
+dispatched **concurrently** with #51 by the same engine, and its agent
+timed out identically while editing the same files. The resulting
+uncommitted diff mixed a correct-looking BLAS thread-safety fix with a
+half-stubbed #53 fragment that silently deleted the layer-end
+all-reduce/broadcast barrier for 41 of 42 enabled layers with nothing
+replacing it — a live silent-correctness-corruption bug, not a crash. An
+AI consultant panel (10 models: Gemini, Codex, Mistral, Cursor, Kimi,
+Qwen3, GLM, Grok, DeepSeek, MiniMax) was consulted and converged on
+discarding the tangled diff and re-implementing #51's actual scope from a
+clean `git checkout` against HEAD (`eeb6675`), which is what was done.
+Fixed alongside: #53's issue file now declares `Blocked by: #51` as well
+as `#52`, and its status was reset from the (findings-free) `ready-for-human`
+its crashed run left it in back to `ready-for-agent`, so the scheduler
+can't repeat the same concurrent-dispatch mistake.
+
+**BLAS-handle thread-safety fix, implemented and retained.** Per #50's
+sizing: `g_cublas`/`g_cublas_ready`/`g_hipblaslt`/`g_hipblaslt_ready`/
+`g_blas_active_tier` in `rocm/ds4_rocm_runtime.cuh` and
+`rocm/ds4_rocm_hipblaslt.cuh` are now `thread_local` (each rank thread's
+cache of "currently active" handle), while the actual owned handles
+(`g_cublas_by_tier[]`/`g_hipblaslt_by_tier[]`, the lazy-created per-tier
+cache) stay process-wide and are now guarded by a new
+`g_blas_tier_mutex` around first-creation, closing the unlocked concurrent
+`cublasCreate`/`hipblasLtCreate` race #50 diagnosed. `ds4_gpu_cleanup`'s
+teardown was rewritten to destroy every tier ever created (not just the
+calling thread's currently-active one), setting the correct device before
+each destroy — verified this is safe: `metal_graph_tp4_spike_pool_shutdown()`
+(joins all 4 worker threads) already runs before `ds4_gpu_cleanup()` in
+`ds4_engine_close` (had to check this explicitly, since AI consultants
+reviewing the diff on paper flagged "main-thread destroying a worker
+thread's `thread_local` handle" as a high risk — that concern doesn't
+apply here because the owned handles were deliberately kept process-wide,
+not made `thread_local`, only the per-thread "active" cache was). `make -j8
+cpu`, `make -j8 rocm`, and `make -j8 test-rocm` (25 `[PASS]` lines across
+`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`,
+`test_engine_rocm_tp_refusal`) all pass with this fix in place.
+
+**#50's crash root cause is empirically falsified.** #50 diagnosed the
+BLAS-handle race entirely by reading the code ("found by reading, not yet
+by isolating with a minimal repro" — #50's own words) and the fix above is
+exactly what #50 sized as sufficient. It is not sufficient: re-running the
+identical 2-layer threaded scope (`DS4_TP4_THREADED_LAYERS` defaulted on,
+gated by the unchanged `ds4_layer_compress_ratio(il) == 0` safety check,
+which for `DS4_VARIANT_FLASH` only allows layers 0-1) on real hardware
+(4×AMD Radeon AI Pro R9700, production 86GB `DeepSeek-V4-Flash-IQ2XXS`
+model, `-c 64 -p "The capital of France is" -n 40`) reproduced the
+**identical** crash signature: generation completes, produces coherent
+output, prints the full #49 instrumentation report, then aborts —
+```
+:0:.../device.cpp:373 : ... us:  Memobj map does not have ptr: 0x...
+Aborted
+```
+**Discriminator test, to isolate whether the rewritten teardown itself was
+the bug:** re-ran the same binary with `DS4_TP4_THREADED_LAYERS=0`
+(threaded path fully off, but exercising the same rewritten per-tier
+teardown loop) on the same model/prompt. It exited cleanly — no abort, no
+"Memobj map" error, `atexit` instrumentation report printed normally. This
+confirms the crash is triggered specifically by **activating the
+persistent worker threads**, not by the teardown rewrite and not by a
+general problem with the (now-fixed) BLAS-handle path. The true root cause
+of the "Memobj map does not have ptr" abort is still open.
+
+**Untested candidate for the real root cause, flagged so the next attempt
+doesn't repeat #50's mistake of shipping a reading-only diagnosis:**
+`ds4_engine_close` (`ds4.c:58734`) calls `weights_free(&e->weights)`
+*before* `metal_graph_tp4_spike_pool_shutdown()` — i.e. the model's
+host-mapped weight ranges may get unmapped/unregistered from the main
+thread's context while the 4 persistent worker threads' device contexts
+(each bound once via `ds4_gpu_set_current_device` at thread startup) still
+hold live registrations against those same host pointers. If HIP's runtime
+memory-object map is context/thread-registration-sensitive in the way this
+theory requires, unregistering from a different thread than the one that
+registered would produce exactly this "Memobj map does not have ptr"
+signature. **Not verified** — moving `weights_free` after pool shutdown
+and re-running the same real-hardware test is the next concrete step, not
+attempted here to avoid a third build+86GB-model-load+crash cycle without
+a fresh decision checkpoint.
+
+**Second, independent blocker — the compressed-KV-cache race, unrelated to
+the crash above.** For `DS4_VARIANT_FLASH`, `ds4_expected_layer_compress_ratio`
+means only layers 0-1 are uncompressed (`ratio == 0`); layers 2-42 all use
+the compressed-KV attention path, which #50's spike deliberately excluded
+via the `ds4_layer_compress_ratio(il) == 0` gate. That gate was **not**
+lifted here (an earlier, discarded diff from the stuck agent run had
+silently dropped it — see above). The reason it can't simply be dropped:
+at `ds4.c:22597`, `comp_row = g->layer_n_comp[il]` is read
+**unconditionally by every rank**, but the shared counter is only
+incremented by rank 0, later in the same function
+(`ds4.c:22653`, gated `ds4_g_active_tier(g) == 0`). Under the old
+sequential per-tier loop this ordering was implicit (rank 0's whole call,
+increment included, always finished before rank 1-3's call began); under
+#50/#51's concurrent per-rank-thread dispatch, a non-zero rank's read can
+race rank 0's write within the same dispatched phase, computing a
+mismatched row index into the shared `layer_attn_comp_cache[il]`. This is
+the same "silent numerical corruption" failure class the #44-#48 all-reduce
+bugs and #52's HITL algorithm gate already exist to guard against in this
+project. Extending the threaded engine past layers 0-1 requires a real
+concurrency-safety design here (e.g. the orchestrator snapshotting
+`comp_row` once per dispatched layer and passing it into every rank's job,
+rather than each rank reading the live counter) — sized as its own
+follow-up issue, not attempted in #51.
+
+**Disposition: reverted `metal_graph_tp4_spike_layer_enabled` back to
+opt-in** (`DS4_TP4_THREADED_LAYERS` unset/0 = fully off, byte-identical to
+pre-#50 behavior — the same default it had before this issue started).
+The BLAS thread-safety fix is retained regardless: it closes a real race,
+is exercised and passing under `test-rocm`, and is inert (never invoked
+concurrently) while the threaded path stays opt-in. Issue #51 could not be
+closed — both the crash's root cause and the compressed-cache race remain
+open, and per #50's own reasoning (repeated here because it still holds),
+running the 100-case quality fixture against a build whose only tested
+threaded configuration reproducibly aborts would not produce a
+trustworthy signal, so it was not run. Real-hardware instrumentation
+numbers from the (crash-terminated but otherwise complete) 2-layer
+threaded run and the clean 43-layer non-threaded discriminator run are
+recorded in issue #51's Comments for whoever picks this up next.
+

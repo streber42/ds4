@@ -1,6 +1,6 @@
 # 51 — Roll out the persistent-thread/async-stream execution engine to all 43 layers
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -40,3 +40,88 @@ collective is #52's job, deliberately kept separate and HITL-gated.
 ## Blocked by
 
 `.scratch/rocm-tensor-parallel/issues/50-tp4-execution-engine-spike.md`
+
+## Comments
+
+**Status: ready-for-human.** This issue was picked up in a tangled state:
+the previous autonomous run (a different harness, `gemini-3.6-flash-high`
+via "antigravity-cli") timed out mid-task and left uncommitted changes,
+and issue #53 — which should have declared `Blocked by: #51` but didn't —
+was dispatched concurrently by the same engine and also timed out editing
+the same files. Full detail on untangling that, and everything below, is
+in `.scratch/rocm-tensor-parallel/experiment-log.md`'s 2026-08-01 entry.
+Summary:
+
+- **#53's missing dependency is fixed**: its issue file now declares
+  `Blocked by: #51` (in addition to `#52`), and its status was reset from
+  `ready-for-human` (a findings-free crash, not real progress) back to
+  `ready-for-agent`.
+- **The BLAS-handle thread-safety fix #50 sized for this issue is
+  implemented and retained** (`rocm/ds4_rocm_runtime.cuh`,
+  `rocm/ds4_rocm_hipblaslt.cuh`): `g_cublas`/`g_hipblaslt`/
+  `g_blas_active_tier` are `thread_local`; the owned per-tier handle
+  arrays stay process-wide, now mutex-guarded on first creation; teardown
+  destroys every tier ever created, not just the calling thread's active
+  one. `make -j8 cpu`, `make -j8 rocm`, `make -j8 test-rocm` all pass.
+- **But it does not fix the crash.** Re-running the same 2-layer threaded
+  scope #50 spiked on real hardware reproduced the identical
+  `Memobj map does not have ptr` abort on process teardown, after
+  generation completed and printed correct output. A discriminator run
+  (same binary, `DS4_TP4_THREADED_LAYERS=0`, threading fully off) exited
+  clean — proving the crash is triggered by activating the persistent
+  worker threads specifically, not by the BLAS fix or its teardown
+  rewrite. **#50's root-cause diagnosis (found by reading, never
+  repro'd) is therefore falsified as the sole cause.** An untested
+  candidate is recorded in the experiment log: `ds4_engine_close` frees
+  model weights (`weights_free`) *before* joining the worker threads
+  (`metal_graph_tp4_spike_pool_shutdown`), which may unregister
+  host-mapped ranges from the wrong thread's context.
+- **A second, independent blocker was found**, unrelated to the crash:
+  the compressed-KV-cache row counter (`layer_n_comp[il]`) is read by
+  every rank but incremented only by rank 0, in the same function that
+  now runs concurrently across ranks — a same-phase data race that #50's
+  `ds4_layer_compress_ratio(il) == 0` gate (layers 0-1 only, for
+  `DS4_VARIANT_FLASH`) was specifically excluding. This is why "all 43
+  layers" cannot simply drop that gate; a discarded diff from the earlier
+  stuck run had done exactly that, silently, which is part of why it was
+  discarded rather than salvaged (see experiment log).
+- **`metal_graph_tp4_spike_layer_enabled` was reverted to opt-in**
+  (`DS4_TP4_THREADED_LAYERS` unset/0 = off, same default as before this
+  issue). The BLAS fix ships anyway, since it's correct and inert while
+  the threaded path stays opt-in.
+- The 100-case quality fixture was **not run**, per #50's own reasoning
+  (still valid): a build whose only tested threaded configuration
+  reproducibly aborts would not produce a trustworthy signal.
+
+**Real-hardware instrumentation data** (4×AMD Radeon AI Pro R9700,
+production `DeepSeek-V4-Flash-IQ2XXS` 86GB model, `-c 64 -p "The capital
+of France is"`, `DS4_TP4_INSTRUMENT=1`):
+
+2-layer threaded run (`-n 40`, crash-terminated after 39 tokens generated
+and the report printed — throughput and per-call-site numbers are real):
+prefill 0.28 t/s, generation 1.52 t/s, total measured sync/dispatch
+545.1 ms/token. `spike_attn_dispatch`/`spike_attn_barrier`/
+`spike_moe_dispatch`/`spike_moe_barrier` (2 layers) totaled ~11.2 ms/token;
+`attn_tier_switch` (the still-unthreaded 41 layers) alone cost
+242.4 ms/token — confirming the 2-layer win is real but small against the
+whole model's budget.
+
+43-layer non-threaded discriminator run (`-n 20`, exited clean): 19 tokens,
+total measured sync/dispatch 549.3 ms/token, `attn_tier_switch`
+246.5 ms/token, `moe_tier_switch` 138.9 ms/token — consistent with #49's
+original baseline, confirming the discriminator's non-crash was not from a
+degraded/different code path.
+
+**This issue cannot close as "rolled out" in any form yet.** Two follow-up
+issues were opened to track the blockers found here, both scoped so they
+don't require #51 itself to close first:
+
+- `.scratch/rocm-tensor-parallel/issues/56-tp4-threaded-teardown-crash.md`
+  — root-cause the "Memobj map does not have ptr" abort, starting from the
+  `weights_free`-ordering hypothesis above.
+- `.scratch/rocm-tensor-parallel/issues/57-tp4-compressed-cache-concurrency-race.md`
+  — design and implement a concurrency-safe fix for the
+  `layer_n_comp[il]` race, to unblock rollout past layers 0-1.
+
+The BLAS thread-safety fix from this issue was committed as a standalone,
+correct, tested contribution despite not unblocking the issue on its own.

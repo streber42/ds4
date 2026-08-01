@@ -15,8 +15,8 @@ static cudaStream_t g_stream_selected_upload_stream;
 static cudaStream_t g_selected_readback_stream;
 static cudaEvent_t g_selected_readback_event;
 static uint64_t g_selected_readback_event_value;
-static cublasHandle_t g_cublas;
-static int g_cublas_ready;
+static thread_local cublasHandle_t g_cublas;
+static thread_local int g_cublas_ready;
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.cuh"
 #endif
@@ -27,19 +27,27 @@ static int g_glm_model;
  * cublasCreate()/hipblasLtCreate() time -- using a handle after switching
  * to a different device is undefined (observed on this box as "invalid
  * device ordinal" the first time a two-GPU ROCm run reached a matmul on a
- * second tier; see issue 04 Comments). g_cublas/g_hipblaslt above remain
- * the single "currently active" handle every kernel call site already
- * reads, so no call site needs to change; ds4_rocm_activate_tier_blas
- * lazily creates one handle per tier and swaps it into those globals
- * whenever ds4_gpu_set_current_device (ds4_rocm_compat.cu) switches tiers. */
+ * second tier; see issue 04 Comments). g_cublas/g_hipblaslt above are each
+ * thread's cached pointer to the "currently active" handle every kernel
+ * call site already reads; ds4_rocm_activate_tier_blas lazily creates one
+ * handle per tier (in the process-wide g_*_by_tier arrays below, guarded by
+ * g_blas_tier_mutex so concurrent per-rank threads can't race the same
+ * tier's create) and points the calling thread's cache at it whenever
+ * ds4_gpu_set_current_device (ds4_rocm_compat.cu) switches tiers. Making
+ * g_cublas/g_hipblaslt/g_blas_active_tier thread_local (rather than the
+ * by_tier arrays themselves) is what let issue #51's persistent per-rank
+ * threads call this concurrently without each thread's "active" handle
+ * being clobbered by another rank's tier switch -- see issue #50's
+ * experiment-log entry for the crash this fixes. */
 #define DS4_ROCM_MAX_BLAS_TIERS 16
+static pthread_mutex_t g_blas_tier_mutex = PTHREAD_MUTEX_INITIALIZER;
 static cublasHandle_t g_cublas_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
 static int g_cublas_ready_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
 #ifdef __HIP_PLATFORM_AMD__
 static hipblasLtHandle_t g_hipblaslt_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
 static int g_hipblaslt_ready_by_tier[DS4_ROCM_MAX_BLAS_TIERS];
 #endif
-static int g_blas_active_tier = -1;
+static thread_local int g_blas_active_tier = -1;
 /* Defined below, once cublas_ok/hipblaslt_ok exist; forward-declared here
  * since the per-tier state it manages lives next to g_cublas/g_hipblaslt. */
 extern "C" void ds4_rocm_activate_tier_blas(int tier);
@@ -6126,9 +6134,16 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
     return 1;
 }
 
-/* See the comment by g_cublas_by_tier's declaration above. */
+/* See the comment by g_cublas_by_tier's declaration above. Called
+ * concurrently by issue #51's persistent per-rank threads (one call per
+ * thread per tier switch) -- the by_tier arrays are process-wide, so
+ * creating a tier's handle for the first time is guarded by
+ * g_blas_tier_mutex; the thread-local g_cublas/g_hipblaslt/g_blas_active_tier
+ * cache below is what each thread reads afterward, so steady-state calls
+ * (tier already created) take the fast path without contending the mutex. */
 extern "C" void ds4_rocm_activate_tier_blas(int tier) {
     if (tier < 0 || tier >= DS4_ROCM_MAX_BLAS_TIERS || tier == g_blas_active_tier) return;
+    pthread_mutex_lock(&g_blas_tier_mutex);
     if (!g_cublas_ready_by_tier[tier]) {
         if (cublas_ok(cublasCreate(&g_cublas_by_tier[tier]), "create tier handle")) {
             const cublasMath_t math_mode =
@@ -6140,15 +6155,18 @@ extern "C" void ds4_rocm_activate_tier_blas(int tier) {
             g_cublas_ready_by_tier[tier] = 1;
         }
     }
-    g_cublas = g_cublas_by_tier[tier];
-    g_cublas_ready = g_cublas_ready_by_tier[tier];
-    if (g_cublas_ready) (void)cublasSetStream(g_cublas, NULL);
 #ifdef __HIP_PLATFORM_AMD__
     if (!g_hipblaslt_ready_by_tier[tier]) {
         if (hipblaslt_ok(hipblasLtCreate(&g_hipblaslt_by_tier[tier]), "create tier handle")) {
             g_hipblaslt_ready_by_tier[tier] = 1;
         }
     }
+#endif
+    pthread_mutex_unlock(&g_blas_tier_mutex);
+    g_cublas = g_cublas_by_tier[tier];
+    g_cublas_ready = g_cublas_ready_by_tier[tier];
+    if (g_cublas_ready) (void)cublasSetStream(g_cublas, NULL);
+#ifdef __HIP_PLATFORM_AMD__
     g_hipblaslt = g_hipblaslt_by_tier[tier];
     g_hipblaslt_ready = getenv("DS4_ROCM_DISABLE_HIPBLASLT") ? 0 : g_hipblaslt_ready_by_tier[tier];
 #endif
@@ -6216,17 +6234,37 @@ extern "C" void ds4_gpu_cleanup(void) {
     hipblaslt_sb_plan_clear();
     hipblaslt_f16_f32_plan_clear();
 #endif
-    if (g_cublas_ready) {
-        (void)cublasDestroy(g_cublas);
-        g_cublas_ready = 0;
-        g_cublas = NULL;
-    }
+    /* g_cublas_by_tier/g_hipblaslt_by_tier are process-wide (not
+     * thread_local -- see the comment by their declaration), so every tier
+     * ever created by any rank thread must be destroyed here, not just this
+     * (calling) thread's currently-active one. Must run after all TP4
+     * worker threads are joined (metal_graph_tp4_spike_pool_shutdown runs
+     * before this in ds4_engine_close) so no other thread can still be
+     * issuing BLAS calls against a handle being destroyed. */
+    pthread_mutex_lock(&g_blas_tier_mutex);
+    for (int t = 0; t < DS4_ROCM_MAX_BLAS_TIERS; t++) {
+        const int dev = (t < DS4_MAX_GPUS && g_gpu[t].device_id >= 0) ? g_gpu[t].device_id : t;
+        if (g_cublas_ready_by_tier[t]) {
+            (void)cudaSetDevice(dev);
+            (void)cublasDestroy(g_cublas_by_tier[t]);
+            g_cublas_ready_by_tier[t] = 0;
+            g_cublas_by_tier[t] = NULL;
+        }
 #ifdef __HIP_PLATFORM_AMD__
-    if (g_hipblaslt_ready) {
-        (void)hipblasLtDestroy(g_hipblaslt);
-        g_hipblaslt_ready = 0;
-        g_hipblaslt = NULL;
+        if (g_hipblaslt_ready_by_tier[t]) {
+            (void)cudaSetDevice(dev);
+            (void)hipblasLtDestroy(g_hipblaslt_by_tier[t]);
+            g_hipblaslt_ready_by_tier[t] = 0;
+            g_hipblaslt_by_tier[t] = NULL;
+        }
+#endif
     }
+    pthread_mutex_unlock(&g_blas_tier_mutex);
+    g_cublas_ready = 0;
+    g_cublas = NULL;
+#ifdef __HIP_PLATFORM_AMD__
+    g_hipblaslt_ready = 0;
+    g_hipblaslt = NULL;
 #endif
     cuda_model_range_release_all();
     cuda_q8_f16_cache_release_all();
