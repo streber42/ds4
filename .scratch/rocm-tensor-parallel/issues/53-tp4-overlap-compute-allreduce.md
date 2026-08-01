@@ -1,6 +1,6 @@
 # 53 — Overlap layer N+1 compute with layer N's all-reduce
 
-Status: ready-for-agent
+Status: closed
 
 ## Parent
 
@@ -20,14 +20,14 @@ blocking, not the underlying communication latency itself.
 
 ## Acceptance criteria
 
-- [ ] Layer N+1 compute begins before layer N's all-reduce fully completes,
+- [x] Layer N+1 compute begins before layer N's all-reduce fully completes,
       for the dependency-safe portion of the computation
-- [ ] Per-token decode throughput measured and compared against #51/#52's
+- [x] Per-token decode throughput measured and compared against #51/#52's
       numbers — report the actual overlap win, which may be small
-- [ ] Full 100-case `score_official` quality fixture re-run (pipeline and
+- [x] Full 100-case `score_official` quality fixture re-run (pipeline and
       TP=4) — overlap logic is easy to get subtly wrong in the same
       "silent corruption" way as #52, so do not skip this
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
 
 ## Blocked by
 

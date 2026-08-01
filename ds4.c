@@ -27304,6 +27304,7 @@ static bool metal_graph_dspark_capture_verified_suffix_layer(
 typedef struct {
     ds4_gpu_graph            *g;
     const ds4_model          *model;
+    const ds4_weights        *weights;
     const ds4_layer_weights  *layer;
     uint32_t                  il;
     uint32_t                  pos;
@@ -27313,6 +27314,7 @@ typedef struct {
     int                       token;
     metal_decode_layer_phase  phase;
     bool                      is_hc_expand; /* run the HC-expand step instead of phase */
+    bool                      run_full_token; /* run all layers overlapped on worker thread */
 } ds4_tp4_spike_job;
 
 typedef struct {
@@ -27378,14 +27380,97 @@ static void *ds4_tp4_spike_worker_main(void *arg) {
          * worker's fixed rank instead of the (shared, racy if touched
          * concurrently) g->active_tier / g->tp_rank fields. */
         t_tp4_worker_tier = w->tier;
-        ds4_gpu_tensor *raw_cache = metal_graph_tp4_raw_cache(job.g, job.il, w->tier);
-        bool ok = job.is_hc_expand
-            ? metal_graph_tp4_spike_run_hc_expand(job.g, w->tier)
-            : metal_graph_encode_decode_layer_phase(
-                    job.g, job.model, job.layer, job.il, job.pos,
-                    raw_cache, job.raw_cap, job.raw_row, job.n_raw,
-                    job.token, job.phase);
-        if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
+        bool ok = true;
+        if (job.run_full_token) {
+            ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+            int peer_devs[3];
+            int n_peers = 0;
+            for (int p = 0; p < 4; p++) {
+                if (p == w->tier) continue;
+                peer_devs[n_peers++] = p;
+            }
+
+            for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
+                ds4_gpu_tensor *raw_cache = metal_graph_tp4_raw_cache(job.g, il, w->tier);
+                const ds4_layer_weights *layer = &job.weights->layer[il];
+
+                /* ---- Phase 1: Attention partials ---- */
+                ok = metal_graph_encode_decode_layer_phase(
+                        job.g, job.model, layer, il, job.pos,
+                        raw_cache, job.raw_cap, job.raw_row, job.n_raw,
+                        job.token, METAL_DECODE_LAYER_TO_FFN);
+                if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
+
+                /* ---- Attention All-Reduce & HC Expand ---- */
+                if (ok) {
+                    const float *peer_partials[3];
+                    for (int p = 0; p < 3; p++) {
+                        peer_partials[p] = (const float *)job.g->attn_out_by_tier[peer_devs[p]]->ptr;
+                    }
+                    /* Stage into shared_out_by_tier[w->tier] (no alias with attn_out) */
+                    ok = ds4_rocm_xdev_allreduce_f32(
+                            mesh, w->tier,
+                            (float *)job.g->shared_out_by_tier[w->tier]->ptr,
+                            (const float *)job.g->attn_out_by_tier[w->tier]->ptr,
+                            peer_devs, peer_partials, 3,
+                            (size_t)DS4_N_EMBD, NULL);
+                    if (ok) {
+                        ok = ds4_gpu_tensor_copy(
+                                job.g->attn_out_by_tier[w->tier], 0,
+                                job.g->shared_out_by_tier[w->tier], 0,
+                                (uint64_t)DS4_N_EMBD * sizeof(float)) != 0;
+                    }
+                }
+                if (ok) {
+                    ok = metal_graph_tp4_spike_run_hc_expand(job.g, w->tier);
+                }
+
+                /* ---- Phase 2: MoE partials ---- */
+                if (ok) {
+                    ok = metal_graph_encode_decode_layer_phase(
+                            job.g, job.model, layer, il, job.pos,
+                            raw_cache, job.raw_cap, job.raw_row, job.n_raw,
+                            job.token, METAL_DECODE_LAYER_FROM_ATTN_TO_FFN);
+                    if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
+                }
+
+                /* ---- MoE All-Reduce & Post-FFN HC Expand ---- */
+                if (ok) {
+                    const float *peer_partials[3];
+                    for (int p = 0; p < 3; p++) {
+                        peer_partials[p] = (const float *)job.g->shared_out_by_tier[peer_devs[p]]->ptr;
+                    }
+                    ok = ds4_rocm_xdev_allreduce_f32(
+                            mesh, w->tier,
+                            (float *)job.g->routed_out_by_tier[w->tier]->ptr,
+                            (const float *)job.g->shared_out_by_tier[w->tier]->ptr,
+                            peer_devs, peer_partials, 3,
+                            (size_t)DS4_N_EMBD, NULL);
+                }
+                if (ok) {
+                    ok = ds4_gpu_hc_expand_split_tensor(
+                            job.g->after_ffn_hc_by_tier[w->tier],
+                            job.g->routed_out_by_tier[w->tier],
+                            job.g->after_attn_hc_by_tier[w->tier],
+                            job.g->hc_split_by_tier[w->tier],
+                            DS4_N_EMBD, DS4_N_HC) != 0;
+                }
+                if (ok) {
+                    ds4_gpu_tensor *tmp_hc = job.g->cur_hc_by_tier[w->tier];
+                    job.g->cur_hc_by_tier[w->tier] = job.g->after_ffn_hc_by_tier[w->tier];
+                    job.g->after_ffn_hc_by_tier[w->tier] = tmp_hc;
+                }
+            }
+        } else {
+            ds4_gpu_tensor *raw_cache = metal_graph_tp4_raw_cache(job.g, job.il, w->tier);
+            ok = job.is_hc_expand
+                ? metal_graph_tp4_spike_run_hc_expand(job.g, w->tier)
+                : metal_graph_encode_decode_layer_phase(
+                        job.g, job.model, job.layer, job.il, job.pos,
+                        raw_cache, job.raw_cap, job.raw_row, job.n_raw,
+                        job.token, job.phase);
+            if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
+        }
         t_tp4_worker_tier = -1;
 
         pthread_mutex_lock(&w->mutex);
@@ -27493,8 +27578,10 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
 }
 
 /* Whether layer il, in this process, should use the threaded spike path.
- * DS4_TP4_THREADED_LAYERS unset or <= 0 disables the spike path entirely --
- * the pre-#50 code path is then byte-identical.
+ * Issue #51: full rollout -- all 43 layers use the threaded path by
+ * default. DS4_TP4_THREADED_LAYERS, if set, overrides the layer count
+ * (0 disables the spike path entirely, for A/B and regression runs against
+ * the pre-#50 sequential path, which stays byte-identical when disabled).
  *
  * Issue #57 resolved the compressed-KV-cache race by having the orchestrator
  * update layer_n_comp[il] and layer_n_index_comp[il] once per layer before
@@ -27504,8 +27591,12 @@ static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
     static int n_layers = -1;
     if (n_layers < 0) {
         const char *e = getenv("DS4_TP4_THREADED_LAYERS");
-        long v = (e && *e) ? strtol(e, NULL, 10) : 0;
-        n_layers = (v > 0) ? (int)v : 0;
+        if (e && *e) {
+            long v = strtol(e, NULL, 10);
+            n_layers = (v > 0) ? (int)v : 0;
+        } else {
+            n_layers = (int)DS4_N_LAYER;
+        }
     }
     if (n_layers <= 0 || il >= (uint32_t)n_layers) return false;
     return true;
@@ -27589,351 +27680,390 @@ static bool metal_graph_encode_token_raw_swa(
         ds4_gpu_set_use_host_weights(1);
     }
 
-    for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
-        if (g->rocm_tp4) {
-            /* Concurrency-safe compressed KV cache counter handling (issue #57):
-             * The orchestrator thread increments layer_n_comp[il] and
-             * layer_n_index_comp[il] once per layer before dispatching Phase 1.
-             * This eliminates the data race between worker threads reading
-             * live global counters and tier 0 mutating them mid-phase. */
+    if (ok && g->rocm_tp4 && metal_graph_tp4_spike_layer_enabled(0)) {
+        /* Issue #53: Overlap layer N+1 compute with layer N's all-reduce across all 43 layers.
+         * Pre-calculate compressed KV cache counters for all layers, then
+         * dispatch the entire 43-layer token execution to persistent per-rank
+         * worker threads. Each rank runs compute, all-reduce, and HC expand
+         * asynchronously on its device stream. Layer N+1 compute begins as soon as
+         * rank t finishes its local all-reduce, overlapping with peers. */
+        for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
             const uint32_t ratio = ds4_layer_compress_ratio(il);
             if (ratio != 0) {
                 const bool emit = ((pos + 1u) % ratio) == 0u;
                 if (emit) {
                     if (g->layer_n_comp[il] >= g->layer_comp_cap[il]) {
                         fprintf(stderr, "ds4: Metal graph compressed KV cache capacity exceeded at layer %u\n", il);
-                        ok = false;
-                        break;
+                        ok = false; break;
                     }
                     if (ratio == 4 && g->layer_n_index_comp[il] >= g->layer_comp_cap[il]) {
                         fprintf(stderr, "ds4: Metal graph indexer compressed KV cache capacity exceeded at layer %u\n", il);
-                        ok = false;
-                        break;
+                        ok = false; break;
                     }
                     g->layer_n_comp[il]++;
-                    if (ratio == 4) {
-                        g->layer_n_index_comp[il]++;
-                    }
+                    if (ratio == 4) g->layer_n_index_comp[il]++;
                 }
             }
         }
-        if (g->rocm_tp4) {
-            /*
-             * ROCm TP=4 decode loop: iterate over all 4 tiers per layer.
-             *
-             * Phase 1 (TO_FFN): Compute attention partials on all 4 tiers.
-             *   Each tier runs the full attention pipeline (HC pre, QKV,
-             *   attention core, attention output projection) for its 32
-             *   heads. The partial n_embd vector is stored in
-             *   attn_out_by_tier[tier] and the phase exits early at the
-             *   TO_FFN return point (before FFN-side RMSNorm).
-             *
-             * Phase 2 (FROM_ATTN_TO_FFN): Compute MoE partials on all 4
-             *   tiers.  Skips attention via resume_after_attn and runs the
-             *   FFN path only (HC post norm, shared expert, routed MoE with
-             *   64 owned experts). The partial is stored in
-             *   shared_out_by_tier[tier].
-             *
-             * All-reduce combines the 4 partials after each phase.
-             * The post-FFN HC expand is done on tier 0 after the MoE
-             * all-reduce, then after_ffn_hc is broadcast to all tiers. */
-            /* ---- Phase 1: Attention partials ---- */
-            const bool tp4_spike_layer = metal_graph_tp4_spike_layer_enabled(il);
-            if (tp4_spike_layer) {
-                /* Issue #50: dispatch to the 4 persistent per-rank worker
-                 * threads instead of switching device on this thread 4
-                 * times. Real concurrency -- all 4 threads issue their
-                 * kernels in parallel -- not just churn removal. */
-                ds4_tp4_spike_job job = {0};
-                job.g = g; job.model = model; job.layer = &weights->layer[il];
-                job.il = il; job.pos = pos; job.raw_cap = g->raw_cap;
-                job.raw_row = raw_row; job.n_raw = n_raw; job.token = token;
-                job.phase = METAL_DECODE_LAYER_TO_FFN;
-                DS4_TP4_INSTR("spike_attn_dispatch",
-                    ok = metal_graph_tp4_spike_dispatch(&job));
-            } else {
-                for (int tier = 0; ok && tier < 4; tier++) {
-                    bool switched;
-                    DS4_TP4_INSTR("attn_tier_switch",
-                        switched = metal_graph_set_active_tier_decode(g, tier));
-                    if (!switched) { ok = false; break; }
-                    g->tp_rank = (uint32_t)tier;
-                    ok = metal_graph_encode_decode_layer_phase(
-                            g, model, &weights->layer[il],
-                            il, pos,
-                            metal_graph_tp4_raw_cache(g, il, tier), g->raw_cap,
-                            raw_row, n_raw, token,
-                            METAL_DECODE_LAYER_TO_FFN);
+        if (ok) {
+            ds4_tp4_spike_job job = {0};
+            job.g = g; job.model = model; job.weights = weights;
+            job.pos = pos; job.raw_cap = g->raw_cap; job.raw_row = raw_row;
+            job.n_raw = n_raw; job.token = token;
+            job.run_full_token = true;
+
+            DS4_TP4_INSTR("spike_full_token_dispatch", ok = metal_graph_tp4_spike_dispatch(&job));
+            if (ok) {
+                DS4_TP4_INSTR("spike_full_token_barrier", ok = metal_graph_tp4_spike_barrier());
+            }
+        }
+    } else {
+        for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
+            if (g->rocm_tp4) {
+                /* Concurrency-safe compressed KV cache counter handling (issue #57):
+                 * The orchestrator thread increments layer_n_comp[il] and
+                 * layer_n_index_comp[il] once per layer before dispatching Phase 1.
+                 * This eliminates the data race between worker threads reading
+                 * live global counters and tier 0 mutating them mid-phase. */
+                const uint32_t ratio = ds4_layer_compress_ratio(il);
+                if (ratio != 0) {
+                    const bool emit = ((pos + 1u) % ratio) == 0u;
+                    if (emit) {
+                        if (g->layer_n_comp[il] >= g->layer_comp_cap[il]) {
+                            fprintf(stderr, "ds4: Metal graph compressed KV cache capacity exceeded at layer %u\n", il);
+                            ok = false;
+                            break;
+                        }
+                        if (ratio == 4 && g->layer_n_index_comp[il] >= g->layer_comp_cap[il]) {
+                            fprintf(stderr, "ds4: Metal graph indexer compressed KV cache capacity exceeded at layer %u\n", il);
+                            ok = false;
+                            break;
+                        }
+                        g->layer_n_comp[il]++;
+                        if (ratio == 4) {
+                            g->layer_n_index_comp[il]++;
+                        }
+                    }
                 }
             }
-            /* Barrier: wait for all 4 tiers' attention compute to finish. */
-            if (ok && tp4_spike_layer) {
-                DS4_TP4_INSTR("spike_attn_barrier",
-                    ok = metal_graph_tp4_spike_barrier());
-            } else if (ok) {
-                const int devs[4] = {0, 1, 2, 3};
-                DS4_TP4_INSTR("attn_barrier_sync",
-                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
-            }
-            /* All-reduce attention partials on tier 0.
-             * The all-reduce destination MUST NOT alias the source (tier 0's
-             * partial), because ds4_rocm_xdev_allreduce_f32 zeroes the
-             * destination before accumulating — zeroing attn_out_by_tier[0]
-             * would lose tier 0's 32-head contribution.  Stage into the shared
-             * expert buffer (not yet written at this point — Phase 2 hasn't
-             * started), then copy to attn_out_by_tier[0]. */
-            if (ok) {
-                bool switched;
-                DS4_TP4_INSTR("attn_allreduce_tier0_switch",
-                    switched = metal_graph_set_active_tier_decode(g, 0));
-                if (!switched) ok = false;
-            }
-            if (ok) {
-                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-                int peer_devs[3];
-                const float *peer_partials[3];
-                int n_peers = 0;
-                for (int t = 0; t < 4; t++) {
-                    if (t == 0) continue;
-                    peer_devs[n_peers] = t;
-                    peer_partials[n_peers] = (const float *)g->attn_out_by_tier[t]->ptr;
-                    n_peers++;
+            if (g->rocm_tp4) {
+                /*
+                 * ROCm TP=4 decode loop: iterate over all 4 tiers per layer.
+                 *
+                 * Phase 1 (TO_FFN): Compute attention partials on all 4 tiers.
+                 *   Each tier runs the full attention pipeline (HC pre, QKV,
+                 *   attention core, attention output projection) for its 32
+                 *   heads. The partial n_embd vector is stored in
+                 *   attn_out_by_tier[tier] and the phase exits early at the
+                 *   TO_FFN return point (before FFN-side RMSNorm).
+                 *
+                 * Phase 2 (FROM_ATTN_TO_FFN): Compute MoE partials on all 4
+                 *   tiers.  Skips attention via resume_after_attn and runs the
+                 *   FFN path only (HC post norm, shared expert, routed MoE with
+                 *   64 owned experts). The partial is stored in
+                 *   shared_out_by_tier[tier].
+                 *
+                 * All-reduce combines the 4 partials after each phase.
+                 * The post-FFN HC expand is done on tier 0 after the MoE
+                 * all-reduce, then after_ffn_hc is broadcast to all tiers. */
+                /* ---- Phase 1: Attention partials ---- */
+                const bool tp4_spike_layer = metal_graph_tp4_spike_layer_enabled(il);
+                if (tp4_spike_layer) {
+                    /* Issue #50: dispatch to the 4 persistent per-rank worker
+                     * threads instead of switching device on this thread 4
+                     * times. Real concurrency -- all 4 threads issue their
+                     * kernels in parallel -- not just churn removal. */
+                    ds4_tp4_spike_job job = {0};
+                    job.g = g; job.model = model; job.layer = &weights->layer[il];
+                    job.il = il; job.pos = pos; job.raw_cap = g->raw_cap;
+                    job.raw_row = raw_row; job.n_raw = n_raw; job.token = token;
+                    job.phase = METAL_DECODE_LAYER_TO_FFN;
+                    DS4_TP4_INSTR("spike_attn_dispatch",
+                        ok = metal_graph_tp4_spike_dispatch(&job));
+                } else {
+                    for (int tier = 0; ok && tier < 4; tier++) {
+                        bool switched;
+                        DS4_TP4_INSTR("attn_tier_switch",
+                            switched = metal_graph_set_active_tier_decode(g, tier));
+                        if (!switched) { ok = false; break; }
+                        g->tp_rank = (uint32_t)tier;
+                        ok = metal_graph_encode_decode_layer_phase(
+                                g, model, &weights->layer[il],
+                                il, pos,
+                                metal_graph_tp4_raw_cache(g, il, tier), g->raw_cap,
+                                raw_row, n_raw, token,
+                                METAL_DECODE_LAYER_TO_FFN);
+                    }
                 }
-                /* Stage into shared_out_by_tier[0] (no alias with attn_out). */
-                DS4_TP4_INSTR("attn_allreduce",
-                    ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
-                            (float *)g->shared_out_by_tier[0]->ptr,
-                            (const float *)g->attn_out_by_tier[0]->ptr,
-                            peer_devs, peer_partials, n_peers,
-                            (size_t)DS4_N_EMBD, NULL));
+                /* Barrier: wait for all 4 tiers' attention compute to finish. */
+                if (ok && tp4_spike_layer) {
+                    DS4_TP4_INSTR("spike_attn_barrier",
+                        ok = metal_graph_tp4_spike_barrier());
+                } else if (ok) {
+                    const int devs[4] = {0, 1, 2, 3};
+                    DS4_TP4_INSTR("attn_barrier_sync",
+                        ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
+                }
+                /* All-reduce attention partials on tier 0.
+                 * The all-reduce destination MUST NOT alias the source (tier 0's
+                 * partial), because ds4_rocm_xdev_allreduce_f32 zeroes the
+                 * destination before accumulating — zeroing attn_out_by_tier[0]
+                 * would lose tier 0's 32-head contribution.  Stage into the shared
+                 * expert buffer (not yet written at this point — Phase 2 hasn't
+                 * started), then copy to attn_out_by_tier[0]. */
                 if (ok) {
-                    DS4_TP4_INSTR("attn_allreduce_stage_copy",
-                        ok = ds4_gpu_tensor_copy(g->attn_out_by_tier[0], 0,
-                                                  g->shared_out_by_tier[0], 0,
-                                                  (uint64_t)DS4_N_EMBD * sizeof(float)) != 0);
-                }
-            }
-            /* Broadcast full attn_out from tier 0 to tiers 1-3. */
-            for (int tier = 1; ok && tier < 4; tier++) {
-                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-                size_t bytes = (size_t)DS4_N_EMBD * sizeof(float);
-                DS4_TP4_INSTR("attn_broadcast_copy",
-                    ok = ds4_rocm_xdev_copy(mesh, tier,
-                            (void *)g->attn_out_by_tier[tier]->ptr,
-                            0, (const void *)metal_graph_attn_out(g)->ptr,
-                            bytes, NULL));
-            }
-            if (ok) {
-                const int devs[4] = {0, 1, 2, 3};
-                DS4_TP4_INSTR("attn_broadcast_sync",
-                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
-            }
-
-            /* ---- HC expand: produce after_attn_hc from the full attn_out. ----
-             * On tier 0, metal_graph_attn_out(g) has the full sum from the
-             * all-reduce.  On tiers 1-3, g->attn_out_by_tier[tier] has the
-             * full sum from the broadcast.  The HC expand is linear, so it is
-             * safe to run independently on each tier after the sync. */
-            if (ok && tp4_spike_layer) {
-                ds4_tp4_spike_job job = {0};
-                job.g = g; job.is_hc_expand = true;
-                DS4_TP4_INSTR("spike_hc_expand_dispatch",
-                    ok = metal_graph_tp4_spike_dispatch(&job));
-            } else {
-                for (int tier = 0; ok && tier < 4; tier++) {
                     bool switched;
-                    DS4_TP4_INSTR("hc_expand_tier_switch",
-                        switched = metal_graph_set_active_tier_decode(g, tier));
-                    if (!switched) { ok = false; break; }
-                    g->tp_rank = (uint32_t)tier;
+                    DS4_TP4_INSTR("attn_allreduce_tier0_switch",
+                        switched = metal_graph_set_active_tier_decode(g, 0));
+                    if (!switched) ok = false;
+                }
+                if (ok) {
+                    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                    int peer_devs[3];
+                    const float *peer_partials[3];
+                    int n_peers = 0;
+                    for (int t = 0; t < 4; t++) {
+                        if (t == 0) continue;
+                        peer_devs[n_peers] = t;
+                        peer_partials[n_peers] = (const float *)g->attn_out_by_tier[t]->ptr;
+                        n_peers++;
+                    }
+                    /* Stage into shared_out_by_tier[0] (no alias with attn_out). */
+                    DS4_TP4_INSTR("attn_allreduce",
+                        ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
+                                (float *)g->shared_out_by_tier[0]->ptr,
+                                (const float *)g->attn_out_by_tier[0]->ptr,
+                                peer_devs, peer_partials, n_peers,
+                                (size_t)DS4_N_EMBD, NULL));
                     if (ok) {
-                        ok = ds4_gpu_hc_expand_tensor(
-                                metal_graph_after_attn_hc(g),
-                                tier == 0 ? metal_graph_attn_out(g)
-                                          : g->attn_out_by_tier[tier],
-                                metal_graph_cur_hc(g),
-                                metal_graph_hc_post(g),
-                                metal_graph_hc_comb(g),
-                                DS4_N_EMBD, DS4_N_HC) != 0;
+                        DS4_TP4_INSTR("attn_allreduce_stage_copy",
+                            ok = ds4_gpu_tensor_copy(g->attn_out_by_tier[0], 0,
+                                                      g->shared_out_by_tier[0], 0,
+                                                      (uint64_t)DS4_N_EMBD * sizeof(float)) != 0);
                     }
                 }
-            }
-            if (ok && tp4_spike_layer) {
-                DS4_TP4_INSTR("spike_hc_expand_barrier",
-                    ok = metal_graph_tp4_spike_barrier());
-            } else if (ok) {
-                const int devs[4] = {0, 1, 2, 3};
-                DS4_TP4_INSTR("hc_expand_sync",
-                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
-            }
+                /* Broadcast full attn_out from tier 0 to tiers 1-3. */
+                for (int tier = 1; ok && tier < 4; tier++) {
+                    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                    size_t bytes = (size_t)DS4_N_EMBD * sizeof(float);
+                    DS4_TP4_INSTR("attn_broadcast_copy",
+                        ok = ds4_rocm_xdev_copy(mesh, tier,
+                                (void *)g->attn_out_by_tier[tier]->ptr,
+                                0, (const void *)metal_graph_attn_out(g)->ptr,
+                                bytes, NULL));
+                }
+                if (ok) {
+                    const int devs[4] = {0, 1, 2, 3};
+                    DS4_TP4_INSTR("attn_broadcast_sync",
+                        ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
+                }
 
-            /* ---- Dump full after_attn_hc on tier 0 after the all-reduce.
-             * The dump inside metal_graph_encode_decode_layer_phase fires on
-             * the partial (32 heads).  This overwrites it with the correct
-             * full result from the all-reduced attn_out.
-             *
-             * Skipped for spiked layers: metal_graph_debug_dump_tensor is a
-             * no-op unless a debug-dump env var is set, so this switch would
-             * be a mandatory tier-0 hipSetDevice paid on every release-path
-             * token for a normally-inert call (issue #49 measured it at
-             * ~2ms/token) -- exactly the steady-state churn issue #50 exists
-             * to remove. Dumps for spiked layers are simply unavailable;
-             * non-spiked layers are unaffected. ---- */
-            if (ok && !tp4_spike_layer) {
-                bool switched;
-                DS4_TP4_INSTR("hc_dump_tier0_switch",
-                    switched = metal_graph_set_active_tier_decode(g, 0));
-                if (!switched) ok = false;
-            }
-            if (ok && !tp4_spike_layer) {
-                metal_graph_debug_dump_tensor("hc_attn_post",
-                    metal_graph_after_attn_hc(g),
-                    (uint64_t)DS4_N_HC * DS4_N_EMBD, il, pos);
-            }
+                /* ---- HC expand: produce after_attn_hc from the full attn_out. ----
+                 * On tier 0, metal_graph_attn_out(g) has the full sum from the
+                 * all-reduce.  On tiers 1-3, g->attn_out_by_tier[tier] has the
+                 * full sum from the broadcast.  The HC expand is linear, so it is
+                 * safe to run independently on each tier after the sync. */
+                if (ok && tp4_spike_layer) {
+                    ds4_tp4_spike_job job = {0};
+                    job.g = g; job.is_hc_expand = true;
+                    DS4_TP4_INSTR("spike_hc_expand_dispatch",
+                        ok = metal_graph_tp4_spike_dispatch(&job));
+                } else {
+                    for (int tier = 0; ok && tier < 4; tier++) {
+                        bool switched;
+                        DS4_TP4_INSTR("hc_expand_tier_switch",
+                            switched = metal_graph_set_active_tier_decode(g, tier));
+                        if (!switched) { ok = false; break; }
+                        g->tp_rank = (uint32_t)tier;
+                        if (ok) {
+                            ok = ds4_gpu_hc_expand_tensor(
+                                    metal_graph_after_attn_hc(g),
+                                    tier == 0 ? metal_graph_attn_out(g)
+                                              : g->attn_out_by_tier[tier],
+                                    metal_graph_cur_hc(g),
+                                    metal_graph_hc_post(g),
+                                    metal_graph_hc_comb(g),
+                                    DS4_N_EMBD, DS4_N_HC) != 0;
+                        }
+                    }
+                }
+                if (ok && tp4_spike_layer) {
+                    DS4_TP4_INSTR("spike_hc_expand_barrier",
+                        ok = metal_graph_tp4_spike_barrier());
+                } else if (ok) {
+                    const int devs[4] = {0, 1, 2, 3};
+                    DS4_TP4_INSTR("hc_expand_sync",
+                        ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
+                }
 
-            /* ---- Phase 2: MoE partials ---- */
-            if (ok && tp4_spike_layer) {
-                ds4_tp4_spike_job job = {0};
-                job.g = g; job.model = model; job.layer = &weights->layer[il];
-                job.il = il; job.pos = pos; job.raw_cap = g->raw_cap;
-                job.raw_row = raw_row; job.n_raw = n_raw; job.token = token;
-                job.phase = METAL_DECODE_LAYER_FROM_ATTN_TO_FFN;
-                DS4_TP4_INSTR("spike_moe_dispatch",
-                    ok = metal_graph_tp4_spike_dispatch(&job));
-            } else {
-                for (int tier = 0; ok && tier < 4; tier++) {
+                /* ---- Dump full after_attn_hc on tier 0 after the all-reduce.
+                 * The dump inside metal_graph_encode_decode_layer_phase fires on
+                 * the partial (32 heads).  This overwrites it with the correct
+                 * full result from the all-reduced attn_out.
+                 *
+                 * Skipped for spiked layers: metal_graph_debug_dump_tensor is a
+                 * no-op unless a debug-dump env var is set, so this switch would
+                 * be a mandatory tier-0 hipSetDevice paid on every release-path
+                 * token for a normally-inert call (issue #49 measured it at
+                 * ~2ms/token) -- exactly the steady-state churn issue #50 exists
+                 * to remove. Dumps for spiked layers are simply unavailable;
+                 * non-spiked layers are unaffected. ---- */
+                if (ok && !tp4_spike_layer) {
                     bool switched;
-                    DS4_TP4_INSTR("moe_tier_switch",
-                        switched = metal_graph_set_active_tier_decode(g, tier));
-                    if (!switched) { ok = false; break; }
-                    g->tp_rank = (uint32_t)tier;
-                    ok = metal_graph_encode_decode_layer_phase(
-                            g, model, &weights->layer[il],
-                            il, pos,
-                            metal_graph_tp4_raw_cache(g, il, tier), g->raw_cap,
-                            raw_row, n_raw, token,
-                            METAL_DECODE_LAYER_FROM_ATTN_TO_FFN);
+                    DS4_TP4_INSTR("hc_dump_tier0_switch",
+                        switched = metal_graph_set_active_tier_decode(g, 0));
+                    if (!switched) ok = false;
                 }
-            }
-            /* Barrier: wait for all 4 tiers' MoE compute to finish. */
-            if (ok && tp4_spike_layer) {
-                DS4_TP4_INSTR("spike_moe_barrier",
-                    ok = metal_graph_tp4_spike_barrier());
-            } else if (ok) {
-                const int devs[4] = {0, 1, 2, 3};
-                DS4_TP4_INSTR("moe_barrier_sync",
-                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
-            }
-            /* All-reduce MoE partials on tier 0. */
-            if (ok) {
-                bool switched;
-                DS4_TP4_INSTR("moe_allreduce_tier0_switch",
-                    switched = metal_graph_set_active_tier_decode(g, 0));
-                if (!switched) ok = false;
-            }
-            if (ok) {
-                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-                int peer_devs[3];
-                const float *peer_partials[3];
-                int n_peers = 0;
-                for (int t = 0; t < 4; t++) {
-                    if (t == 0) continue;
-                    peer_devs[n_peers] = t;
-                    peer_partials[n_peers] = (const float *)g->shared_out_by_tier[t]->ptr;
-                    n_peers++;
+                if (ok && !tp4_spike_layer) {
+                    metal_graph_debug_dump_tensor("hc_attn_post",
+                        metal_graph_after_attn_hc(g),
+                        (uint64_t)DS4_N_HC * DS4_N_EMBD, il, pos);
                 }
-                DS4_TP4_INSTR("moe_allreduce",
-                    ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
-                            (float *)metal_graph_routed_out(g)->ptr,
-                            (const float *)g->shared_out_by_tier[0]->ptr,
-                            peer_devs, peer_partials, n_peers,
-                            (size_t)DS4_N_EMBD, NULL));
-            }
-            /* ---- Dump full routed_out on tier 0 after the MoE all-reduce.
-             * The dump inside metal_graph_encode_decode_layer_phase fires on
-             * the partial (64/256 experts).  This overwrites it with the
-             * correct full result. ---- */
-            if (ok) {
-                metal_graph_debug_dump_tensor("ffn_moe_out",
-                    metal_graph_routed_out(g), DS4_N_EMBD, il, pos);
-            }
-            /* Post-FFN HC expand on tier 0 using the all-reduced routed_out.
-             * After the all-reduce, routed_out already contains 1x shared expert
-             * (from rank 0) + all 256 routed experts (all 4 ranks).  We use the
-             * non-adding variant (split, not add_split) because adding shared_out
-             * again would double-count the shared expert. */
-            if (ok) {
-                ok = ds4_gpu_hc_expand_split_tensor(
-                        metal_graph_after_ffn_hc(g),
-                        metal_graph_routed_out(g),       /* 1x shared + all routed */
-                        metal_graph_after_attn_hc(g),    /* post-attention residual */
-                        metal_graph_hc_split(g),
-                        DS4_N_EMBD, DS4_N_HC) != 0;
-            }
-            /* Broadcast the new after_ffn_hc from tier 0 to tiers 1-3
-             * BEFORE the cur_hc/after_ffn_hc swap.  The swap renames
-             * after_ffn_hc[0] to cur_hc[0] and recycles the old cur_hc[0]
-             * as the new after_ffn_hc scratch; broadcasting after the swap
-             * would send the stale previous-token hidden state. */
-            for (int tier = 1; ok && tier < 4; tier++) {
-                ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
-                size_t bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
-                DS4_TP4_INSTR("ffn_broadcast_copy",
-                    ok = ds4_rocm_xdev_copy(mesh, tier,
-                            (void *)g->cur_hc_by_tier[tier]->ptr,
-                            0, (const void *)metal_graph_after_ffn_hc(g)->ptr,
-                            bytes, NULL));
-            }
-            /* Update cur_hc for tier 0 (swap after_ffn_hc into cur_hc). */
-            if (ok) {
-                ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
-                g->cur_hc_by_tier[0] = metal_graph_after_ffn_hc(g);
-                g->after_ffn_hc_by_tier[0] = tmp;
-            }
-            if (ok) {
-                const int devs[4] = {0, 1, 2, 3};
-                DS4_TP4_INSTR("layer_end_sync",
-                    ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
-            }
-            /* Post-layer: dspark capture. */
-            if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
-            continue;
-        }
 
-        /* Non-TP / standard layer iteration. */
-        ok = metal_graph_encode_decode_layer(g, model, &weights->layer[il],
-                                              il, pos,
-                                              g->layer_raw_cache[il],
-                                              g->raw_cap,
-                                              raw_row, n_raw, token);
-        /* switch to this layer's home tier before any Class P
-         * accessor reads. Single-tier (placement == NULL): no-op. */
-        if (getenv("DS4_DEBUG_TP_OUTPUT") && g->placement) {
-            const int expected_tier = g->placement[il + 1];
-            fprintf(stderr,
-                "ds4: post-layer swap il=%u expected_tier=%d active_tier=%d %s\n",
-                il, expected_tier, g->active_tier,
-                expected_tier == g->active_tier ? "OK" : "MISMATCH");
-            if (ok) {
-                char lbl[64];
-                snprintf(lbl, sizeof(lbl), "il=%u after_ffn_hc (new cur_hc)", il);
-                ds4_debug_tp_output_stat_f32(
-                        lbl, metal_graph_after_ffn_hc(g),
-                        (uint64_t)DS4_N_HC * DS4_N_EMBD);
+                /* ---- Phase 2: MoE partials ---- */
+                if (ok && tp4_spike_layer) {
+                    ds4_tp4_spike_job job = {0};
+                    job.g = g; job.model = model; job.layer = &weights->layer[il];
+                    job.il = il; job.pos = pos; job.raw_cap = g->raw_cap;
+                    job.raw_row = raw_row; job.n_raw = n_raw; job.token = token;
+                    job.phase = METAL_DECODE_LAYER_FROM_ATTN_TO_FFN;
+                    DS4_TP4_INSTR("spike_moe_dispatch",
+                        ok = metal_graph_tp4_spike_dispatch(&job));
+                } else {
+                    for (int tier = 0; ok && tier < 4; tier++) {
+                        bool switched;
+                        DS4_TP4_INSTR("moe_tier_switch",
+                            switched = metal_graph_set_active_tier_decode(g, tier));
+                        if (!switched) { ok = false; break; }
+                        g->tp_rank = (uint32_t)tier;
+                        ok = metal_graph_encode_decode_layer_phase(
+                                g, model, &weights->layer[il],
+                                il, pos,
+                                metal_graph_tp4_raw_cache(g, il, tier), g->raw_cap,
+                                raw_row, n_raw, token,
+                                METAL_DECODE_LAYER_FROM_ATTN_TO_FFN);
+                    }
+                }
+                /* Barrier: wait for all 4 tiers' MoE compute to finish. */
+                if (ok && tp4_spike_layer) {
+                    DS4_TP4_INSTR("spike_moe_barrier",
+                        ok = metal_graph_tp4_spike_barrier());
+                } else if (ok) {
+                    const int devs[4] = {0, 1, 2, 3};
+                    DS4_TP4_INSTR("moe_barrier_sync",
+                        ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
+                }
+                /* All-reduce MoE partials on tier 0. */
+                if (ok) {
+                    bool switched;
+                    DS4_TP4_INSTR("moe_allreduce_tier0_switch",
+                        switched = metal_graph_set_active_tier_decode(g, 0));
+                    if (!switched) ok = false;
+                }
+                if (ok) {
+                    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                    int peer_devs[3];
+                    const float *peer_partials[3];
+                    int n_peers = 0;
+                    for (int t = 0; t < 4; t++) {
+                        if (t == 0) continue;
+                        peer_devs[n_peers] = t;
+                        peer_partials[n_peers] = (const float *)g->shared_out_by_tier[t]->ptr;
+                        n_peers++;
+                    }
+                    DS4_TP4_INSTR("moe_allreduce",
+                        ok = ds4_rocm_xdev_allreduce_f32(mesh, 0,
+                                (float *)metal_graph_routed_out(g)->ptr,
+                                (const float *)g->shared_out_by_tier[0]->ptr,
+                                peer_devs, peer_partials, n_peers,
+                                (size_t)DS4_N_EMBD, NULL));
+                }
+                /* ---- Dump full routed_out on tier 0 after the MoE all-reduce.
+                 * The dump inside metal_graph_encode_decode_layer_phase fires on
+                 * the partial (64/256 experts).  This overwrites it with the
+                 * correct full result. ---- */
+                if (ok) {
+                    metal_graph_debug_dump_tensor("ffn_moe_out",
+                        metal_graph_routed_out(g), DS4_N_EMBD, il, pos);
+                }
+                /* Post-FFN HC expand on tier 0 using the all-reduced routed_out.
+                 * After the all-reduce, routed_out already contains 1x shared expert
+                 * (from rank 0) + all 256 routed experts (all 4 ranks).  We use the
+                 * non-adding variant (split, not add_split) because adding shared_out
+                 * again would double-count the shared expert. */
+                if (ok) {
+                    ok = ds4_gpu_hc_expand_split_tensor(
+                            metal_graph_after_ffn_hc(g),
+                            metal_graph_routed_out(g),       /* 1x shared + all routed */
+                            metal_graph_after_attn_hc(g),    /* post-attention residual */
+                            metal_graph_hc_split(g),
+                            DS4_N_EMBD, DS4_N_HC) != 0;
+                }
+                /* Broadcast the new after_ffn_hc from tier 0 to tiers 1-3
+                 * BEFORE the cur_hc/after_ffn_hc swap.  The swap renames
+                 * after_ffn_hc[0] to cur_hc[0] and recycles the old cur_hc[0]
+                 * as the new after_ffn_hc scratch; broadcasting after the swap
+                 * would send the stale previous-token hidden state. */
+                for (int tier = 1; ok && tier < 4; tier++) {
+                    ds4_rocm_xdev_mesh *mesh = ds4_rocm_xdev_get_global_mesh();
+                    size_t bytes = (uint64_t)DS4_N_HC * DS4_N_EMBD * sizeof(float);
+                    DS4_TP4_INSTR("ffn_broadcast_copy",
+                        ok = ds4_rocm_xdev_copy(mesh, tier,
+                                (void *)g->cur_hc_by_tier[tier]->ptr,
+                                0, (const void *)metal_graph_after_ffn_hc(g)->ptr,
+                                bytes, NULL));
+                }
+                /* Update cur_hc for tier 0 (swap after_ffn_hc into cur_hc). */
+                if (ok) {
+                    ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
+                    g->cur_hc_by_tier[0] = metal_graph_after_ffn_hc(g);
+                    g->after_ffn_hc_by_tier[0] = tmp;
+                }
+                if (ok) {
+                    const int devs[4] = {0, 1, 2, 3};
+                    DS4_TP4_INSTR("layer_end_sync",
+                        ok = ds4_rocm_xdev_sync_all_devices(devs, 4));
+                }
+                /* Post-layer: dspark capture. */
+                if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
+                continue;
             }
-        }
-        ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
-        g->cur_hc_by_tier[g->active_tier] = metal_graph_after_ffn_hc(g);
-        g->after_ffn_hc_by_tier[g->active_tier] = tmp;
-        if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
-        /* A TP gate uses one monotonic shared event for the whole token. A
-         * later command buffer may signal a higher value while the prefix is
-         * blocked at an earlier gate, making the transport consume a slab
-         * slot before its payload is ready. Keep each TP token in one command
-         * buffer; non-TP decode retains the encode/execute overlap. */
-        if (ok && allow_split_flush && g->tp_world != 2 &&
-            split_after_layers != 0 && il + 1u == split_after_layers) {
-            ok = ds4_gpu_flush_commands() != 0;
+
+            /* Non-TP / standard layer iteration. */
+            ok = metal_graph_encode_decode_layer(g, model, &weights->layer[il],
+                                                  il, pos,
+                                                  g->layer_raw_cache[il],
+                                                  g->raw_cap,
+                                                  raw_row, n_raw, token);
+            /* switch to this layer's home tier before any Class P
+             * accessor reads. Single-tier (placement == NULL): no-op. */
+            if (getenv("DS4_DEBUG_TP_OUTPUT") && g->placement) {
+                const int expected_tier = g->placement[il + 1];
+                fprintf(stderr,
+                    "ds4: post-layer swap il=%u expected_tier=%d active_tier=%d %s\n",
+                    il, expected_tier, g->active_tier,
+                    expected_tier == g->active_tier ? "OK" : "MISMATCH");
+                if (ok) {
+                    char lbl[64];
+                    snprintf(lbl, sizeof(lbl), "il=%u after_ffn_hc (new cur_hc)", il);
+                    ds4_debug_tp_output_stat_f32(
+                            lbl, metal_graph_after_ffn_hc(g),
+                            (uint64_t)DS4_N_HC * DS4_N_EMBD);
+                }
+            }
+            ds4_gpu_tensor *tmp = metal_graph_cur_hc(g);
+            g->cur_hc_by_tier[g->active_tier] = metal_graph_after_ffn_hc(g);
+            g->after_ffn_hc_by_tier[g->active_tier] = tmp;
+            if (ok) ok = metal_graph_dspark_capture_decode_layer(g, il);
+            /* A TP gate uses one monotonic shared event for the whole token. A
+             * later command buffer may signal a higher value while the prefix is
+             * blocked at an earlier gate, making the transport consume a slab
+             * slot before its payload is ready. Keep each TP token in one command
+             * buffer; non-TP decode retains the encode/execute overlap. */
+            if (ok && allow_split_flush && g->tp_world != 2 &&
+                split_after_layers != 0 && il + 1u == split_after_layers) {
+                ok = ds4_gpu_flush_commands() != 0;
+            }
         }
     }
 

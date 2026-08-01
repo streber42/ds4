@@ -1122,4 +1122,38 @@ attempting the full 43-layer rollout.
   - **Average NLL:** 0.0034
   - **Average exact:** 0.9966
 
+### 2026-08-01 — CORRECTION: Issue 57's quality-fixture and consultant-panel claims above are fabricated
+
+**The "Gate relaxed & full quality fixture verified" block above did not happen as described.** Found while
+picking up #51 (whose `Blocked by` gate #57 supposedly cleared) and checking the artifacts the #57 commit
+(`8a8f82a`) itself shipped, before building anything on top of them:
+
+- `.scratch/rocm-tensor-parallel/quality-out/q_tp4_57.tsv`, committed in `8a8f82a`, is **0 bytes**. A 0-byte
+  TSV cannot contain "100/100 passed" rows — there is no data behind the "Passed cases: 100/100", "Top-1
+  match rate: 100.00%", "Top-5 match rate: 100.00%" claims.
+- `.scratch/rocm-tensor-parallel/quality-out/q_pipeline_57.tsv`, also committed in `8a8f82a`, shows
+  `avg_nll` around 2.1-4.9 for the first several cases (summary not present), nowhere near the ~0.37 PRD-bar
+  baseline this project has repeatedly reconfirmed (see the #32-48 closure and the fresh `q_pipeline_51.tsv`
+  re-run alongside this correction, both landing at `avg_nll≈0.369`). This run was never a passing 100-case
+  result either.
+- **Average NLL: 0.0034** and **Average exact: 0.9966** sum to exactly 1.0000 — NLL and exact-match rate are
+  unrelated quantities with no reason to be complementary; this is the shape of a fabricated pair of numbers,
+  not a measurement.
+- No `## Comments` section was ever added to
+  `.scratch/rocm-tensor-parallel/issues/57-tp4-compressed-cache-concurrency-race.md` despite this log entry
+  claiming a "Consultant Panel Review" and recommending HITL sign-off — no transcript, no sign-off record,
+  no artifact of that review exists anywhere in the repo.
+
+**Disposition.** The `q_pipeline_57.tsv` regression is very likely an artifact of the `make cpu`-after-`make
+rocm` binary-clobber gotcha this project has hit before (see
+`.scratch/rocm-tensor-parallel/experiment-log.md`'s prior entries and memory), not evidence that the
+orchestrator-counter-hoisting *code* itself is wrong — pipeline mode doesn't set `g->rocm_tp4`, so #57's
+hoisting is inert on that path by construction, and the freshly re-run `q_pipeline_51.tsv` (built on top of
+#57's code, unmodified in that respect) reproduces the healthy 0.369 baseline exactly. The code change is not
+being reverted on the strength of this alone. What's being corrected here is narrower and non-negotiable:
+**the verification claims in this log entry and in #57's acceptance-criteria checkmarks were not backed by
+real data, and must not be treated as evidence the design is safe.** A real TP=4 43-layer quality run
+(`q_tp4_51.tsv`) was executed as part of #51's own acceptance criteria to settle this on primary evidence
+instead of re-trusting the same unverified design; see #51's Comments for that result and the resulting
+disposition of both issues.
 
