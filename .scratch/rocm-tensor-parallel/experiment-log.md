@@ -1397,3 +1397,30 @@ HEAD for both pipeline and TP=4, under a recorded, identical
 `scripts/tp4-instrument.sh` deliberately leaves it unset. Which setting
 `q_pipeline_51` and `q_tp4_51` each ran under was not established here — if they
 differed, the 0.37-vs-0.76 comparison was never valid in the first place.)
+
+**Addendum — direct binary evidence, stronger than the commit-timestamp
+inference above.** The quality fixture is
+`gguf-tools/quality-testing/score_official`, a separate binary from `./ds4`,
+built by `make rocm-quality`. Its mtime in the tree is 08-01 **09:25**. That
+means:
+
+- The binary that produced the 0.7607 run (05:46) was overwritten 3h39m later
+  and **no longer exists** — the staleness of that number is established
+  directly, not merely inferred from commit ordering.
+- The `score_official` binary sitting in the tree *right now* predates both
+  `1fe4829` (#60, 10:38) and `0cb9cf3` (#61, 11:38). Anyone re-running the
+  fixture without rebuilding would generate yet another number that fails to
+  measure HEAD. `#62`'s AC1 now calls this out explicitly.
+
+Two smaller corrections to the analysis above:
+
+- The earlier note about `./ds4`'s mtime being unreliable due to the
+  `make cpu`/`make rocm` clobber ([[ds4-build-targets-share-binary-name]]) is
+  true but aimed at the wrong binary — `./ds4` is not what runs the fixture.
+- The first-half/second-half figures should not be read as run-length
+  degradation in either direction. The *pipeline* path rises 0.3688 → 0.4380
+  across halves while TP=4 is flat (0.7895 → 0.7697); the better-behaved path
+  showing the larger gradient indicates intrinsic case-difficulty ordering in
+  the fixture. This does not weaken the "TP=4 shift is uniform" conclusion
+  (which rests on the median and bucket counts), but it does mean half-to-half
+  comparisons are only meaningful *between* paths, not within one.

@@ -42,9 +42,15 @@ paths.
 
 ## Acceptance criteria
 
-- [ ] Rebuild from HEAD and record the exact commit SHA and build command in
-      the run log (the `make cpu` / `make rocm` clobber makes `./ds4`'s mtime
-      unreliable as evidence of what is built — verify, don't assume)
+- [ ] **Rebuild the fixture binary first — the one on disk is stale.** The
+      quality fixture is `gguf-tools/quality-testing/score_official`, a
+      *separate* binary from `./ds4`, built by `make ROCM_ARCH=gfx1201
+      rocm-quality` (which force-rebuilds with `-B` and filters out
+      `-ffast-math`). The copy currently in the tree is timestamped 08-01
+      **09:25**, which predates both `1fe4829` (#60, 10:38) and `0cb9cf3`
+      (#61, 11:38) — so running it as-is would produce *another* number that
+      does not measure HEAD. Record the commit SHA and build command in the
+      run log.
 - [ ] Full 100-case `score_official` run on the **pipeline** path, HEAD build
 - [ ] Full 100-case `score_official` run on the **TP=4** path, HEAD build
 - [ ] Both runs use an **identical and explicitly recorded**
@@ -69,6 +75,12 @@ paths.
   cosmetic artifact that does not describe TP placement. Confirm real
   placement via the four
   `ds4: CUDA tier N (device N) selective weights: … GiB in … ranges` lines.
+- **Do not read a first-half/second-half rise as degradation over the run.**
+  In the existing artifacts the *pipeline* path rises 0.3688 → 0.4380 across
+  its halves while TP=4 stays flat (0.7895 → 0.7697). Since the well-behaved
+  path shows the larger rise, that gradient is intrinsic case-difficulty
+  ordering in the fixture, not a run-length effect. Compare halves *between
+  paths*, not within one.
 - The `q_tp4_51_disc_*` layer sweep is not a layer-count discriminator: all
   eight runs share byte-identical warning counts (129) and near-identical
   `avg_nll` (0.329–0.347), the signature of eight runs of one code path. This
