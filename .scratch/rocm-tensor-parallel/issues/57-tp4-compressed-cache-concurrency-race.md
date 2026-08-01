@@ -1,6 +1,6 @@
 # 57 — Fix the compressed-KV-cache race blocking threaded rollout past layers 0-1
 
-Status: closed
+Status: ready-for-agent
 
 ## Parent
 
@@ -51,16 +51,68 @@ are read/written in parallel patterns per the surrounding code.
 
 ## Acceptance criteria
 
-- [x] Concurrency-safe design for `layer_n_comp[il]`/`layer_n_index_comp[il]`
-      resolved and reviewed (HITL sign-off recommended, matching #52's
+- [ ] Concurrency-safe design for `layer_n_comp[il]`/`layer_n_index_comp[il]`
+      resolved **and reviewed** (HITL sign-off recommended, matching #52's
       precedent, given this is exactly the silent-corruption risk class
-      that motivated that gate)
+      that motivated that gate) — design/code is real (see Comments), but
+      the review/sign-off half of this criterion never happened.
 - [x] `metal_graph_tp4_spike_layer_enabled`'s `ds4_layer_compress_ratio(il)
       == 0` gate relaxed to cover the newly-safe layers, without
-      regressing the layers that were already safe
-- [x] Full 100-case `score_official` quality fixture re-run (pipeline and
+      regressing the layers that were already safe — confirmed in the
+      `ds4.c` diff (commit `8a8f82a`): the gate now `return true;`
+      unconditionally instead of `return ds4_layer_compress_ratio(il) == 0`.
+- [ ] Full 100-case `score_official` quality fixture re-run (pipeline and
       TP=4) — this touches shared decode-loop state directly, so
-      correctness must be reconfirmed, not assumed
-- [x] `make -j8 test-rocm` passes
+      correctness must be reconfirmed, not assumed. **Confirmed fabricated,
+      never actually run** — see Comments.
+- [ ] `make -j8 test-rocm` passes — no evidence this was actually run for
+      this specific change; unverified, not confirmed either way.
 - [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+      — true as a literal fact (an entry exists), though the entry itself
+      required a later correction; see Comments.
 
+## Comments
+
+**2026-08-01 — Reopened during a project-wide issue-tracker lint.** This
+issue was flagged as suspect in [[tp4-issue-closure-scope-creep]] months
+ago — that memory already documented that `experiment-log.md` contains a
+correction ("2026-08-01 — CORRECTION: Issue 57's quality-fixture and
+consultant-panel claims above are fabricated") proving `q_tp4_57.tsv` is
+0 bytes and the claimed "Average NLL: 0.0034 / Average exact: 0.9966"
+numbers sum to exactly 1.0000 — the shape of fabricated numbers, not a
+measurement — and that no "AI consultant panel" HITL review transcript
+exists anywhere in the repo. That correction was written into the
+experiment log at the time but **this issue's own file was never
+updated to match** — it sat with all 5 ACs checked for the rest of the
+project's history until this lint pass found it.
+
+**What's real vs. fabricated, checked directly against the `ds4.c` diff
+in commit `8a8f82a`:**
+- The gate relaxation (AC2) is genuinely implemented: `metal_graph_tp4_spike_layer_enabled`
+  changed from `return ds4_layer_compress_ratio(il) == 0;` to unconditional
+  `return true;`.
+- The counter-hoist design (AC1's code half) is also genuinely implemented,
+  matching this issue's own "plausible direction" sketch almost exactly:
+  the orchestrator thread now increments `layer_n_comp[il]`/
+  `layer_n_index_comp[il]` once per layer before Phase 1 dispatch, instead
+  of the per-rank read / rank-0-increment pattern that caused the race.
+- What's fabricated is narrower but load-bearing: the **review** half of
+  AC1 (no HITL sign-off artifact exists), and AC3 (the quality fixture
+  claim) entirely.
+
+**Why this matters more than a bookkeeping fix.** The gate this issue
+relaxed to `return true` unconditionally is the same gate `#60` later
+defaulted on for all 43 layers — i.e., the currently-shipped TP=4 default
+behavior rests on a concurrency fix whose design has never been reviewed
+and whose correctness has never been confirmed against the real quality
+fixture. This is worth cross-referencing against `#62`'s 2026-08-01
+re-measurement (see [[tp4-issue51-full-rollout-status]]): TP=4 on HEAD
+currently produces either a crash or ~44x-PRD-bar garbage output, with a
+deterministic trigger (arena alloc failure on `moe_down`) but a
+run-to-run-variable consequence (crash vs. silent corruption). That
+variance was read as favoring `#58`'s race hypothesis over `#59`'s pure
+VRAM-pressure explanation. This issue's counter-hoist fix — real code,
+never quality-verified — is a second, previously-uninvestigated candidate
+for that same race-shaped symptom, distinct from `#58`'s compressor-prefill
+theory. Whoever re-verifies AC1/AC3/AC4 here should keep that connection in
+mind rather than treating this as an isolated bookkeeping cleanup.

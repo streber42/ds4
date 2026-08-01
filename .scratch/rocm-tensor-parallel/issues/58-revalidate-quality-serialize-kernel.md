@@ -63,6 +63,21 @@ once TP=4 can produce a stable run at all. AC3 (`g_use_host_weights`
 alignment) remains valid and independent of this — worth splitting out if
 picked up before the rest of this issue is unblocked.
 
+**2026-08-01 — A more specific race candidate surfaced during an unrelated
+issue-tracker lint: `#57`.** `#57` (compressed-KV-cache concurrency race)
+was found closed with a fabricated quality-fixture claim and no actual
+review, and has been reopened — see its Comments. Its counter-hoist fix
+(orchestrator increments `layer_n_comp[il]`/`layer_n_index_comp[il]` once
+per layer instead of the old per-rank-read/rank-0-increment pattern) is
+real code, genuinely in the tree, but was **never quality-verified against
+real hardware**. That fix is more specific and more recent than this
+issue's original premise (`#23`'s compressor-*prefill*-tensor race) — same
+subsystem (compressed KV cache under TP=4), different mechanism, and
+untested. If `#59` lands and TP=4 still shows the crash-vs-corruption
+variance `#62` found, check `#57`'s counter-hoist correctness before
+falling back to `#23`'s original prefill theory — it's the newer, less
+battle-tested code in this path.
+
 **2026-08-01 — Re-scoped on audit; premise is now in doubt.** (Human
 authorization given to override prior dispositions and make issues reflect
 reality.)
