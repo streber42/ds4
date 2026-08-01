@@ -1,6 +1,6 @@
 # 55 — Full throughput + quality re-validation against the PP=4 baseline
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -53,3 +53,22 @@ per-issue quality-fixture re-runs alone.
 
 `.scratch/rocm-tensor-parallel/issues/53-tp4-overlap-compute-allreduce.md`
 `.scratch/rocm-tensor-parallel/issues/54-tp4-moe-collective-audit.md`
+
+## Comments
+
+**2026-08-01 — Re-validation measurements & Human Disposition:**
+- `make -j8 test-rocm` passed 100% (4/4 targets).
+- Full 100-case `score_official` quality fixture re-validated:
+  - Pipeline path (`PP=4`): `avg_nll` = 0.3692, `first_match` = 68/100, `api_top1_rate` = 0.864, `api_pair_rate` = 0.989.
+  - `TP=4` path: `avg_nll` = 0.7607, `first_match` = 65/100, `api_top1_rate` = 0.772, `api_pair_rate` = 0.984.
+- Generation throughput & per-GPU utilization measured on 4× AMD R9700:
+  - `TP=4` generation throughput: ~1.52 t/s (~545 ms/token decode overhead across 86 all-reduces per token).
+  - `PP=4` pipeline baseline: ~22-28 t/s.
+  - Per-GPU utilization (`rocm-smi`): ~3-4% busy during decode (bound by host stream dispatch / PCIe latency).
+- **Human Disposition**: Human requested to hold Issue #55 open for further investigation regarding throughput optimization and NLL divergence.
+- **Follow-up Action Plan Tickets**:
+  - `#58`: Re-validate quality fixture under `AMD_SERIALIZE_KERNEL=3` & align prefill weight path (`.scratch/rocm-tensor-parallel/issues/58-revalidate-quality-serialize-kernel.md`)
+  - `#59`: Audit and fix per-tier VRAM weight sharding to eliminate 25.94 GiB load (`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`)
+  - `#60`: Roll out persistent per-rank thread execution engine across all 43 layers (`.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md`)
+  - `#61`: Eliminate host `hipDeviceSynchronize` barriers in TP=4 all-reduce path (`.scratch/rocm-tensor-parallel/issues/61-eliminate-allreduce-host-sync-barriers.md`)
+

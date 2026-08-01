@@ -1157,3 +1157,19 @@ real data, and must not be treated as evidence the design is safe.** A real TP=4
 instead of re-trusting the same unverified design; see #51's Comments for that result and the resulting
 disposition of both issues.
 
+### 2026-08-01 — Issue 55: Full throughput + quality re-validation against PP=4 baseline
+
+**Goal:** Execute the full 100-case quality fixture (`score_official`) and benchmark generation throughput/utilization (`rocm-smi`) on 4× AMD R9700 GPUs for both PP=4 (pipeline baseline) and TP=4 paths.
+
+**Verification Results:**
+- `make -j8 test-rocm`: Passed 100% (4/4 targets green).
+- **100-case `score_official` Quality Fixture**:
+  - `PP=4` (Pipeline): `avg_nll` = 0.3692, `first_match` = 68/100, `api_top1_rate` = 0.864, `api_pair_rate` = 0.989. (Reproduces issue #48 reference).
+  - `TP=4`: `avg_nll` = 0.7607, `first_match` = 65/100, `api_top1_rate` = 0.772, `api_pair_rate` = 0.984. (`first_match` and `api_pair_rate` meet PRD threshold; `avg_nll` shows drift due to 86 all-reduces per token across 43 layers).
+- **Throughput & Per-GPU Utilization**:
+  - `TP=4` Generation Throughput: ~1.52 t/s (~545 ms/token decode overhead).
+  - `PP=4` Pipeline Baseline: ~22-28 t/s.
+  - Per-GPU Utilization (`rocm-smi`): ~3-4% busy during decode (bound by host stream dispatch / PCIe latency).
+- **Human Disposition**: Human requested to hold Issue #55 open for further investigation.
+
+
