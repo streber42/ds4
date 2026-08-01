@@ -1305,3 +1305,95 @@ samples across 4 GPUs):
 **Disposition.** AC1-AC6 satisfied (AC1 and the gate question resolved as human
 judgment calls, recorded above; AC4 measured with the VRAM-fallback caveat spelled
 out rather than presented as a clean number). #61 closed.
+
+### 2026-08-01 — Audit of the 0.7607 TP=4 quality number (analysis-only, no GPU time)
+
+CPU-only re-analysis of the existing `quality-out/` artifacts, prompted by a
+"where did we end up" review. No new runs. Three findings, in increasing order
+of importance.
+
+**1. The TP=4 degradation is a uniform distribution shift, not episodic.**
+Per-case `avg_nll` extracted from `q_pipeline_51.log` and `q_tp4_51.log`
+(n=100 each):
+
+| | pipeline | TP=4 |
+|---|---|---|
+| mean | 0.4034 | 0.7796 |
+| median | 0.3492 | 0.7202 |
+| cases < 0.5 | 76 | 21 |
+| cases in [0.5,1) | 22 | 60 |
+| first-half mean | 0.3688 | 0.7895 |
+| second-half mean | 0.4380 | 0.7697 |
+
+The whole distribution translates right; the median roughly doubles. It is not
+a handful of catastrophic cases dragging the mean — and the hardest cases are
+hard on *both* paths (case_094: 4.85 pipeline / 4.67 TP=4), i.e. intrinsic
+prompt difficulty, not a TP=4 failure.
+
+Two hypotheses die here. **Progressive/run-length VRAM exhaustion is falsified**
+— the first-half/second-half means are flat (TP=4 second half is marginally
+*better*). **A race condition is disfavoured** — races are episodic and would
+show bimodality or run-to-run variance; this is a flat per-token tax. That is
+evidence *against* #58's stated premise (that the divergence is issue #23's
+compressor-prefill race) before any GPU time is spent on it.
+
+VRAM-pressure warning counts corroborate a systematic precision fallback:
+`q8 fp16 cache budget exhausted` fires **1×** in the pipeline log and **4300×**
+in the TP=4 log, plus 1 `arena alloc failed` (TP=4 only, none in pipeline).
+4300/100 cases = 43/case = once per layer.
+
+**2. The `q_tp4_51_disc_*` layer sweep is not a layer-count discriminator.**
+All eight runs (off/2/20/35/40/42/43/default) produce byte-identical warning
+counts (129) and near-identical `avg_nll` (0.329–0.347). This is the signature
+of eight runs of the *same* code path — consistent with the whole-token dispatch
+gate at `ds4.c:27652` (`metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)`),
+already recorded under #61 as collapsing every partial `DS4_TP4_THREADED_LAYERS`
+value onto the legacy path. The sweep cannot support conclusions about layer
+count or threading.
+
+Note for anyone reading the `multi-GPU layout:` block in a TP=4 log: it prints
+`GPU0: layers 0-42 ... GPU1-3: (no transformer layers) (0.0 GB)`, which looks
+like sharding failed. It has not — it is a pipeline-planner cosmetic artifact
+that does not describe TP placement. All four tiers do load
+(`CUDA tier N (device N) selective weights: 25.94 GiB in 1328 ranges`, ×4).
+This misread was made and corrected during this audit; recording it so the next
+reader doesn't repeat it.
+
+**3. Load-bearing: every quality number in flight predates every commit in the
+current stack.**
+
+| artifact / commit | time (08-01) |
+|---|---|
+| `q_pipeline_51.log` (0.3692) | 04:44 |
+| `q_tp4_51_disc_*` sweep | 04:57–05:08 |
+| `q_tp4_51.log` (**0.7607**) | 05:46 |
+| `0f0cbe1` chore | 08:54 |
+| `6bdc4a3` chore | 09:55 |
+| `1fe4829` #60 43-layer rollout | 10:38 |
+| `0cb9cf3` #61 async all-reduce | 11:38 |
+
+The 0.7607 figure — cited in #55's comment, used in #51's reopen rationale, and
+checked off in #60 as "Full 100-case quality fixture re-run and confirmed
+passing" — was produced ~3 hours and 4 commits before HEAD, and predates both
+#60's rollout and #61's all-reduce rewrite. Neither of those issues re-ran the
+fixture afterwards.
+
+Corroborating detail: cases 000–002 (identical prompts, identical
+prompt/target token counts) score 0.444/0.168/0.396 in the 05:06 disc run but
+1.017/0.820/0.466 in the 05:46 full run — a >2× divergence on the *first* cases
+of the run, so not an accumulation effect. Two different builds is the
+straightforward explanation for a same-config, same-prompt discrepancy.
+
+**Consequence: there is currently no quality measurement of HEAD at all.**
+0.7607 does not describe the shipped default configuration. It is not evidence
+that the current build is broken, nor that it works. #58 and #59 are both scoped
+to explain/fix a number that no longer refers to the code in the tree.
+
+**Recommended next action:** re-run the 100-case `score_official` fixture on
+HEAD for both pipeline and TP=4, under a recorded, identical
+`AMD_SERIALIZE_KERNEL` setting for both paths, before any further work on #58 or
+#59. (Open sub-question: the historical passing runs #10/#32/#48 all used
+`AMD_SERIALIZE_KERNEL=3`; `scripts/diagnose-prefill.sh` defaults it to 3 while
+`scripts/tp4-instrument.sh` deliberately leaves it unset. Which setting
+`q_pipeline_51` and `q_tp4_51` each ran under was not established here — if they
+differed, the 0.37-vs-0.76 comparison was never valid in the first place.)

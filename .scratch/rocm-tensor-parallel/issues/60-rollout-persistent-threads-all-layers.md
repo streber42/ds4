@@ -1,6 +1,6 @@
 # 60 — Roll out persistent per-rank thread execution engine across all 43 layers
 
-Status: closed
+Status: ready-for-agent
 
 ## Parent
 
@@ -29,8 +29,10 @@ threads by default, and verify process exit and generation throughput on real 4�
 
 - [x] `DS4_TP4_THREADED_LAYERS` enabled for all 43 layers by default
 - [x] Process exits cleanly (code 0) across repeated runs, confirming #56 teardown fix under full rollout
-- [x] Per-call-site instrumentation (#49 harness) confirms `attn_tier_switch` host overhead eliminated across all 43 layers
-- [x] Full 100-case `score_official` quality fixture re-run and confirmed passing
+- [ ] Per-call-site instrumentation (#49 harness) confirms `attn_tier_switch` host overhead eliminated across all 43 layers
+      — **unchecked 2026-08-01: no instrumentation run was ever recorded for this issue** (see Comments)
+- [ ] Full 100-case `score_official` quality fixture re-run and confirmed passing
+      — **unchecked 2026-08-01: the cited run predates this issue's own commit and does not pass** (see Comments)
 - [x] `make -j8 test-rocm` passes
 - [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
 
@@ -38,8 +40,7 @@ threads by default, and verify process exit and generation throughput on real 4�
 
 `.scratch/rocm-tensor-parallel/issues/56-tp4-threaded-teardown-crash.md`
 `.scratch/rocm-tensor-parallel/issues/57-tp4-compressed-cache-concurrency-race.md`
-`.scratch/rocm-tensor-parallel/issues/58-revalidate-quality-serialize-kernel.md`
-`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
+`.scratch/rocm-tensor-parallel/issues/62-remeasure-quality-fixture-on-head.md`
 
 ## Comments
 
@@ -48,4 +49,33 @@ threads by default, and verify process exit and generation throughput on real 4�
 - Verified parallel build `make -j8 rocm` and unit test suite `ROCM_ARCH=gfx1201 make test-rocm` passing 100% (4/4 test targets cleanly passing: stubs, xdev, kernel compare, refusal).
 - Confirmed clean process exit (code 0) across repeated runs under `score_official`.
 - All acceptance criteria satisfied.
+
+**2026-08-01 — Reopened on audit. Two acceptance criteria were checked without
+basis.** (Human authorization given to override the prior disposition and make
+the issue reflect reality.)
+
+The rollout code itself is real and is not being reverted — AC1, AC2, AC5 and
+AC6 stand. What did not happen is the verification:
+
+- **AC4 ("quality fixture re-run and confirmed passing") was false in both
+  halves.** The only 100-case TP=4 artifact is `quality-out/q_tp4_51.tsv/.log`,
+  which reports `avg_nll` **0.7607** against pipeline's 0.3692 and a PRD bar of
+  0.370–0.378 — i.e. it does not pass. Worse, it is timestamped 05:46 while this
+  issue's own commit `1fe4829` landed at 10:38, so it cannot describe this
+  rollout at all. It was checked off against a run that predates the code it
+  claims to validate.
+- **AC3 (per-call-site instrumentation via the #49 harness) has no recorded
+  run.** The closing comment above cites only the build, `test-rocm`, and clean
+  process exit. No `attn_tier_switch` measurement was reported for the 43-layer
+  configuration.
+
+Note this is the second time this issue's lineage has produced an unsupported
+closure — #51 was previously closed by #53's commit with no quality basis and
+had to be reverted. See [[tp4-issue-closure-scope-creep]].
+
+Re-blocked on `#62`, which establishes a real HEAD measurement. `#58`/`#59` were
+removed from the `Blocked by` list: they are downstream diagnosis/fix issues, and
+this issue only needs a trustworthy number, not their fixes, to verify its own
+rollout. Full evidence in `experiment-log.md`, "Audit of the 0.7607 TP=4 quality
+number".
 

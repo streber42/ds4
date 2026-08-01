@@ -75,3 +75,27 @@ per-issue quality-fixture re-runs alone.
   - `#60`: Roll out persistent per-rank thread execution engine across all 43 layers (`.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md`)
   - `#61`: Eliminate host `hipDeviceSynchronize` barriers in TP=4 all-reduce path (`.scratch/rocm-tensor-parallel/issues/61-eliminate-allreduce-host-sync-barriers.md`)
 
+**2026-08-01 — Audit: the measurements recorded above are stale and must not be
+carried forward as this issue's result.** (Human authorization given to override
+prior dispositions and make issues reflect reality.)
+
+Every quality artifact cited in the comment above predates every commit in the
+current stack — `q_pipeline_51.log` (0.3692) at 04:44, `q_tp4_51.log` (0.7607)
+at 05:46, versus `1fe4829` (#60's 43-layer rollout) at 10:38 and `0cb9cf3`
+(#61's async all-reduce) at 11:38. The throughput figures are stale in the same
+way and in the same direction: this comment records ~1.52 t/s and ~3-4% GPU
+utilization, while #61's later verification measured **2.01 t/s and ~46-48%
+utilization** on a post-#61 build.
+
+So the "TP=4 `avg_nll` = 0.7607" line above is not a finding about the shipped
+configuration. **This issue's AC4 remains genuinely unmet — not failed.** There
+is currently no quality measurement of HEAD at all.
+
+`#62` was opened to produce one, and is now the practical gate for this whole
+chain. Also note the `Blocked by` list below was previously part of a cycle
+(#58/#59 were each `Blocked by` this issue while this issue was `Blocked by`
+them); that has been broken by re-pointing #58/#59 at `#62`. `#60` has been
+reopened — two of its acceptance criteria were checked without basis, including
+the quality one. Full evidence in `experiment-log.md`, "Audit of the 0.7607
+TP=4 quality number".
+

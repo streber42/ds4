@@ -36,4 +36,56 @@ cached VRAM pointers.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/55-tp4-throughput-quality-revalidation.md`
+`.scratch/rocm-tensor-parallel/issues/62-remeasure-quality-fixture-on-head.md`
+
+## Comments
+
+**2026-08-01 — Re-scoped on audit; premise is now in doubt.** (Human
+authorization given to override prior dispositions and make issues reflect
+reality.)
+
+Three corrections, in increasing order of importance.
+
+**1. Dependency cycle broken.** This issue was `Blocked by #55` while #55 was
+`Blocked by #58`/`#59` — a cycle that made all three permanently undispatchable
+under the literal-only `Blocked by` semantics this project uses (see
+[[ralph-issue-blocked-by-must-be-explicit]]). #55 is this issue's **Parent**, not
+its blocker. Replaced with `#62`.
+
+**2. The 0.761 figure in "What to build" does not measure HEAD.** It comes from
+`q_tp4_51.log`, timestamped 05:46, while commits `1fe4829` (#60 rollout, 10:38)
+and `0cb9cf3` (#61 async all-reduce, 11:38) landed hours later. This issue is
+currently scoped to explain a number that does not refer to code in the tree.
+`#62` exists to produce a real one first.
+
+**3. The compressor-race hypothesis is disfavoured by evidence already in
+hand.** Per-case distribution analysis of `q_tp4_51.log` vs `q_pipeline_51.log`
+(experiment-log, "Audit of the 0.7607 TP=4 quality number") shows the TP=4
+degradation is a **uniform** rightward shift of the entire distribution —
+median 0.72 vs 0.35, 21 cases under 0.5 vs 76, and first-half/second-half means
+flat at 0.7895/0.7697. A race is episodic: it would produce bimodality or
+run-to-run variance, not a flat per-token tax. The hardest cases are also hard
+on the pipeline path (case_094: 4.85 pipeline / 4.67 TP=4), i.e. intrinsic
+prompt difficulty.
+
+What the shape *does* fit is a systematic precision fallback:
+`q8 fp16 cache budget exhausted` fires **1×** in the pipeline log and **4300×**
+in TP=4 — 43 per case, once per layer — plus a TP=4-only `arena alloc failed`.
+That is `#59`'s territory, not this issue's.
+
+**Recommendation: run `#59` before the serialization experiment here.**
+`AMD_SERIALIZE_KERNEL=3` makes runs dramatically slower, so this is an expensive
+experiment to spend GPU-hours on against a hypothesis the distribution data
+already argues against, on a config known to be VRAM-starved.
+
+**Still valid and worth keeping regardless:** AC3, aligning `g_use_host_weights`
+across the prefill and decode paths in `ds4.c`. That is a genuine correctness
+discrepancy, independent of the race hypothesis and cheap to do. Consider
+splitting it out rather than letting it sit behind a serialization run that is
+now predicted to come back negative.
+
+There is also an open methodological hole `#62` must close: the historical
+passing runs (#10/#32/#48) all used `AMD_SERIALIZE_KERNEL=3`, and it was never
+recorded which setting `q_pipeline_51` and `q_tp4_51` each used. If they
+differed, the 0.37-vs-0.76 comparison was never valid to begin with — which
+would dissolve this issue's premise entirely.

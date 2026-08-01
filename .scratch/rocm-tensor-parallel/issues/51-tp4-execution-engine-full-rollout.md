@@ -42,10 +42,39 @@ collective is #52's job, deliberately kept separate and HITL-gated.
 `.scratch/rocm-tensor-parallel/issues/50-tp4-execution-engine-spike.md`
 `.scratch/rocm-tensor-parallel/issues/56-tp4-threaded-teardown-crash.md`
 `.scratch/rocm-tensor-parallel/issues/57-tp4-compressed-cache-concurrency-race.md`
-`.scratch/rocm-tensor-parallel/issues/58-revalidate-quality-serialize-kernel.md`
-`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
+`.scratch/rocm-tensor-parallel/issues/62-remeasure-quality-fixture-on-head.md`
 
 ## Comments
+
+**2026-08-01 — Audit: the reopen rationale below rests on a stale measurement.**
+(Human authorization given to override prior dispositions and make issues
+reflect reality.)
+
+The most recent entry below reopened this issue on the grounds that "a real full
+100-case run now exists (`q_tp4_51.tsv`/`.log`) and shows `avg_nll` 0.7607
+against pipeline's 0.3692, so the rollout is real but not yet passing quality."
+
+**The reopen was the right call; that specific justification was not.** That run
+is timestamped 05:46, while `1fe4829` (the 43-layer rollout) landed at 10:38 and
+`0cb9cf3` (#61's async all-reduce) at 11:38. It cannot describe the rollout it
+was cited to evaluate. The honest state is that the rollout's quality is
+**unmeasured**, not measured-and-failing.
+
+`Blocked by` has been simplified: `#58` and `#59` are replaced by `#62`, which
+establishes a trustworthy HEAD number. That is what this issue actually needs to
+re-attempt verification — #58 and #59 are diagnosis/fix issues for a gap that may
+not survive re-measurement, and gating on them was over-constraining. (Under
+this project's literal-only `Blocked by` semantics, they also formed part of a
+dependency cycle with `#55`; see [[ralph-issue-blocked-by-must-be-explicit]].)
+
+One correction to the entry below that matters for future work: it points at the
+`q_tp4_51_disc_*` sweep as investigation carried forward. That sweep is **not a
+layer-count discriminator** — all eight runs share byte-identical warning counts
+(129) and near-identical `avg_nll` (0.329–0.347), the signature of eight runs of
+a single code path, consistent with `ds4.c:27652`'s whole-token gate collapsing
+partial `DS4_TP4_THREADED_LAYERS` values onto the legacy path. Don't build on it.
+
+Evidence: `experiment-log.md`, "Audit of the 0.7607 TP=4 quality number".
 
 **2026-08-01 — Human disposition (Sean):** left open rather than closed.
 Status reset to `ready-for-agent`, but `Blocked by` now literally lists
