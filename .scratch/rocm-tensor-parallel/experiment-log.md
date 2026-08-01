@@ -1589,3 +1589,166 @@ orthogonal to this fix.
 **Disposition:** #57 stays `ready-for-human`, not `closed`. AC1's sign-off
 and AC3's TP=4 half are both genuinely blocked — one on a human, one on
 `#59` — everything else achievable without them is done.
+
+## 2026-08-01 — #59 audit: sharding logic is correct; the 25.94 GiB is (mostly) mandatory replication, and its causal link to the arena OOM is false
+
+**Method.** Rather than instrument a live 80 GiB TP=4 load, parsed the
+production GGUF's tensor table directly (name/dims/byte-size via offset
+deltas between consecutive tensors — exact, no dependency on quant
+block-size tables) and re-derived `engine_tp4_shard_divisor`'s (ds4.c:56571)
+category rules in Python. File:
+`/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf`
+(86,720,111,488 B = 80.7594 GiB, 1328 nonzero tensors).
+
+**AC1 — audit result: no bug. Sharded weights are not replicated.**
+
+| bucket | GiB | tensors |
+|---|---:|---:|
+| sharded: routed experts (`*_exps.weight`) | 72.5625 | 129 |
+| sharded: output head (`output.weight`) | 0.5240 | 1 |
+| **sharded total** | **73.0865** | **130** |
+| replicated: `attn_q_b` (div=1, issue #32) | 1.7559 | 64 |
+| replicated: `attn_output_a` (div=1, issue #32) | 1.4277 | 43 |
+| replicated: `attn_output_b` (never head-shardable — `out_low_dim × N_EMBD`, dim independent of head count) | 1.4277 | 43 |
+| replicated: shared expert `ffn_*_shexp` (div=1, issue #30) | 1.0708 | 129 |
+| replicated: `token_embd` | 0.9863 | 1 |
+| replicated: `attn_compressor_*` | 0.4871 | 164 |
+| replicated: `attn_kv`/`attn_q_a`/`attn_sinks` | 0.2677 | 129 |
+| replicated: `ffn_gate_inp`/`ffn_gate_tid2eid` (router) | 0.0927 | 46 |
+| replicated: `indexer_*` | 0.0923 | 105 |
+| replicated: `hc_*` | 0.0630 | 258 |
+| replicated: norms + `output_hc_*` + `exp_probs_b` | ~0.0017 | 216 |
+| **replicated total** | **7.6729** | **1198** |
+
+`73.0865 GiB` sharded + `130` sharded tensors + `7.6729 GiB` replicated +
+`1198` replicated tensors = `1328` tensors total, matching the model's
+nonzero-tensor count exactly (rules out double-counting from the
+`entry = 0` clamp at ds4.c:57106 or any other install-loop bug). Predicted
+per-tier footprint: `73.0865/4 + 7.6729 = 25.9446 GiB` — matches the
+observed `25.94 GiB` (ds4.c:57278 log line) to two decimal places. **AC1 is
+satisfied as written: the audit found the sharding logic correct, not
+broken.**
+
+Also verified the two correctness cross-checks a mis-sharding bug would
+show up in: the MoE kernel's expert→rank ownership
+(`tp4_owned_base = rank * (DS4_N_EXPERT/4)`, ds4.c:24501-24502) uses the
+same contiguous block partition as the cache-install byte slice
+(`abs_offset + tier * shard_bytes`, ds4.c:57122-57124) — block-for-block
+consistent, not round-robin. And `tensor_to_entry` (ds4.c:56332) never
+clamps a real `blk.N.*` tensor name to entry 0 for any layer index below
+`DS4_N_LAYER`, so the `entry = 0` fallback at ds4.c:57106 cannot silently
+misclassify an expert tensor.
+
+**AC2 — unreachable without regressing #30/#32.** The PRD's ~20.2 GiB
+target (`80.76/4`) assumes zero replication. The 5.75 GiB gap
+(`25.9446 - 20.19`) is exactly `0.75 × 7.6729` — three-quarters of the
+replicated tail, matching because 3 of 4 ranks pay the full replicated cost
+on top of their sharded 1/4. Of the 7.67 GiB replicated tail, 4.26 GiB
+(`attn_q_b` + `attn_output_a` + shared expert) is div=1 by **documented,
+deliberate** decision: `engine_tp4_shard_divisor`'s comment at ds4.c:56592-
+56613 explains sharding `attn_q_b`/`attn_output_a` would starve tier 0's
+batch-prefill attention (issue #32, produced garbled output); the shared-
+expert comment explains only rank 0 may compute it (issue #30, live-pair
+fix). Flipping either divisor to close AC2's gap re-breaks a closed
+correctness issue. The remaining ~3.4 GiB (`attn_output_b`, embedding,
+compressor, router, indexer, `hc_*`) is architecturally non-shardable at
+the current kernel granularity (not per-head, or needed identically by
+every rank for local computation). **Do not chase AC2 by loosening the
+divisor table.**
+
+**AC3 — the issue's causal chain ("reclaim 5.7 GiB → arena OOM goes away")
+is arithmetically false, and the actual mechanism is a different, larger
+bug than static per-tier weight footprint.** Live run on HEAD (`185a2ae`,
+unmodified — this session made no code changes), `ds4 --rocm --gpu-devices
+0,1,2,3 --cuda-tensor-parallel -m <prod model> -p "The capital of France
+is" -n 20`, GPU-locked, `dev-vllm` stopped, VRAM otherwise idle (`rocm-smi`:
+~58 MiB/GPU baseline). Budget chain from the log:
+
+```
+GPU0 original vram_bytes = 29.79 GiB   (31.86 GiB HW total − fixed driver/config reserve)
+per_tier_overhead        =  2.11 GiB   (engine_per_tier_graph_overhead_bytes, ds4.c:49364)
+GPU0 post-overhead       = 27.68 GiB   (the packer's budget)
+selective weights         = 25.94 GiB   (the static per-tier cache, matches AC1 arithmetic)
+budget headroom (planned) =  1.74 GiB
+q8 fp16 cache warnings observed free =  0.47–0.65 GiB   (actual live free, not the planning budget)
+```
+
+The `ds4: ROCm model arena alloc failed for moe_down (1024.00 MiB chunk):
+out of memory` (ds4_rocm_runtime.cuh:5780) fires once, immediately after
+weight caching, not from the static 25.94 GiB slab (a single exact-sized
+`hipMalloc`, ds4_rocm.cu:208) but from a **separate, unbounded, session-
+lifetime VRAM cache** used by ROCm TP=4's batch-prefill MoE fallback:
+
+- The `rocm_tp4` prefill branch (ds4.c:30845-30936) documents "run the full
+  256-expert MoE on all n_tokens rows on the home tier... weight resolution
+  falls back to host-mapped memory for non-cached experts" — i.e. prefill
+  is *not* tensor-parallel at all; it runs the whole unsharded expert table
+  on tier 0 only, by design, to match the pipeline reference bit-for-bit.
+- "Falls back to host-mapped memory" is aspirational in the comment but not
+  what happens first: `cuda_resolve_weight_ptr` → `cuda_model_range_ptr` →
+  `cuda_model_range_ptr_from_fd` (ds4_rocm_runtime.cuh:5826) tries to
+  **promote the missing range into VRAM via `cuda_model_arena_alloc` first**
+  (line 5852), sized `max(1024 MiB, aligned need)`
+  (`cuda_model_arena_chunk_bytes`, line 5738-5745). Only on discrete-GPU
+  arena failure does it fall through to the true zero-copy
+  `cudaHostRegister`/`cudaHostGetDevicePointer` path in
+  `cuda_model_range_ptr_impl` (lines 4837-4874).
+- Confirmed via `DS4_ROCM_WEIGHT_PATH_STATS=1` on the same command
+  (`/tmp/tp4_diag_stats.log`, not committed — reproducible via the command
+  above): 1212 `arena-full skip` lines, 1213 `host-register PCIe-map`
+  lines, counts matching 1:1 (tags: `moe_gate`/`moe_up`/`moe_down` ×42
+  each — one per layer per tensor for the 43-layer model minus the one that
+  hit the real `cudaMalloc` failure directly — plus `attn_out_a`, `q8_0`,
+  `f16`, `compressor_ape`, `rms_weight`, etc. from other callers sharing
+  the same cache). **The zero-copy host-register fallback does fire and
+  does succeed for every subsequent request** — so weights are not being
+  silently zeroed; they're being read correctly but slowly, over PCIe, for
+  the rest of the session once the arena latches full
+  (`g_model_cache_full`, ds4_rocm_runtime.cuh:5749, set permanently on the
+  first `cudaMalloc` failure and never cleared).
+- The size math explains why AC2's target doesn't fix AC3: each layer's
+  full (unsharded) `ffn_gate_exps`/`ffn_up_exps`/`ffn_down_exps` is
+  ~`72.5625/129 ≈ 0.5625 GiB` (528–672 MiB per the stats log), so one
+  layer's fallback needs ~1.6–1.7 GiB, and — critically — **these
+  allocations are never freed** (`g_model_arenas` accumulates for the
+  process lifetime; each layer's tensors live at distinct byte offsets, so
+  nothing is reused across layers within a single prefill pass). Even a
+  perfect zero-replication 20.19 GiB/tier would add only ~5.75 GiB of
+  headroom — worth roughly 3 more layers before the same OOM recurs on a
+  43-layer model. **AC2, even fully achieved, would not satisfy AC3.**
+
+**What would actually fix AC3** (recorded for a human decision, not
+attempted here — both are new-issue-sized and both are exactly the
+correctness/VRAM tradeoffs the PRD reserves for human judgment):
+1. Free each layer's fallback-loaded expert-table chunk after that layer's
+   prefill MoE call completes, since prefill never revisits a layer's
+   experts and decode never uses this cache (`ds4_gpu_routed_moe_one_owned_
+   tensor` reads straight from the static per-tier slab, ds4.c:2449-2451,
+   never touching `cuda_resolve_weight_ptr`/the arena at all). Blocked on
+   auditing every other caller of `cuda_model_range_ptr_impl`
+   (`compressor_ape`, `rms_weight`, `q8_0`, `f16`, `f16_pair0/1` — all seen
+   sharing the same cache in the stats log) to confirm none of them expects
+   these ranges to stay resident across a later reuse.
+2. Implement a genuine 4-way TP-aware batched owned-expert prefill kernel
+   (`ds4_gpu_routed_moe_batch_owned_tensor` already exists for the CUDA-
+   style TP=2 two-rank path, ds4.c:65102/65130, `DS4_N_EXPERT/2u` split) so
+   prefill never touches unowned experts at all. ds4.c:30855-30860
+   documents that a *four*-tier owned-expert prefill approach was already
+   tried and abandoned for FP-accumulation noise in the all-reduce — this
+   option means re-solving that, not avoiding it.
+
+**Garbled output caveat.** This run's output (repeated `<|begin_of_sentence
+|>` tokens) is consistent with the known TP=4 correctness issues already
+tracked elsewhere (#29/#30 decode-loop sync, #57's counter-hoist hazard) —
+since the host-register fallback resolves to numerically correct bytes,
+this session found no evidence that AC3's OOM is itself corrupting weight
+values, only that it forces the rest of the session onto a much slower
+read path. Did not chase root-causing the garbled text; out of scope for a
+VRAM-sharding audit.
+
+**Disposition:** AC1 and AC5 satisfied and checked off. AC2 and AC3 left
+unchecked — AC2 is unreachable without regressing #30/#32, and AC3's fix
+requires one of the two new-issue-sized changes above, neither safe to
+attempt inside this audit issue. AC4 (`make -j8 test-rocm`) passes but
+against an unmodified tree — reported as the clean-tree baseline, not as
+evidence of a fix. Issue set to `ready-for-human`.

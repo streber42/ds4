@@ -1,6 +1,6 @@
 # 59 — Audit and fix per-tier VRAM weight sharding to eliminate 25.94 GiB load
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -28,12 +28,18 @@ fast VRAM.
 
 ## Acceptance criteria
 
-- [ ] Audit tensor sharding logic in `ds4.c` (`engine_append_device_cache_span` /
+- [x] Audit tensor sharding logic in `ds4.c` (`engine_append_device_cache_span` /
       `cuda_tp4` placement paths) to ensure sharded weights are not replicated across tiers
+      — audited; **no bug found**, see Comments/experiment-log 2026-08-01 entry
 - [ ] Measured per-tier selective weight load in TP=4 mode reduced from 25.94 GiB to ~20.2 GiB
+      — **unreachable without regressing #30/#32**; 4.26 of the 5.75 GiB gap is
+      deliberately-replicated correctness-fixed tensors
 - [ ] Verification run confirms `ds4: ROCm model arena alloc failed` warnings are gone
-- [ ] `make -j8 test-rocm` passes
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+      — **not achievable via weight-footprint reduction alone**; root cause is a
+      separate, unbounded session-lifetime VRAM cache in the batch-prefill MoE
+      fallback path, not the static per-tier weight slab (see below)
+- [x] `make -j8 test-rocm` passes — clean-tree baseline (no code changed this session)
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
 
 ## Blocked by
 
@@ -110,3 +116,60 @@ model that cannot reliably allocate `moe_down` is not a smaller quality gap,
 it's an unusable TP=4 path. `#58` stays blocked on this issue per the human's
 call: its race hypothesis can't be evaluated against a config that can't
 reliably initialize in the first place.
+
+**2026-08-01 — Audit complete on HEAD (`185a2ae`, unmodified). AC1 satisfied
+(no bug); AC2 unreachable without regressing #30/#32; AC3's premise is
+arithmetically false. `ready-for-human`.** Full numbers, per-category tensor
+breakdown, live VRAM budget chain, and `DS4_ROCM_WEIGHT_PATH_STATS=1` trace
+are in `.scratch/rocm-tensor-parallel/experiment-log.md`'s "#59 audit"
+entry (2026-08-01). Summary:
+
+- Parsed the production GGUF's tensor table directly (offset-delta byte
+  sizes, no live GPU load needed) and re-derived `engine_tp4_shard_divisor`'s
+  (ds4.c:56571) category rules: `sharded/4 + replicated = 73.0865/4 +
+  7.6729 = 25.9446 GiB`, matching the observed `25.94 GiB` log line to two
+  decimals, over exactly 1328 tensors (matches "1328 ranges"). **The
+  sharding logic is correct** — nothing sharded is being replicated.
+- The ~20.2 GiB AC2 target requires zero replication. 4.26 of the 7.67 GiB
+  replicated tail is `attn_q_b`/`attn_output_a`/shared-expert, all `div=1`
+  by **documented, deliberate** decision (issues #32 and #30 respectively,
+  see ds4.c:56592-56613) — flipping those divisors to hit AC2 re-breaks
+  closed correctness fixes and is out of bounds for this issue.
+- Live run (`ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel` on the
+  production model) reproduces the `arena alloc failed for moe_down (1024
+  MiB chunk)` failure, but it does **not** come from the static 25.94 GiB
+  per-tier slab (one exact-sized `hipMalloc`). It comes from a separate,
+  unbounded, session-lifetime VRAM cache (`cuda_model_arena_alloc`,
+  ds4_rocm_runtime.cuh:5747) that ROCm TP=4's batch-prefill MoE fallback
+  uses to promote each layer's *full, unsharded* 256-expert table into VRAM
+  one layer at a time (documented at ds4.c:30845-30860: prefill runs the
+  whole expert table on tier 0 only, by design, to match the pipeline
+  reference bit-for-bit — it is not tensor-parallel during prefill at all).
+  Each layer needs ~1.6–1.7 GiB for this and it is **never freed**
+  (`g_model_arenas` accumulates for the process lifetime). Even a perfect
+  zero-replication 20.19 GiB/tier buys only ~3 more layers on a 43-layer
+  model before the same OOM recurs. **AC2, even fully achieved, would not
+  satisfy AC3** — the issue's own causal claim ("reclaiming ~5.7 GiB...
+  eliminate model arena host fallbacks") does not hold arithmetically.
+  `DS4_ROCM_WEIGHT_PATH_STATS=1` confirms the zero-copy `cudaHostRegister`
+  fallback (ds4_rocm_runtime.cuh:4837-4874) does successfully catch every
+  subsequent request after the one hard arena failure (1212 skips, 1213
+  successful host-register maps) — weights are read correctly but slowly
+  over PCIe for the rest of the session, not silently dropped.
+- Two real fix candidates for AC3, both new-issue-sized and both outside
+  this audit's safe scope (see experiment-log for detail): (1) free each
+  layer's fallback-loaded expert chunk right after that layer's prefill MoE
+  call, since it's never reused; needs an audit of every other caller
+  sharing the same cache (`compressor_ape`, `rms_weight`, `q8_0`, `f16`,
+  `f16_pair0/1`) to confirm none expects persistence. (2) Build a true
+  4-way TP-aware batched owned-expert prefill kernel (the TP=2 CUDA-style
+  path already has one, `ds4_gpu_routed_moe_batch_owned_tensor`,
+  ds4.c:65102/65130) — ds4.c:30855-30860 documents a four-tier version of
+  this was already tried and abandoned for FP-accumulation noise, so this
+  means re-solving that, not avoiding it.
+- `make -j8 test-rocm` passes, but against an unmodified tree — reported as
+  the clean-tree baseline, not as evidence of a fix.
+
+No code was changed this session. Leaving `Status: ready-for-human` for a
+call on which AC3 fix path to take (or whether to retarget AC2's number
+given it's unreachable as written).
