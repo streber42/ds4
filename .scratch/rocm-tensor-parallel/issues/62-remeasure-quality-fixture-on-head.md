@@ -77,6 +77,40 @@ paths.
   `1fe4829`) collapsing every partial `DS4_TP4_THREADED_LAYERS` value onto the
   legacy path. Don't cite that sweep as evidence for anything.
 
+## Interpreting the result — decide this before running, not after
+
+This issue's output is a decision, not just a number. Two outcomes, two
+different next moves. Write the resulting disposition into `#58` and `#59`
+rather than leaving it implicit.
+
+**If TP=4 comes back at or near the PRD bar (avg_nll ~0.370–0.378):** the
+0.7607 gap was an artifact of the pre-`1fe4829` build, a mismatched
+`AMD_SERIALIZE_KERNEL` between the two runs, or both. In that case `#58` and
+`#59` are explaining a ghost and should **close cheaply** — neither is chartered
+to fix a gap that no longer exists. Two things still survive that outcome and
+should be re-homed rather than dropped:
+- `#58`'s `g_use_host_weights` prefill/decode alignment — a real correctness
+  discrepancy independent of the race hypothesis.
+- `#59`'s per-tier VRAM work — still worth doing on throughput/headroom grounds
+  even if quality is fine, since 25.94 GiB/tier against 27.79 GiB available is
+  what forces the q8 fallback and the host-mapped MoE path.
+
+**If TP=4 comes back near 0.76 again:** the gap is real and current. Run `#59`
+**before** `#58`. The per-case distribution from the stale run was a *uniform*
+rightward shift (median 0.72 vs 0.35, flat first-half/second-half at
+0.7895/0.7697), which fits a systematic per-token precision tax and does not fit
+an episodic race — so `#58`'s compressor-race premise is the weaker hypothesis,
+and `AMD_SERIALIZE_KERNEL=3` runs are slow enough that testing it first is
+expensive. Confirm the new run reproduces that same uniform shape before
+committing to this branch; if the new distribution is instead **bimodal or
+shows high run-to-run variance**, that inverts the recommendation and `#58`'s
+race hypothesis becomes the stronger one.
+
+**Either way:** record which `AMD_SERIALIZE_KERNEL` value was used and whether
+the pipeline and TP=4 runs agreed on it. If they did not agree in the historical
+runs, say so explicitly — that alone would invalidate the 0.37-vs-0.76
+comparison retroactively and is worth its own note in `#55`.
+
 ## Blocked by
 
 *(nothing — this is the gate the others wait on)*
