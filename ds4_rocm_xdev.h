@@ -143,6 +143,41 @@ int ds4_rocm_xdev_spike_record_event(int device_id);
 int ds4_rocm_xdev_spike_sync_event(int device_id);
 
 /*
+ * Issue #61: same-device stream fencing so a worker thread's all-reduce can
+ * run on its own secondary stream (see ds4_rocm_xdev_stream_create) without
+ * a host-blocking hipDeviceSynchronize, while staying correctly ordered
+ * against the default-stream compute kernels that produce its input and
+ * consume its output. Both reuse the same per-device barrier event as
+ * ds4_rocm_xdev_spike_record_event/spike_sync_event above -- only the
+ * stream each call targets differs. Both assume the calling thread's
+ * current device is already device_id (same invariant as the two calls
+ * above).
+ *
+ * ds4_rocm_xdev_spike_record_event_on(device_id, stream): record
+ *   device_id's barrier event on `stream` instead of the default stream.
+ * ds4_rocm_xdev_spike_stream_wait(device_id, stream): make `stream` (NULL
+ *   selects the default stream) wait on device_id's most recently recorded
+ *   barrier event.
+ */
+int ds4_rocm_xdev_spike_record_event_on(int device_id, void *stream);
+int ds4_rocm_xdev_spike_stream_wait(int device_id, void *stream);
+
+/*
+ * Issue #61: create/destroy a per-rank persistent stream for the all-reduce
+ * path, used together with the two fences above. Created with
+ * hipStreamNonBlocking so it has no implicit ordering against the default
+ * stream -- every ordering edge is the explicit fence pair instead, since
+ * that is the only cross-stream ordering primitive this codebase has
+ * actually verified on gfx1201 (see ds4_rocm_xdev_copy's peer-copy path);
+ * implicit legacy-stream ordering has not been exercised here. Must be
+ * created by the thread that will use it, while that thread is current on
+ * the target device (same invariant as the persistent worker threads use
+ * for ds4_gpu_set_current_device).
+ */
+void *ds4_rocm_xdev_stream_create(void);
+void ds4_rocm_xdev_stream_destroy(void *stream);
+
+/*
  * Fence a producer device against a consumer that will read its memory
  * directly via a peer-mapped pointer (no explicit xdev copy). Records an
  * event on src_dev's producer (default) stream and makes dst_dev's default

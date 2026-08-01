@@ -408,6 +408,14 @@ extern int ds4_rocm_xdev_copy(ds4_rocm_xdev_mesh *mesh,
 extern int ds4_rocm_xdev_spike_record_event(int device_id);
 extern int ds4_rocm_xdev_spike_sync_event(int device_id);
 
+/* Issue #61: same-device stream fencing (see ds4_rocm_xdev.h) plus the
+ * per-rank secondary stream it fences against, so a worker thread's
+ * all-reduce calls can run without a host-blocking hipDeviceSynchronize. */
+extern int ds4_rocm_xdev_spike_record_event_on(int device_id, void *stream);
+extern int ds4_rocm_xdev_spike_stream_wait(int device_id, void *stream);
+extern void *ds4_rocm_xdev_stream_create(void);
+extern void ds4_rocm_xdev_stream_destroy(void *stream);
+
 static double now_sec(void);
 
 /* ---------------------------------------------------------------------
@@ -27328,6 +27336,10 @@ typedef struct {
     bool               shutdown;
     ds4_tp4_spike_job  job;
     bool               result_ok;
+    /* Issue #61: per-rank secondary stream the all-reduce path runs on,
+     * created once at thread start (this thread is already current on its
+     * bound device at that point) and destroyed at pool shutdown. */
+    void              *stream;
 } ds4_tp4_spike_worker;
 
 #define DS4_TP4_SPIKE_N_TIERS 4
@@ -27359,6 +27371,14 @@ static void *ds4_tp4_spike_worker_main(void *arg) {
      * that is the entire point of issue #50. */
     if (ds4_gpu_set_current_device(w->tier) != 0) {
         fprintf(stderr, "ds4: TP=4 spike worker for tier %d failed to bind its device\n", w->tier);
+        return NULL;
+    }
+    /* Issue #61: create this rank's all-reduce stream now, while this
+     * thread is current on its bound device -- the same one-time-at-thread-
+     * start pattern the device binding above already uses. */
+    w->stream = ds4_rocm_xdev_stream_create();
+    if (!w->stream) {
+        fprintf(stderr, "ds4: TP=4 spike worker for tier %d failed to create its all-reduce stream\n", w->tier);
         return NULL;
     }
     uint32_t seen_generation = 0;
@@ -27401,19 +27421,38 @@ static void *ds4_tp4_spike_worker_main(void *arg) {
                         job.token, METAL_DECODE_LAYER_TO_FFN);
                 if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
 
-                /* ---- Attention All-Reduce & HC Expand ---- */
+                /* ---- Attention All-Reduce & HC Expand ----
+                 * Issue #61: the all-reduce runs on w->stream instead of the
+                 * default stream, so it does not host-block (previously
+                 * NULL here forced ds4_rocm_xdev_allreduce_f32 to
+                 * hipDeviceSynchronize before returning). Two explicit
+                 * fences (see ds4_rocm_xdev.h) bracket it: w->stream first
+                 * waits on the barrier event just recorded above (so the
+                 * local-partial accumulate inside the all-reduce cannot run
+                 * ahead of the Phase 1 compute that wrote attn_out on the
+                 * default stream), and after the all-reduce the barrier
+                 * event is re-recorded on w->stream and the default stream
+                 * is made to wait on it (so the tensor copy and HC expand
+                 * below, both queued on the default stream, cannot read
+                 * shared_out/attn_out before w->stream's accumulate has
+                 * written them). Peer partials need no extra fence here --
+                 * ds4_rocm_xdev_copy already orders each peer copy against
+                 * that peer's own producer event. */
                 if (ok) {
                     const float *peer_partials[3];
                     for (int p = 0; p < 3; p++) {
                         peer_partials[p] = (const float *)job.g->attn_out_by_tier[peer_devs[p]]->ptr;
                     }
+                    ok = ds4_rocm_xdev_spike_stream_wait(w->tier, w->stream) != 0;
                     /* Stage into shared_out_by_tier[w->tier] (no alias with attn_out) */
-                    ok = ds4_rocm_xdev_allreduce_f32(
+                    if (ok) ok = ds4_rocm_xdev_allreduce_f32(
                             mesh, w->tier,
                             (float *)job.g->shared_out_by_tier[w->tier]->ptr,
                             (const float *)job.g->attn_out_by_tier[w->tier]->ptr,
                             peer_devs, peer_partials, 3,
-                            (size_t)DS4_N_EMBD, NULL);
+                            (size_t)DS4_N_EMBD, w->stream) != 0;
+                    if (ok) ok = ds4_rocm_xdev_spike_record_event_on(w->tier, w->stream) != 0;
+                    if (ok) ok = ds4_rocm_xdev_spike_stream_wait(w->tier, NULL) != 0;
                     if (ok) {
                         ok = ds4_gpu_tensor_copy(
                                 job.g->attn_out_by_tier[w->tier], 0,
@@ -27434,18 +27473,22 @@ static void *ds4_tp4_spike_worker_main(void *arg) {
                     if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
                 }
 
-                /* ---- MoE All-Reduce & Post-FFN HC Expand ---- */
+                /* ---- MoE All-Reduce & Post-FFN HC Expand ----
+                 * Same fence pattern as the attention all-reduce above. */
                 if (ok) {
                     const float *peer_partials[3];
                     for (int p = 0; p < 3; p++) {
                         peer_partials[p] = (const float *)job.g->shared_out_by_tier[peer_devs[p]]->ptr;
                     }
-                    ok = ds4_rocm_xdev_allreduce_f32(
+                    ok = ds4_rocm_xdev_spike_stream_wait(w->tier, w->stream) != 0;
+                    if (ok) ok = ds4_rocm_xdev_allreduce_f32(
                             mesh, w->tier,
                             (float *)job.g->routed_out_by_tier[w->tier]->ptr,
                             (const float *)job.g->shared_out_by_tier[w->tier]->ptr,
                             peer_devs, peer_partials, 3,
-                            (size_t)DS4_N_EMBD, NULL);
+                            (size_t)DS4_N_EMBD, w->stream) != 0;
+                    if (ok) ok = ds4_rocm_xdev_spike_record_event_on(w->tier, w->stream) != 0;
+                    if (ok) ok = ds4_rocm_xdev_spike_stream_wait(w->tier, NULL) != 0;
                 }
                 if (ok) {
                     ok = ds4_gpu_hc_expand_split_tensor(
@@ -27460,6 +27503,17 @@ static void *ds4_tp4_spike_worker_main(void *arg) {
                     job.g->cur_hc_by_tier[w->tier] = job.g->after_ffn_hc_by_tier[w->tier];
                     job.g->after_ffn_hc_by_tier[w->tier] = tmp_hc;
                 }
+                /* Issue #61: re-record the barrier event on the default
+                 * stream after hc_expand_split, the true tail of this
+                 * layer's default-stream work. Without this, the event's
+                 * last recording would still be the one from right after
+                 * Phase 2 compute (above) -- taken before hc_expand_split
+                 * was even queued -- and the final
+                 * metal_graph_tp4_spike_barrier() call the orchestrator
+                 * makes after the whole token would return without having
+                 * actually waited for the last layer's hc_expand_split (or,
+                 * transitively, its MoE all-reduce) to finish on the GPU. */
+                if (ok) ok = ds4_rocm_xdev_spike_record_event(w->tier) != 0;
             }
         } else {
             ds4_gpu_tensor *raw_cache = metal_graph_tp4_raw_cache(job.g, job.il, w->tier);
@@ -27574,6 +27628,17 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
     for (int t = 0; t < DS4_TP4_SPIKE_N_TIERS; t++) {
         pthread_join(g_tp4_spike_workers[t].thread, NULL);
     }
+    /* Issue #61: destroy each rank's all-reduce stream after its worker
+     * thread has joined -- the thread is done issuing work on it, and
+     * hipStreamDestroy does not require the calling thread to be current on
+     * the stream's device (same invariant ds4_rocm_xdev_spike_sync_event
+     * already relies on). */
+    for (int t = 0; t < DS4_TP4_SPIKE_N_TIERS; t++) {
+        if (g_tp4_spike_workers[t].stream) {
+            ds4_rocm_xdev_stream_destroy(g_tp4_spike_workers[t].stream);
+            g_tp4_spike_workers[t].stream = NULL;
+        }
+    }
     g_tp4_spike_pool_initialized = false;
 }
 
@@ -27680,8 +27745,8 @@ static bool metal_graph_encode_token_raw_swa(
         ds4_gpu_set_use_host_weights(1);
     }
 
-    if (ok && g->rocm_tp4 && metal_graph_tp4_spike_layer_enabled(0)) {
-        /* Issue #53: Overlap layer N+1 compute with layer N's all-reduce across all 43 layers.
+    if (ok && g->rocm_tp4 && metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)) {
+        /* Issue #53/#60: Overlap layer N+1 compute with layer N's all-reduce across all 43 layers.
          * Pre-calculate compressed KV cache counters for all layers, then
          * dispatch the entire 43-layer token execution to persistent per-rank
          * worker threads. Each rank runs compute, all-reduce, and HC expand

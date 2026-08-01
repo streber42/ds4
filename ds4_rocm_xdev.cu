@@ -497,8 +497,8 @@ static pthread_mutex_t g_tp4_spike_event_mutex = PTHREAD_MUTEX_INITIALIZER;
 static hipEvent_t g_tp4_spike_barrier_event[DS4_TP4_SPIKE_MAX_DEVICES];
 static bool g_tp4_spike_barrier_event_ready[DS4_TP4_SPIKE_MAX_DEVICES];
 
-extern "C" int ds4_rocm_xdev_spike_record_event(int device_id) {
-    if (device_id < 0 || device_id >= DS4_TP4_SPIKE_MAX_DEVICES) return 0;
+static bool rocm_xdev_spike_ensure_event(int device_id) {
+    if (device_id < 0 || device_id >= DS4_TP4_SPIKE_MAX_DEVICES) return false;
     if (!g_tp4_spike_barrier_event_ready[device_id]) {
         pthread_mutex_lock(&g_tp4_spike_event_mutex);
         if (!g_tp4_spike_barrier_event_ready[device_id]) {
@@ -511,7 +511,11 @@ extern "C" int ds4_rocm_xdev_spike_record_event(int device_id) {
         }
         pthread_mutex_unlock(&g_tp4_spike_event_mutex);
     }
-    if (!g_tp4_spike_barrier_event_ready[device_id]) return 0;
+    return g_tp4_spike_barrier_event_ready[device_id];
+}
+
+extern "C" int ds4_rocm_xdev_spike_record_event(int device_id) {
+    if (!rocm_xdev_spike_ensure_event(device_id)) return 0;
     return hipEventRecord(g_tp4_spike_barrier_event[device_id], 0) == hipSuccess;
 }
 
@@ -519,6 +523,61 @@ extern "C" int ds4_rocm_xdev_spike_sync_event(int device_id) {
     if (device_id < 0 || device_id >= DS4_TP4_SPIKE_MAX_DEVICES) return 0;
     if (!g_tp4_spike_barrier_event_ready[device_id]) return 0;
     return hipEventSynchronize(g_tp4_spike_barrier_event[device_id]) == hipSuccess;
+}
+
+/* Issue #61: same-device stream fencing, built on the barrier event above,
+ * so a worker thread's all-reduce can run on its own secondary stream
+ * without a host-blocking hipDeviceSynchronize, while staying correctly
+ * ordered against the compute kernels that produced its input (which always
+ * launch on the device's default stream) and the compute kernels that
+ * consume its output (which also launch on the default stream).
+ *
+ * This deliberately does NOT rely on the legacy default-stream's implicit
+ * cross-stream synchronization (the automatic ordering a stream created
+ * without hipStreamNonBlocking gets against stream 0). That mechanism has
+ * not been exercised or verified anywhere in this codebase; the explicit
+ * hipEventRecord + hipStreamWaitEvent edge ds4_rocm_xdev_copy's peer-copy
+ * path already relies on (see the comment above it, and the real-hardware
+ * finding that motivated it) is the one cross-stream ordering primitive
+ * that HAS been verified on gfx1201, so it is reused here rather than
+ * introducing a second, unverified mechanism. The worker's secondary
+ * stream is therefore created with hipStreamNonBlocking (see
+ * ds4_rocm_xdev_stream_create) specifically to opt OUT of implicit
+ * legacy-stream ordering -- every edge that matters is explicit.
+ *
+ * ds4_rocm_xdev_spike_record_event_on(device_id, stream): record
+ *   device_id's barrier event on `stream` instead of the default stream.
+ * ds4_rocm_xdev_spike_stream_wait(device_id, stream): make `stream` (NULL
+ *   for the default stream) wait on device_id's most recently recorded
+ *   barrier event.
+ *
+ * Both assume the calling thread's current device is already device_id,
+ * matching every other spike_* helper's invariant. */
+extern "C" int ds4_rocm_xdev_spike_record_event_on(int device_id, void *stream) {
+    if (!rocm_xdev_spike_ensure_event(device_id)) return 0;
+    return hipEventRecord(g_tp4_spike_barrier_event[device_id], (hipStream_t)stream) == hipSuccess;
+}
+
+extern "C" int ds4_rocm_xdev_spike_stream_wait(int device_id, void *stream) {
+    if (device_id < 0 || device_id >= DS4_TP4_SPIKE_MAX_DEVICES) return 0;
+    if (!g_tp4_spike_barrier_event_ready[device_id]) return 0;
+    return hipStreamWaitEvent((hipStream_t)stream, g_tp4_spike_barrier_event[device_id], 0) == hipSuccess;
+}
+
+/* Issue #61: per-rank persistent stream for the all-reduce path. Created
+ * once by the worker thread at startup (while it is current on its bound
+ * device) and destroyed at pool shutdown. hipStreamNonBlocking: this stream
+ * must NOT get automatic legacy-stream ordering against the default stream
+ * -- see the comment above ds4_rocm_xdev_spike_stream_wait for why every
+ * ordering edge for this stream is explicit instead. */
+extern "C" void *ds4_rocm_xdev_stream_create(void) {
+    hipStream_t s = NULL;
+    if (hipStreamCreateWithFlags(&s, hipStreamNonBlocking) != hipSuccess) return NULL;
+    return (void *)s;
+}
+
+extern "C" void ds4_rocm_xdev_stream_destroy(void *stream) {
+    if (stream) (void)hipStreamDestroy((hipStream_t)stream);
 }
 
 extern "C" int ds4_rocm_xdev_init_global_mesh(const int *device_ids, int n_devices) {

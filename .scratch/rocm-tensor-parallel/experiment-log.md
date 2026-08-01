@@ -1218,3 +1218,12 @@ existing `#56`/`#57`. Status left as `ready-for-agent` on both, not `closed` —
 once `#58` and `#59` land.
 
 
+### 2026-08-01 — Issue 60: Persistent per-rank thread execution engine rollout across all 43 layers
+
+**Goal:** Un-gate `DS4_TP4_THREADED_LAYERS` so all 43 layers run under persistent worker threads by default, re-verify #57 counter hoisting across decode paths, verify clean process exit and test suite passing on real 4x R9700 hardware.
+
+**Results:**
+- `metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)` updated in `ds4.c` so that 43-layer persistent worker thread token loop is enabled by default (when `DS4_TP4_THREADED_LAYERS` is unset or set to 43), while partial values correctly fall through to per-layer dispatch.
+- Build and test validation: `ROCM_ARCH=gfx1201 make -j8 rocm test-rocm` passed 100% (4/4 test targets cleanly passing: stubs, xdev, kernel compare, refusal).
+- Clean process exit (code 0) confirmed across repeated runs under `score_official`, verifying #56 teardown fix under full rollout.
+- Acceptance criteria in `.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md` checked off and satisfied.

@@ -29,9 +29,37 @@ static void fill_floats(float *buf, size_t count, float seed) {
     }
 }
 
+/* Kernels for Test G (issue #61 same-device stream fence probe) below. A
+ * spin kernel manufactures an artificial delay on the default stream so a
+ * missing fence reliably surfaces as a wrong value instead of an
+ * intermittent flake; the write/scale/add kernels are a minimal
+ * producer -> secondary-stream-consumer -> default-stream-consumer chain. */
+__global__ static void ds4_test_spin_kernel(long long cycles) {
+    long long start = clock64();
+    while (clock64() - start < cycles) { }
+}
+
+__global__ static void ds4_test_write_kernel(float *dst, float value, size_t count) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) dst[idx] = value;
+}
+
+__global__ static void ds4_test_scale_kernel(float *dst, const float *src, float scale, size_t count) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) dst[idx] = src[idx] * scale;
+}
+
+__global__ static void ds4_test_add_kernel(float *dst, const float *src, float add, size_t count) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) dst[idx] = src[idx] + add;
+}
+
 /* Forward: defined below main() for readability. Runs the TP=4 all-reduce
- * correctness, fallback, degenerate, and cache-reuse tests. */
-static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count);
+ * correctness, fallback, degenerate, and cache-reuse tests. Returns false if
+ * any sub-test failed -- main() must check this, since every failure inside
+ * only printed [FAIL] to stderr without it (issue #61 finding: this let a
+ * failing Test E/F still exit 0 and pass `make test-rocm`). */
+static bool run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count);
 
 int main(void) {
     printf("================================================================================\n");
@@ -373,7 +401,10 @@ int main(void) {
     printf("[PASS] tp_transport_probe refuses malformed inputs cleanly.\n");
 
     /* TP=4 collective tests (issue 27). */
-    run_allreduce_tests(&mesh, device_count);
+    if (!run_allreduce_tests(&mesh, device_count)) {
+        fprintf(stderr, "\n[FAIL] one or more all-reduce sub-tests failed (see [FAIL] lines above).\n");
+        return 1;
+    }
 
     printf("\n================================================================================\n");
     printf("ALL CROSS-DEVICE TRANSFER STANDALONE TESTS PASSED SUCCESSFULLY!\n");
@@ -395,11 +426,11 @@ int main(void) {
  * near the bottom of main() that invokes run_allreduce_tests().
  * ========================================================================== */
 
-static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
+static bool run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
     printf("\n--- All-Reduce F32 (TP=4 collective) ---\n");
     if (device_count < 2) {
         printf("  SKIP: need at least 2 GPUs for all-reduce; have %d\n", device_count);
-        return;
+        return true;
     }
 
     /* Use up to 4 devices for the TP=4 scenario; fall back to 2 or 3 when
@@ -421,15 +452,17 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
         if (hipMalloc(&d_partial[r], bytes) != hipSuccess ||
             hipMalloc(&d_result[r], bytes) != hipSuccess) {
             fprintf(stderr, "[FAIL] all-reduce: device allocation failed on GPU %d\n", r);
-            return;
+            return false;
         }
         h_partial[r] = (float *)malloc(bytes);
         h_result[r] = (float *)malloc(bytes);
         if (!h_partial[r] || !h_result[r]) {
             fprintf(stderr, "[FAIL] all-reduce: host allocation failed\n");
-            return;
+            return false;
         }
     }
+
+    bool test_ok = true;
 
     /* --- Test A: 4-rank (or 2-/3-rank) all-reduce correctness ---
      *
@@ -471,7 +504,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                                               count, 0);
         if (!ok) {
             fprintf(stderr, "[FAIL] all-reduce: ds4_rocm_xdev_allreduce_f32 failed for owner=%d\n", owner);
-            goto cleanup_ar;
+            { test_ok = false; goto cleanup_ar; }
         }
 
         hipSetDevice(owner);
@@ -493,7 +526,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                 break;
             }
         }
-        if (diverged) goto cleanup_ar;
+        if (diverged) { test_ok = false; goto cleanup_ar; }
     }
     printf("[PASS] %d-rank all-reduce produces correct sums on every owner device.\n", n_ranks);
 
@@ -530,7 +563,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
         if (!ok) {
             fprintf(stderr, "[FAIL] all-reduce host-staging: call failed for owner=%d\n", owner);
             ds4_rocm_xdev_set_force_host_staging(mesh, false);
-            goto cleanup_ar;
+            { test_ok = false; goto cleanup_ar; }
         }
 
         hipSetDevice(owner);
@@ -551,7 +584,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
         }
         if (diverged) {
             ds4_rocm_xdev_set_force_host_staging(mesh, false);
-            goto cleanup_ar;
+            { test_ok = false; goto cleanup_ar; }
         }
     }
     printf("[PASS] %d-rank all-reduce (host-staging fallback) produces correct sums.\n", n_ranks);
@@ -580,6 +613,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
         int ok = ds4_rocm_xdev_allreduce_f32(mesh, 0, d_r, d_p, NULL, NULL, 0, small_count, 0);
         if (!ok) {
             fprintf(stderr, "[FAIL] all-reduce n_peers=0 returned failure\n");
+            test_ok = false;
         } else {
             hipMemcpy(h_r, d_r, small_bytes, hipMemcpyDeviceToHost);
             int diverged = 0;
@@ -593,6 +627,8 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
             }
             if (!diverged) {
                 printf("[PASS] all-reduce n_peers=0 passes through my_partial unchanged.\n");
+            } else {
+                test_ok = false;
             }
         }
         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
@@ -632,7 +668,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                                                   count, 0);
             if (!ok) {
                 fprintf(stderr, "[FAIL] all-reduce cache-test repeat=%d failed\n", repeat);
-                goto cleanup_ar;
+                { test_ok = false; goto cleanup_ar; }
             }
             hipSetDevice(owner);
             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
@@ -650,7 +686,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                     break;
                 }
             }
-            if (diverged) goto cleanup_ar;
+            if (diverged) { test_ok = false; goto cleanup_ar; }
         }
         printf("[PASS] all-reduce cached staging buffer produces correct results across repeated calls.\n");
     }
@@ -690,7 +726,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                                                   count, 0);
             if (!ok) {
                 fprintf(stderr, "[FAIL] all-reduce bit-pattern test failed for owner=%d\n", owner);
-                goto cleanup_ar;
+                { test_ok = false; goto cleanup_ar; }
             }
 
             hipSetDevice(owner);
@@ -701,7 +737,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                 if (h_result[owner][i] != expected_sum) {
                     fprintf(stderr, "[FAIL] all-reduce bit-pattern probe (#44-#48 hazard) owner=%d idx=%zu: got %f, expected exact %f\n",
                             owner, i, h_result[owner][i], expected_sum);
-                    goto cleanup_ar;
+                    { test_ok = false; goto cleanup_ar; }
                 }
             }
         }
@@ -748,7 +784,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
             if (!ok) {
                 fprintf(stderr, "[FAIL] all-reduce async multi-stream failed for owner=%d\n", owner);
                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
-                goto cleanup_ar;
+                { test_ok = false; goto cleanup_ar; }
             }
 
             double submit_time_ms = (t1 - t0) * 1000.0;
@@ -768,7 +804,7 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
                     fprintf(stderr, "[FAIL] all-reduce async multi-stream owner=%d idx=%zu: got %f, expected %f\n",
                             owner, i, h_result[owner][i], expected_sum);
                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
-                    goto cleanup_ar;
+                    { test_ok = false; goto cleanup_ar; }
                 }
             }
         }
@@ -780,6 +816,120 @@ static void run_allreduce_tests(ds4_rocm_xdev_mesh *mesh, int device_count) {
         printf("[PASS] all-reduce async multi-stream event synchronization and non-blocking submission verified.\n");
     }
 
+    /* --- Test G: Same-Device Default<->Secondary Stream Fence Probe (issue #61) ---
+     *
+     * Issue #61 moved the TP=4 worker threads' all-reduce calls off the
+     * default stream onto a per-rank secondary stream (created via
+     * ds4_rocm_xdev_stream_create with hipStreamNonBlocking, so it has no
+     * *implicit* ordering against the default stream -- see the comment
+     * above ds4_rocm_xdev_spike_stream_wait in ds4_rocm_xdev.cu for why that
+     * mechanism was deliberately not relied on). Correctness now depends on
+     * two explicit fences: the secondary stream must wait for whatever the
+     * default stream last wrote (ds4_rocm_xdev_spike_stream_wait), and the
+     * default stream must wait for the secondary stream's result before
+     * consuming it (record on the secondary stream via
+     * ds4_rocm_xdev_spike_record_event_on, then wait on the default
+     * stream). Test E/F never exercise this -- they only probe the
+     * pre-existing cross-device peer-copy fence. This test reproduces the
+     * same "producer/consumer straddle a stream boundary" hazard for the
+     * new same-device edges, with an artificial delay long enough that a
+     * missing fence would reliably (not just occasionally) surface as a
+     * wrong, bit-exact-checkable value rather than an intermittent flake. */
+    {
+        const size_t g_count = 4096;
+        const size_t g_bytes = g_count * sizeof(float);
+        /* clock64()'s frequency (and hence how much wall time this spins
+         * for) is not something this test can assume -- measured and logged
+         * below instead of trusted blindly. Start modest; if the printed
+         * elapsed time is too short to make the race window meaningful,
+         * raise it, but re-measure rather than guessing a bigger constant. */
+        const long long spin_cycles = 50000000LL;
+
+        hipSetDevice(0);
+        float *d_a = NULL, *d_b = NULL, *d_c = NULL;
+        if (hipMalloc(&d_a, g_bytes) != hipSuccess ||
+            hipMalloc(&d_b, g_bytes) != hipSuccess ||
+            hipMalloc(&d_c, g_bytes) != hipSuccess) {
+            fprintf(stderr, "[FAIL] stream-fence probe: device allocation failed\n");
+            test_ok = false;
+        } else {
+            /* Sentinel-fill first and let it fully complete (synchronous
+             * hipMemset) before queuing anything else -- so the delayed
+             * producer below starts from a known, already-settled state
+             * instead of racing its own memset. */
+            hipMemset(d_a, 0xFE, g_bytes);
+
+            /* Deliberately slow "producer" (spin + write) on the default
+             * stream -- any consumer that races ahead of a missing fence
+             * observes the sentinel above, not 42.0. */
+            double spin_t0 = get_time_sec();
+            ds4_test_spin_kernel<<<1, 1, 0, 0>>>(spin_cycles);
+            ds4_test_write_kernel<<<(int)((g_count + 255) / 256), 256, 0, 0>>>(d_a, 42.0f, g_count);
+
+            int ok = ds4_rocm_xdev_spike_record_event(0) != 0;
+
+            void *sec_stream = ok ? ds4_rocm_xdev_stream_create() : NULL;
+            if (ok && !sec_stream) {
+                fprintf(stderr, "[FAIL] stream-fence probe: ds4_rocm_xdev_stream_create failed\n");
+                ok = 0;
+            }
+
+            /* Edge 1: secondary stream waits for the delayed default-stream
+             * write above before consuming d_a. */
+            if (ok) ok = ds4_rocm_xdev_spike_stream_wait(0, sec_stream) != 0;
+            if (ok) {
+                hipStream_t s = (hipStream_t)sec_stream;
+                ds4_test_scale_kernel<<<(int)((g_count + 255) / 256), 256, 0, s>>>(d_b, d_a, 2.0f, g_count);
+            }
+            if (ok) ok = ds4_rocm_xdev_spike_record_event_on(0, sec_stream) != 0;
+
+            /* Edge 2: default stream waits for the secondary stream's write
+             * to d_b before consuming it. No artificial delay needed here --
+             * the scale kernel above is effectively instantaneous, so a
+             * missing fence would have the add kernel below race ahead of
+             * it on virtually every run. */
+            if (ok) ok = ds4_rocm_xdev_spike_stream_wait(0, NULL) != 0;
+            if (ok) {
+                ds4_test_add_kernel<<<(int)((g_count + 255) / 256), 256, 0, 0>>>(d_c, d_b, 1.0f, g_count);
+            }
+
+            if (!ok) {
+                fprintf(stderr, "[FAIL] stream-fence probe: a fence call failed\n");
+                test_ok = false;
+            } else {
+                float *h_c = (float *)malloc(g_bytes);
+                hipDeviceSynchronize();
+                double spin_elapsed_ms = (get_time_sec() - spin_t0) * 1000.0;
+                printf("  [INFO] stream-fence probe: spin+full chain wall time %.1f ms (spin_cycles=%lld)\n",
+                       spin_elapsed_ms, spin_cycles);
+                hipMemcpy(h_c, d_c, g_bytes, hipMemcpyDeviceToHost);
+                const float expected = 42.0f * 2.0f + 1.0f; /* 85.0, bit-exact */
+                int diverged = 0;
+                for (size_t i = 0; i < g_count; i++) {
+                    if (h_c[i] != expected) {
+                        fprintf(stderr, "[FAIL] stream-fence probe idx=%zu: got %f, expected exact %f "
+                                        "(default<->secondary stream ordering broken)\n",
+                                i, h_c[i], expected);
+                        diverged = 1;
+                        break;
+                    }
+                }
+                if (diverged) {
+                    test_ok = false;
+                } else {
+                    printf("[PASS] same-device default<->secondary stream fence "
+                           "(ds4_rocm_xdev_spike_stream_wait/record_event_on) verified under artificial delay.\n");
+                }
+                free(h_c);
+            }
+
+            if (sec_stream) ds4_rocm_xdev_stream_destroy(sec_stream);
+        }
+        if (d_a) hipFree(d_a);
+        if (d_b) hipFree(d_b);
+        if (d_c) hipFree(d_c);
+    }
+
 cleanup_ar:
     for (int r = 0; r < n_ranks; r++) {
         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
@@ -787,4 +937,5 @@ cleanup_ar:
         free(h_partial[r]);
         free(h_result[r]);
     }
+    return test_ok;
 }

@@ -1,6 +1,6 @@
 # 61 — Eliminate host hipDeviceSynchronize barriers in TP=4 all-reduce path
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
