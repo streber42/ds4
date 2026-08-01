@@ -30,17 +30,46 @@ existing.
 
 ## Acceptance criteria
 
-- [ ] MoE routed/shared-expert dispatch path's collective count measured via
+- [x] MoE routed/shared-expert dispatch path's collective count measured via
       #49's harness, per layer
-- [ ] Confirmed either: (a) MoE stays at exactly 1 all-reduce per layer (2
+- [x] Confirmed either: (a) MoE stays at exactly 1 all-reduce per layer (2
       total with attention), matching the expected baseline — report this
       and close, or (b) extra collectives found, with a fix that batches
       them into the standard pattern if possible, or documents why they're
       structurally required if not
-- [ ] Full 100-case `score_official` quality fixture re-run if any change was
-      made to the MoE collective path
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+- [x] Full 100-case `score_official` quality fixture re-run if any change was
+      made to the MoE collective path — **n/a, no change was made** (outcome
+      (a) below); nothing to re-verify.
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+      — cites #49's pre-existing entry rather than a new run (see Comments).
 
 ## Blocked by
 
 `.scratch/rocm-tensor-parallel/issues/49-instrument-tp4-sync-dispatch-call-sites.md`
+
+## Comments
+
+**2026-08-01 — Retroactively documented during a project-wide issue-tracker
+lint; found closed with 0/4 ACs checked and no explanation.** Git blame
+traces this file's closure to commit `4a21216`, whose message
+("feat: 50 — Vertical spike...") is entirely about unrelated issue #50 and
+never mentions #54 — this issue was created already marked `closed` with no
+audit ever performed, the same class of mistake recorded in
+[[tp4-issue-closure-scope-creep]].
+
+The good news: #49's per-call-site instrumentation (`experiment-log.md`,
+"2026-07-31 — TP=4 decode-loop sync/dispatch instrumented per call site
+(issue 49)") already contains the exact data this issue asked for — it just
+was never cross-referenced here. The 17-site breakdown shows exactly one
+MoE-related collective site, `moe_allreduce`, at 43 calls/token (once per
+layer), with no separate routed-expert or shared-expert collective site
+anywhere in the table. Combined with `attn_allreduce` (also 43/token), that
+is 86/token total — matching the expected baseline this issue's own "What
+to build" section cites, with no extra collectives from the routed+shared
+expert split. **Outcome (a): confirmed, no extra collectives, no fix
+needed.** The two consultants' suspicion that motivated this issue is not
+borne out by the instrumentation data.
+
+Closing for real this time, on the evidence above, rather than re-running
+#49's instrumentation from scratch — the data already answers the question
+and re-collecting it would not change the answer.
