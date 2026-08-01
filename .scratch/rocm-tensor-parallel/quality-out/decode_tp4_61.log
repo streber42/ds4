@@ -1,0 +1,80 @@
+ds4: GPU config: 4 devices [0,1,2,3] requested, budgets 30,30,30,30 GB; auto=true
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: per_tier_overhead = 0.06 GiB (cuda_tensor_parallel=1)
+ds4: GPU0 original vram_bytes = 29.79 GiB
+ds4: GPU0 post-overhead vram_bytes = 29.72 GiB
+ds4: GPU1 original vram_bytes = 29.79 GiB
+ds4: GPU1 post-overhead vram_bytes = 29.72 GiB
+ds4: GPU2 original vram_bytes = 29.79 GiB
+ds4: GPU2 post-overhead vram_bytes = 29.72 GiB
+ds4: GPU3 original vram_bytes = 29.79 GiB
+ds4: GPU3 post-overhead vram_bytes = 29.72 GiB
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-42 + embedding + output head  (26.0 / 29.7 GB)
+  GPU1: (no transformer layers)  (0.0 / 29.7 GB)
+  GPU2: (no transformer layers)  (0.0 / 29.7 GB)
+  GPU3: (no transformer layers)  (0.0 / 29.7 GB)
+ds4: per-tier graph scratch reserved: 0.06 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: ROCm TP=4 placement: all 4 tiers hold every layer, sharded tensors split 4-way per rank
+ds4: CUDA tier 0 (device 0) selective weights: 25.94 GiB in 1328 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 25.94 GiB in 1328 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 25.94 GiB in 1328 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 25.94 GiB in 1328 ranges
+ds4: memory: KV 0.02 GiB (raw 0.02 + compressed 0.00) + buffers 0.00 GiB = 0.02 GiB context
+ds4: memory detail: ctx=64 prefill_cap=64 raw_kv_rows=256 compressed_kv_rows=18 backend=rocm
+ds4: ROCm TP=4 enabled: all 4 tiers active (single-stage all-replicated)
+ds4: ROCm loading model tensors into device cache
+ds4: ROCm model arena alloc failed for moe_down (1024.00 MiB chunk): out of memory
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=16.00 MiB cached=0.19 GiB free=0.22 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.22 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=64.00 MiB cached=0.00 GiB free=0.35 GiB reserve=1.59 GiB total=31.86 GiB)
+We<｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜><｜begin▁of▁sentence｜>
+ds4: prefill: 0.48 t/s, generation: 1.97 t/s

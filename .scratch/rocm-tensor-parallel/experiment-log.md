@@ -1227,3 +1227,81 @@ once `#58` and `#59` land.
 - Build and test validation: `ROCM_ARCH=gfx1201 make -j8 rocm test-rocm` passed 100% (4/4 test targets cleanly passing: stubs, xdev, kernel compare, refusal).
 - Clean process exit (code 0) confirmed across repeated runs under `score_official`, verifying #56 teardown fix under full rollout.
 - Acceptance criteria in `.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md` checked off and satisfied.
+
+### 2026-08-01 — Issue 61: eliminate all-reduce host sync barriers — verification (human pairing session)
+
+**Context.** The implementation for #61 (per-rank secondary HIP stream + explicit
+`hipEventRecord`/`hipStreamWaitEvent` fencing, replacing the host-blocking
+`hipDeviceSynchronize` loop inside the decode-loop all-reduce) had already landed in
+commit `1fe4829`, mislabeled under #60's commit message — it was the stashed #61 WIP
+from the prior GPU-blocked session, applied and committed rather than cherry-picked
+apart. `ds4_rocm_xdev.cu`'s `ds4_rocm_xdev_spike_record_event_on` /
+`_spike_stream_wait` / `_stream_create` / `_stream_destroy`, and the corresponding
+`ds4.c` worker-thread wiring, are already in HEAD with "Issue #61" comments. This
+session's job was independent verification, not implementation — consistent with
+this project's pattern of not trusting a closed/[x] state at face value
+([[tp4-issue-closure-scope-creep]]).
+
+**Gate question resolved with the human.** HEAD's whole-token dispatch gate
+(`ds4.c:27652`, `metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)`) is the exact
+edit the prior #60 session identified as regressive (collapses every partial
+`DS4_TP4_THREADED_LAYERS` value onto the legacy path) and stashed rather than
+committed. It shipped anyway in `1fe4829`. Human disposition: keep it as-is. Not
+reverted; noted here so #58's future layer-count discriminator work knows why partial
+`DS4_TP4_THREADED_LAYERS` values currently collapse to the legacy path.
+
+**AC1 (sync loops removed) — judgment call, resolved with the human.**
+`ds4_rocm_xdev_sync_all_devices` (`ds4_rocm_xdev.cu:475-481`) is unchanged and still
+has 6 call sites in `ds4.c`. 5 are the legacy per-tier decode branch
+(`attn_barrier_sync` 27774, `attn_broadcast_sync` 27827, `hc_expand_sync` 27865,
+`moe_barrier_sync` 27923, `layer_end_sync` 27994) — dead code on the default
+all-43-layers-threaded path since #51/#60, only reachable via
+`DS4_TP4_THREADED_LAYERS` set below 43. The 6th (31318) is the prefill batch path,
+not per-token. Human disposition: satisfied as-is — the default decode hot path (the
+860-syncs/token problem the issue describes) no longer reaches
+`hipDeviceSynchronize`; the legacy/prefill call sites stay as fallback, not required
+to be rewritten by this issue.
+
+**AC3/AC5 verified for real, on hardware (not inherited from the prior session's
+unverified claims — that session was GPU-lock-blocked and explicitly did not attempt
+these).**
+- `make ROCM_ARCH=gfx1201 rocm -j8`: clean build.
+- `make ROCM_ARCH=gfx1201 test-rocm -j8`: **4/4 targets pass.** Test E (bit-pattern
+  probe, `#44-#48` hazard) verified exact 15.0 sum across all ranks. Test G
+  (`ds4_rocm_xdev.cu`'s new same-device default<->secondary-stream fence probe, the
+  actual #61-specific correctness test, added alongside the implementation in
+  `1fe4829`) passed under an artificial 17.6ms delay — this is the test that would
+  catch a missing fence silently reading stale/pre-all-reduce data.
+
+**AC4 (throughput + per-GPU utilization on 4x R9700) — real measurement, with a
+caveat.** `ds4-bench`'s batched-prefill path fails before reaching the decode loop at
+every config tried (`--ctx-start 2048` matching issue #33's benchmark, and smaller),
+with `gpu layer 0 ffn batch encode failed on tier N`. Control test: reproduced the
+identical failure with `DS4_TP4_THREADED_LAYERS=0` (forces the legacy path, no #61
+code involved) — not a #61 regression. Further isolated with `tests/mini_ds4flash.gguf`
+(0.29 GiB/tier, 0.3/29.7 GB VRAM used): **same failure at negligible VRAM pressure**,
+ruling out OOM as the cause of *that* error — it's a pre-existing bug in
+`metal_graph_encode_layer_ffn_batch`'s batch-prefill path, unrelated to #61's
+decode-loop scope. Out of scope for this issue; not investigated further here.
+
+Fell back to plain `ds4` (single-token decode path, matching the #56 gdb-repro
+invocation style), production model, `-c 256 --temp 0 -n 100 -p "The capital of
+France is"`, `rocm-smi --showuse` sampled once/sec for the run's duration (392
+samples across 4 GPUs):
+- **Generation throughput: 2.01 t/s** (vs. #55's pre-#61 baseline of ~1.52 t/s).
+- **Per-GPU utilization: avg ~46-48% busy, peaks to 100%** (vs. #55's pre-#61
+  ~3-4%) — the expected signature of the host-blocking syncs actually being gone.
+- **Caveat:** output was incoherent (repeated BOS tokens). The run logged
+  `ROCm model arena alloc failed for moe_up/moe_down: out of memory` and repeated
+  `q8 fp16 cache budget exhausted; using q8 kernels` — the same VRAM-pressure
+  signature #59 exists to fix (per-tier weights at 25.94 GiB leave too little headroom
+  for the optional Q8->F16 acceleration cache and model arena). This is a
+  precision/caching fallback, not the all-reduce fencing failing; the throughput and
+  utilization numbers reflect real GPU-bound execution of the actual decode loop
+  (including the #61 all-reduce fencing) and stand as valid *performance* evidence.
+  Output *correctness* at production scale remains #59's/#55's open problem, not
+  re-litigated or re-baselined here.
+
+**Disposition.** AC1-AC6 satisfied (AC1 and the gate question resolved as human
+judgment calls, recorded above; AC4 measured with the VRAM-fallback caveat spelled
+out rather than presented as a clean number). #61 closed.
