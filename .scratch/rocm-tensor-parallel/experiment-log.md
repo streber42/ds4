@@ -997,3 +997,110 @@ numbers from the (crash-terminated but otherwise complete) 2-layer
 threaded run and the clean 43-layer non-threaded discriminator run are
 recorded in issue #51's Comments for whoever picks this up next.
 
+### 2026-08-01 — Issue 56: teardown crash root-caused and fixed (unguarded global weight-range cache)
+
+**#51's "untested candidate" (weights_free/vocab_free ordering) falsified
+statically, before spending any GPU time on it.** `weights_free` (`ds4.c:6774`)
+is `memset(w, 0, sizeof(*w))` and `vocab_free` (`ds4.c:38278`) only calls
+host-side `free()`/`table_free()` — neither touches GPU state, a device
+context, or any HIP registration. Reordering them relative to
+`metal_graph_tp4_spike_pool_shutdown()` cannot change when any host-mapped
+range gets unregistered, because they never unregister anything. This is a
+primary-source falsification (two function bodies, no GPU calls) of the
+candidate #51 sized but didn't verify — recorded here instead of spending
+an 86 GiB model-load+crash cycle to empirically re-derive the same
+conclusion.
+
+**Root cause found via gdb backtrace, not code reading.** Rebuilt with
+default `-g` debug info (already in `ROCM_CFLAGS`) and ran the exact
+crashing configuration under `gdb -batch -ex run -ex bt -ex 'thread apply
+all bt'`: `DS4_TP4_THREADED_LAYERS=2 DS4_TP4_INSTRUMENT=1 AMD_LOG_LEVEL=3
+./ds4 --rocm --gpu-devices 0,1,2,3 --cuda-tensor-parallel --model
+<production 86GiB IQ2XXS quant> -c 64 -p "The capital of France is" -n 40`.
+Generation completed and printed output, then aborted with the same
+"Memobj map does not have ptr" signature. The backtrace pinpointed the
+abort precisely:
+
+```
+#5  ?? () from /opt/rocm/lib/libamdhip64.so.7   (ROCclr abort on bad unregister)
+#8  cuda_model_range_release_ranges_only () at ./rocm/ds4_rocm_runtime.cuh:5992
+#9  cuda_model_range_release_all () at ./rocm/ds4_rocm_runtime.cuh:6008
+#10 ds4_gpu_cleanup () at ./rocm/ds4_rocm_runtime.cuh:6157
+#11 ds4_engine_close (e=<optimized out>) at ds4.c:58774
+#12 ds4_engine_close (e=<optimized out>) at ds4.c:58736
+#13 main (argc=<optimized out>, argv=<optimized out>) at ds4_cli.c:2204
+```
+
+Only 2 non-main threads were alive at the crash (both idle in
+`libhsa-runtime64.so.1` ioctl waits, unrelated to the TP4 spike pool) —
+the 4 persistent worker threads were **already joined**
+(`metal_graph_tp4_spike_pool_shutdown()` at `ds4.c:58764` runs and
+completes before `ds4_gpu_cleanup()` at `ds4.c:58774`, matching what the
+existing comment on that call already documents). This falsifies the
+entire "worker thread's context still alive during unregister" hypothesis
+class, including #51's untested candidate — by the time
+`cuda_model_range_release_ranges_only()` runs and aborts, no worker thread
+exists to race against.
+
+**Actual root cause: `g_model_ranges` / `g_model_range_by_offset`
+(`rocm/ds4_rocm_runtime.cuh:290,293`, a `std::vector`/`std::unordered_map`
+pair caching host-registered weight-range device pointers) are written
+from every rank thread with zero synchronization.** `cuda_model_range_ptr()`
+(`ds4_rocm_runtime.cuh:4769`, reached from every weight-tensor pointer
+resolution via `cuda_resolve_weight_ptr()`) lazily registers a host range
+with `cudaHostRegister` on first touch and does
+`g_model_ranges.push_back(...)` / `g_model_range_by_offset[offset] = ...`.
+With `DS4_TP4_THREADED_LAYERS` active, all 4 persistent rank threads
+(`ds4_tp4_spike_worker_main`, `ds4.c:27258`) call this concurrently on
+their own bound device, each potentially first-touching a different
+weight range in the same token's layer phase. Concurrent
+`std::vector::push_back` (which can reallocate) and concurrent
+`std::unordered_map` insertion from multiple threads is a data race with
+undefined behavior — it corrupts the container's bookkeeping while the
+underlying `cudaHostRegister` calls themselves still succeed individually.
+The corruption is invisible until `cuda_model_range_release_ranges_only()`
+walks the (corrupted) vector at teardown and calls `cudaHostUnregister` on
+a `registered_base` pointer HIP's runtime has no record of — exactly
+"Memobj map does not have ptr". This explains every observed fact: output
+is always correct (the actual weight bytes read are fine, only the C++
+bookkeeping is corrupted), the abort is teardown-only, threading-off never
+corrupts anything (no concurrent writers), and #50's BLAS-handle fix
+(itself real and retained) didn't touch this code path at all.
+
+**Fix: `g_model_range_mutex` (`pthread_mutex_t`, matching this file's
+existing `g_blas_tier_mutex` style) now guards every read and write of
+`g_model_ranges`/`g_model_range_by_offset`.** `cuda_model_range_ptr` and
+`cuda_model_range_is_cached` were each split into an `_impl` (unchanged
+logic) plus a thin locking wrapper matching the original public signature,
+avoiding manual unlock-before-every-return bookkeeping across their many
+early-return paths. `cuda_model_range_release_ranges_only()` takes the
+same lock directly (no early returns, no wrapper needed). The sibling
+`g_q8_f16_ranges`/`g_q8_f16_transpose_ranges` caches have the identical
+unguarded-global-container shape but were confirmed (by tracing their only
+callers, `ds4_gpu_cache_q8_f16_range`/`ds4_gpu_cache_model_range` from
+`accelerator_prepare_model_tensor_spans` in `ds4.c`) to run only during the
+single-threaded model-load preload phase, before the worker-thread pool
+exists — left alone as genuinely out of scope, not overlooked.
+
+**Verified on real hardware.** `make -j8 rocm` clean build (no new
+warnings). Re-ran the exact crashing configuration twice, with two
+different prompts (matching the two-run pattern used throughout this
+project): both completed generation with coherent output ("...Paris.",
+consistent with prior runs) and **exited with code 0, no "Memobj map"
+error, no abort** — instrumentation report printed once via the explicit
+`ds4_tp4_instr_report_now()` call and once via its `atexit` handler on
+clean process exit, as designed. `make -j8 test-rocm` (all 4 targets:
+`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`,
+`test_engine_rocm_tp_refusal`) and `make -j8 cpu` both pass; `make -j8
+rocm` was rebuilt last (after `cpu`) per the shared-binary-name gotcha
+before the final confirmation run, so the binary actually exercised in the
+last real-hardware run matches what ships.
+
+**Scope discipline.** Did not touch the all-reduce implementation (#52) or
+attempt lifting the `ds4_layer_compress_ratio(il) == 0` gate for the
+compressed-cache rollout (#57) — this issue only had to make the
+already-implemented 2-layer threaded path exit cleanly, which it now does.
+`DS4_TP4_THREADED_LAYERS` stays opt-in (unset/0 = off by default,
+unchanged from #51's disposition); #51 itself is still gated on #57 before
+attempting the full 43-layer rollout.
+

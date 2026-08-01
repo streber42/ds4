@@ -289,6 +289,20 @@ struct cuda_stream_cache_layer_stats {
     uint64_t batch_misses;
 };
 
+/* Guards g_model_ranges/g_model_range_by_offset (and the bookkeeping fields
+ * that ride along with them: g_model_range_bytes, g_model_arenas,
+ * g_model_cache_full, g_model_range_mapping_supported). Issue #56: with the
+ * TP=4 persistent-worker-thread engine active, up to 4 rank threads call
+ * cuda_model_range_ptr() concurrently on their own device context to resolve
+ * weight pointers -- lazy first-touch registration raced std::vector::
+ * push_back / unordered_map::operator[] from multiple threads with no lock,
+ * corrupting the bookkeeping (while the underlying cudaHostRegister calls
+ * themselves succeeded). That surfaced only at teardown, when
+ * cuda_model_range_release_ranges_only() iterated the corrupted vector and
+ * called cudaHostUnregister on a pointer HIP's runtime never actually
+ * registered -- "Memobj map does not have ptr", confirmed via gdb backtrace
+ * landing in this exact unregister loop. */
+static pthread_mutex_t g_model_range_mutex = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<cuda_model_range> g_model_ranges;
 static std::vector<cuda_model_arena> g_model_arenas;
 static std::vector<cuda_model_image> g_model_images;
@@ -4785,7 +4799,7 @@ static const char *cuda_resolve_weight_ptr(const void *model_map,
     return cuda_model_range_ptr(model_map, offset, bytes, label);
 }
 
-static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
+static const char *cuda_model_range_ptr_impl(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
     if (bytes == 0) return cuda_model_ptr(model_map, offset);
 
     /* When g_use_host_weights is set (shared expert in batch prefill), bypass
@@ -4911,7 +4925,16 @@ static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, 
     return (const char *)dev;
 }
 
-static int cuda_model_range_is_cached(const void *model_map, uint64_t offset, uint64_t bytes) {
+/* Serializes every read and write of g_model_ranges/g_model_range_by_offset
+ * -- see the comment on g_model_range_mutex above. */
+static const char *cuda_model_range_ptr(const void *model_map, uint64_t offset, uint64_t bytes, const char *what) {
+    pthread_mutex_lock(&g_model_range_mutex);
+    const char *result = cuda_model_range_ptr_impl(model_map, offset, bytes, what);
+    pthread_mutex_unlock(&g_model_range_mutex);
+    return result;
+}
+
+static int cuda_model_range_is_cached_impl(const void *model_map, uint64_t offset, uint64_t bytes) {
     if (bytes == 0) return 1;
     if (cuda_model_image_range_ptr(model_map, offset, bytes)) return 1;
 
@@ -4935,6 +4958,15 @@ static int cuda_model_range_is_cached(const void *model_map, uint64_t offset, ui
         }
     }
     return 0;
+}
+
+/* Serializes reads of g_model_ranges against concurrent cuda_model_range_ptr
+ * writers -- see the comment on g_model_range_mutex above. */
+static int cuda_model_range_is_cached(const void *model_map, uint64_t offset, uint64_t bytes) {
+    pthread_mutex_lock(&g_model_range_mutex);
+    const int result = cuda_model_range_is_cached_impl(model_map, offset, bytes);
+    pthread_mutex_unlock(&g_model_range_mutex);
+    return result;
 }
 
 static void cuda_q8_f16_cache_release_all(void) {
@@ -6099,6 +6131,7 @@ static int cuda_model_copy_chunked(const void *model_map, uint64_t model_size, u
 }
 
 static void cuda_model_range_release_ranges_only(void) {
+    pthread_mutex_lock(&g_model_range_mutex);
     for (const cuda_model_range &r : g_model_ranges) {
         if (r.host_registered && r.registered_base) {
             (void)cudaHostUnregister(r.registered_base);
@@ -6114,6 +6147,7 @@ static void cuda_model_range_release_ranges_only(void) {
     g_model_range_by_offset.clear();
     g_model_range_bytes = 0;
     g_model_cache_full = 0;
+    pthread_mutex_unlock(&g_model_range_mutex);
 }
 
 static void cuda_model_range_release_all(void) {

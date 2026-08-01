@@ -27468,10 +27468,16 @@ static bool metal_graph_tp4_spike_barrier(void) {
  * later teardown that frees GPU memory or unregisters host-mapped ranges
  * (e.g. ds4_gpu_cleanup / cuda_model_range_release_ranges_only) -- those
  * threads hold live device contexts for as long as they are running, and
- * tearing down GPU state out from under a still-running thread produced a
- * reproducible ROCm runtime abort on real hardware during this issue's
- * testing ("Memobj map does not have ptr", after generation completed
- * cleanly, before the process could print its normal exit output). */
+ * this ordering keeps GPU state alive for their whole lifetime.
+ *
+ * Issue #50 attributed a real-hardware "Memobj map does not have ptr"
+ * abort to this ordering, but issue #56's gdb backtrace on the actual
+ * crash falsified that: the workers were already joined by the time the
+ * abort fired. The true cause was g_model_ranges/g_model_range_by_offset
+ * in rocm/ds4_rocm_runtime.cuh being mutated by all 4 worker threads with
+ * no lock -- fixed there with g_model_range_mutex. This function's join-
+ * before-GPU-teardown ordering is still correct and still required; it
+ * just wasn't what was aborting. */
 static void metal_graph_tp4_spike_pool_shutdown(void) {
     if (!g_tp4_spike_pool_initialized) return;
     for (int t = 0; t < DS4_TP4_SPIKE_N_TIERS; t++) {
@@ -27493,21 +27499,20 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
  * path entirely -- the pre-#50 code path is then byte-identical.
  *
  * Issue #51 investigated rolling this out as the default (previously
- * off-by-default, opt-in-only spike) but found the threaded path still
- * reproducibly aborts real hardware on process teardown ("Memobj map does
- * not have ptr") -- the same crash #50 found, now confirmed (via a
- * threading-off discriminator run with the same rewritten teardown code
- * completing cleanly) to be triggered specifically by activating the
- * persistent worker threads, not by the BLAS-handle race #50 hypothesized
- * as the sole cause (that fix is retained below anyway -- it closes a real
- * race, is exercised and passing under make test-rocm, and is inert while
- * this path stays opt-in). Root cause is still open; see the issue #51
- * Comments and experiment-log for what was ruled out and what's untested.
- * A second, independent blocker (the layer_n_comp[il]/
- * layer_attn_comp_cache[il] compressed-cache race between concurrent rank
- * reads and rank 0's counter increment) also still gates any default-on
- * rollout past layers 0-1, even once the crash is fixed. Left opt-in
- * pending both. */
+ * off-by-default, opt-in-only spike) but found the threaded path
+ * reproducibly aborted real hardware on process teardown ("Memobj map does
+ * not have ptr"). That crash is now fixed (issue #56): the cause was
+ * g_model_ranges/g_model_range_by_offset in rocm/ds4_rocm_runtime.cuh
+ * being mutated by all 4 worker threads with no lock, not the BLAS-handle
+ * race #50 originally hypothesized (that fix is retained below anyway --
+ * it closes a real race, is exercised and passing under make test-rocm)
+ * and not a still-live worker-thread context during GPU teardown (#51's
+ * candidate, falsified by #56's gdb backtrace: the workers were already
+ * joined when the abort fired). One independent blocker remains: the
+ * layer_n_comp[il]/layer_attn_comp_cache[il] compressed-cache race between
+ * concurrent rank reads and rank 0's counter increment (issue #57), which
+ * still gates any default-on rollout past layers 0-1. Left opt-in pending
+ * that. */
 static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
     static int n_layers = -1;
     if (n_layers < 0) {
