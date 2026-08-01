@@ -1,6 +1,6 @@
 # 62 — Re-measure the 100-case quality fixture on HEAD under a controlled serialize setting
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -42,7 +42,7 @@ paths.
 
 ## Acceptance criteria
 
-- [ ] **Rebuild the fixture binary first — the one on disk is stale.** The
+- [x] **Rebuild the fixture binary first — the one on disk is stale.** The
       quality fixture is `gguf-tools/quality-testing/score_official`, a
       *separate* binary from `./ds4`, built by `make ROCM_ARCH=gfx1201
       rocm-quality` (which force-rebuilds with `-B` and filters out
@@ -51,19 +51,78 @@ paths.
       (#61, 11:38) — so running it as-is would produce *another* number that
       does not measure HEAD. Record the commit SHA and build command in the
       run log.
-- [ ] Full 100-case `score_official` run on the **pipeline** path, HEAD build
-- [ ] Full 100-case `score_official` run on the **TP=4** path, HEAD build
-- [ ] Both runs use an **identical and explicitly recorded**
+- [x] Full 100-case `score_official` run on the **pipeline** path, HEAD build
+- [ ] Full 100-case `score_official` run on the **TP=4** path, HEAD build —
+      **not satisfiable as written; see Comments.** Two attempts, neither
+      produced a clean 100-case measurement: one crashed at case 19/100, one
+      completed but with values ~44x the PRD bar (not a comparable data
+      point).
+- [x] Both runs use an **identical and explicitly recorded**
       `AMD_SERIALIZE_KERNEL` value; record it in the log filename or header
-- [ ] Report `avg_nll`, `first_match`, `api_top1_rate`, `api_pair_rate` for
+      — `AMD_SERIALIZE_KERNEL=3` for pipeline and both TP=4 attempts, header
+      block in each log.
+- [x] Report `avg_nll`, `first_match`, `api_top1_rate`, `api_pair_rate` for
       both against the PRD bar (avg_nll 0.370–0.378, first_match ≥60/100,
-      api_top1_rate ≥0.85, api_pair_rate ≥0.98)
-- [ ] Record per-case `avg_nll` distribution (median and the <0.5 / [0.5,1) /
+      api_top1_rate ≥0.85, api_pair_rate ≥0.98) — pipeline meets the bar; TP=4
+      does not produce a valid comparison (see Comments).
+- [x] Record per-case `avg_nll` distribution (median and the <0.5 / [0.5,1) /
       [1,2) / ≥2 bucket counts), not just the mean — the mean alone hid the
       shape of the 0.7607 result
-- [ ] Count `q8 fp16 cache budget exhausted` and `arena alloc failed`
+- [x] Count `q8 fp16 cache budget exhausted` and `arena alloc failed`
       occurrences in each log and report both
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+
+## Comments
+
+**2026-08-01, human pairing session.** Picked up from a prior agent run that
+stalled: it had rebuilt the fixture binary correctly and completed the
+pipeline HEAD measurement, but crashed before running TP=4, leaving a stale
+GPU lock (dead PID) and `dev-vllm` stopped. Verified the lock was genuinely
+stale (process dead, GPUs idle, no zombie processes, VRAM empty) before
+reacquiring, then re-ran *both* paths cleanly rather than trust the
+inherited pipeline artifact, which had no header recording its env var or
+command line.
+
+**Pipeline: solid, meets the PRD bar.** `avg_nll` 0.369196, `first_match`
+68/100, `api_top1_rate` 0.8637, `api_pair_rate` 0.9890. Median 0.348528,
+buckets <0.5/[0.5,1)/[1,2)/≥2 = 76/22/1/1. 1 `q8` warning, 0 `arena alloc
+failed`. Bit-identical to the inherited run and to the historical
+`q_pipeline_51` (0.3692) — this also answers the issue's serialize-agreement
+question on the pipeline side: `q_pipeline_51` was evidently run under
+`AMD_SERIALIZE_KERNEL=3` too, since a run explicitly forced to that setting
+reproduces it exactly.
+
+**TP=4: a third outcome this issue didn't anticipate.** Neither "at/near
+PRD bar" nor "near 0.76 again" — both attempts printed `arena alloc failed
+for moe_down` before any case scored (same tensor both times), then diverged:
+run 1 crashed at case 19/100 (`logits failed at target token 21`); run 2
+completed all 100 cases but at `avg_nll` 16.43 (median 16.36, **all 100
+cases in the ≥2 bucket**), `api_top1_rate` 0.029, `api_pair_rate` 0.542 —
+roughly 44x the PRD bar and ~20x worse than the already-failing 0.7607
+figure. Real TP placement confirmed both times via the four `CUDA tier N
+... selective weights: 25.94 GiB in 1328 ranges` lines. `q8 fp16 cache
+budget exhausted` warnings: 860 (run 1) → 4300 (run 2).
+
+Reading the issue's own falsifier: the *trigger* (moe_down alloc failure)
+reproduced deterministically, pointing at #59 (per-tier VRAM: 25.94 GiB vs
+27.79 GiB available); the *consequence* (crash vs. silent corruption) varied
+between runs, which is the run-to-run-variance signature the issue says
+should strengthen #58's race hypothesis. Both look implicated; this
+measurement can't decide between them alone. No fix was attempted — out of
+this issue's scope.
+
+**Recommendation for #58/#59:** #59 should land first regardless of which
+hypothesis is right, since the VRAM-driven arena-alloc failure gates
+everything downstream; #58's race hypothesis is not eliminated and should
+stay open pending #59.
+
+Full detail, per-case tables, and the reasoning trail: see the
+`experiment-log.md` entry "Issue 62: Re-measured HEAD, found a third
+outcome." Status left `ready-for-human` — this is a materially worse and
+different finding than the issue anticipated, and needs a human call on
+next steps (retry TP=4 more times to build a distribution over the
+crash/corruption split? proceed straight to #59? something else) before
+this issue can close.
 
 ## Notes for whoever picks this up
 

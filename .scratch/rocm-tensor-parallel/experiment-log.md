@@ -1424,3 +1424,108 @@ Two smaller corrections to the analysis above:
   the fixture. This does not weaken the "TP=4 shift is uniform" conclusion
   (which rests on the median and bucket counts), but it does mean half-to-half
   comparisons are only meaningful *between* paths, not within one.
+
+### 2026-08-01 — Issue 62: Re-measured HEAD, found a third outcome — TP=4 is not measurable at all
+
+**Setup.** Picked up cold from a prior agent run that stalled mid-task (stale
+GPU lock, PID 2971387, no longer running; `dev-vllm` stopped since ~11:58).
+Verified the lock was genuinely stale (process dead, all 4 GPUs 0% util, no
+zombie `score_official`/`ds4` processes, VRAM ~58 MiB/tier used — essentially
+empty) before reacquiring. The prior agent had already produced one pipeline
+run (`q_pipeline_head_serialize3.*`) but it carried no header recording the
+env var or exact command, so rather than trust an artifact whose provenance
+had to be inferred from a filename, both paths were re-run cleanly in this
+session with an explicit header (HEAD SHA, binary mtime, build command, full
+invocation) prepended to each log.
+
+**Binary provenance (AC1).** `gguf-tools/quality-testing/score_official`,
+mtime 08-01 11:59:14, built via `make ROCM_ARCH=gfx1201 rocm-quality -j16`.
+Confirmed genuinely post-HEAD, not just post-mtime-check: `ds4.o` and
+`ds4_rocm.o` (linked into this binary via `CORE_OBJS`) show mtimes 11:59:12–13,
+after both `0cb9cf3` (#61, 11:38:20) and this issue's own binary-staleness
+commit `498a39d` (11:57:04, the HEAD this session measured against).
+
+**Pipeline result — solid, reproduces prior baseline exactly.**
+`AMD_SERIALIZE_KERNEL=3`, `--gpu-devices 0,1,2,3`, no `--cuda-tensor-parallel`:
+
+- `avg_nll` 0.369195970, `first_match` 68/100, `api_top1_rate` 0.863696,
+  `api_pair_rate` 0.989038 — meets the PRD bar (0.370–0.378; lower is better,
+  so 0.3692 is a hair *under* the band, not a miss).
+- Median 0.348528; buckets: <0.5 → 76, [0.5,1) → 22, [1,2) → 1, ≥2 → 1.
+- 1 `q8 fp16 cache budget exhausted` warning, 0 `arena alloc failed`.
+- Bit-identical to the crashed prior agent's inherited run (0.369195970 to 9
+  decimal places) and to `q_pipeline_51`'s 0.3692 from the 08-01 04:44 stale
+  artifact. This answers #62's open sub-question on the pipeline side: since
+  a run explicitly forced to `AMD_SERIALIZE_KERNEL=3` reproduces `q_pipeline_51`
+  exactly, `q_pipeline_51` was almost certainly run under the same setting —
+  the pipeline half of the historical 0.37-vs-0.76 comparison was not
+  invalidated by a serialize mismatch. (The TP=4 half cannot be checked the
+  same way — see below.)
+
+**TP=4 result — not a number, a failure mode. Ran twice to test determinism.**
+Same command plus `--cuda-tensor-parallel`, same `AMD_SERIALIZE_KERNEL=3`.
+Real TP placement confirmed both times via the four
+`CUDA tier N (device N) selective weights: 25.94 GiB in 1328 ranges` lines
+(the `multi-GPU layout:` block's "no transformer layers" cosmetic artifact is
+unrelated, per this issue's existing note).
+
+Both runs printed `ds4: ROCm model arena alloc failed for moe_down (1024.00
+MiB chunk): out of memory` before any case was scored (log line 39-40) — same
+failing tensor both times, so *which* allocation fails is deterministic. What
+happens afterward is not:
+
+| run | outcome | cases | avg_nll | first_match | api_top1_rate | api_pair_rate | q8 warnings |
+|---|---|---|---|---|---|---|---|
+| 1 | crashed: `case_019 logits failed at target token 21` | 19/100 | 14.85–18.86 (uniform, not degrading) | n/a | ~0.00–0.04 per case | n/a | 860 |
+| 2 | completed, exit=0 | 100/100 | 16.431389 | 65/100 | 0.028834 | 0.541893 | 4300 |
+
+Run 2's median is 16.360920 with **all 100 cases in the ≥2 bucket** — this is
+not drift, it is a different regime entirely. `api_top1_rate` collapses to
+~3% (vs. run 1's own 0.7607-era 0.772, itself already a regression) and
+`api_pair_rate` to 0.54 (barely better than chance ordering). `first_match`
+at 65/100 is the only metric that looks superficially passable, and reading
+it that way would be the mean-hiding-the-shape mistake this issue exists to
+avoid — greedy first-token match on a short, punctuation-heavy continuation
+apparently survives corrupted weights more often than the rest of the metric
+suite does.
+
+**This is the issue's "Interpreting the result" section's *unlisted* third
+outcome.** #62 anticipated either "at/near PRD bar" or "near 0.76 again."
+What actually reproduces is neither: TP=4 on HEAD does not reliably produce a
+measurable 100-case run, and when it does complete, the result is roughly
+**44x** worse than the PRD bar and **~20x** worse than the already-failing
+0.7607 figure — not a comparable data point to either historical number.
+
+**Reading the falsifier.** The issue's own guidance says a uniform rightward
+shift favors #59-before-#58, while bimodal/high run-to-run variance favors
+#58's race hypothesis. This result is neither cleanly: the *trigger*
+(`arena alloc failed for moe_down`) reproduced identically both times, which
+points at #59's per-tier VRAM pressure (25.94 GiB/tier against 27.79 GiB
+available, named in #62 as what forces the q8 fallback in the first place —
+and the q8-warning count nearly quintupled between the two runs, 860 → 4300,
+consistent with worsening fragmentation under the same nominal load). But
+the *consequence* of that trigger — clean crash vs. 100 cases of silently
+corrupted output — varied between runs, which is the run-to-run-variance
+signature the issue says should strengthen #58's race hypothesis. Both
+candidate mechanisms look implicated at once; this measurement cannot decide
+between them on its own.
+
+**Scope discipline.** Per this issue's remit, no attempt was made to fix the
+`moe_down` allocation failure or the corruption path — #62 measures, #59 (and
+possibly #58) fix. Only one confirmatory re-run was executed, not a sweep,
+per the same discipline that flagged the `q_tp4_51_disc_*` sweep as
+unreliable evidence earlier in this log.
+
+**Disposition — held for human, not self-certified.** AC3 (full 100-case
+TP=4 run) cannot be checked off: no clean 100-case TP=4 run under this
+build exists, only one crash and one completed-but-garbage run. `#62`
+therefore stays `ready-for-human` rather than `closed`. Recommended note for
+`#58`/`#59`: this measurement makes the case that #59 (VRAM budgeting) is
+necessary before #58 can be evaluated at all, since the arena-alloc failure
+that gates everything downstream is a #59-shaped problem regardless of which
+hypothesis explains the crash-vs-corruption variance — but #58's race
+hypothesis is not eliminated and should stay open pending #59 landing.
+
+Artifacts: `quality-out/q_pipeline_head62.{log,tsv}`,
+`quality-out/q_tp4_head62.{log,tsv}` (run 1, crashed),
+`quality-out/q_tp4_head62_run2.{log,tsv}` (run 2, completed).
