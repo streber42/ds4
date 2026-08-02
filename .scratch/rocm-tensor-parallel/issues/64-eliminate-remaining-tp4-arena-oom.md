@@ -1,6 +1,6 @@
 # 64 — Eliminate the remaining ROCm TP=4 model-arena OOM and its permanent-latch cascade
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -154,3 +154,32 @@ which was attempted here) is the human call this issue is left open for.
 failure" — AC1 (zero `arena alloc failed`) is met literally, which may be
 enough to unblock them even before AC2's literal wording is resolved; that
 judgment is included in what's being handed back.
+
+**2026-08-02 — Closed by human call, after an AI consultant panel consult
+(9/10 responded).** Consulted the panel on exactly the AC2 literal-wording
+question above. Panel unanimously agreed to close now and unanimously
+warned against attempting further arena changes first (Option C), citing
+the reverted 672-failure chunk-shrinking attempt as evidence this class of
+change is easy to get wrong without careful, isolated measurement. Panel
+split 5/9 (Codex, Cursor, Qwen3, GLM, MiniMax) to 4/9 (Gemini, Kimi,
+Mistral, DeepSeek) on whether to check AC2 via its own parenthetical
+("Option A") or leave it unchecked with an explanatory comment ("Option
+B"). MiniMax's framing tipped the human's decision: "acceptance criteria
+aren't contracts you parse literally against your own parenthetical
+escapes — they're the artifact a reviewer reads... if you check AC2, a
+future reader sees '✅ no arena-full skip cascade,' not the parenthetical,
+and will wrongly conclude the skip rate is near-zero when it's 1038/run."
+GLM made the same point, tying it directly to this project's own
+documented history (`tp4-issue-closure-scope-creep`) of over-literal
+closures that had to be reopened.
+
+**Disposition: AC2 is left unchecked.** The latch/cascade hazard this issue
+was opened for is fixed and verified (see above), and that is sufficient to
+close #64 — but the literal main clause of AC2 ("shows no arena-full skip
+cascade") is not true of the artifact, and the box is left unchecked rather
+than closed on the parenthetical alone. The residual ~1038-skip/run
+structural-headroom problem is split into a new issue,
+`.scratch/rocm-tensor-parallel/issues/65-tp4-arena-structural-vram-headroom.md`,
+with today's numbers (1038, 1036) captured as its baseline. `#58` and `#63`
+are unblocked by this closure since both only need AC1 (zero `arena alloc
+failed`), which is met.

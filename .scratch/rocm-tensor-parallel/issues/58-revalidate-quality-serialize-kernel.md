@@ -36,9 +36,17 @@ cached VRAM pointers.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/64-eliminate-remaining-tp4-arena-oom.md`
+*(nothing — see 2026-08-02 comment)*
 
 ## Comments
+
+**2026-08-02 — Unblocked: #64 closed.** #64 closed with AC1 (zero `arena
+alloc failed` warnings, verified live twice) met, which is what this issue
+actually needs to produce a trustworthy TP=4 run. The residual ~1038
+`arena-full skip`/run (legitimate VRAM-scarcity fallback to the slower PCIe
+path, not a failure) is split into `#65` and does not block this issue —
+those are perf-path fallbacks, not initialization failures.
+
 
 **2026-08-01 — #62's HEAD re-measurement disposition: stay blocked, re-pointed
 at #59.** (Human: proceed straight to #59, no further TP=4 retries on #62.)

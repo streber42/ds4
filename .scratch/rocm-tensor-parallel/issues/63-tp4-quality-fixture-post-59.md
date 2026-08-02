@@ -49,17 +49,16 @@ HEAD, whether or not this issue has run yet.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/64-eliminate-remaining-tp4-arena-oom.md`
-
-(TP=4 cannot complete a clean 100-case run until every `arena alloc failed`
-is gone, not just the `moe_down` one — see `#62`'s two prior attempts, one
-crash and one 44x-PRD-bar garbage run, both gated by that allocation
-failure. `#59` fixed the specific `moe_down`/layer-0 instance and measurably
-improved things, but one `arena alloc failed` still occurs later in the run
-(`q8_0`, near the last tensor) — see `#59`'s final comment. `#64` carries
-the residual.)
+*(nothing — see 2026-08-02 comment)*
 
 ## Comments
+
+**2026-08-02 — Unblocked: #64 closed.** #64 closed with AC1 (zero `arena
+alloc failed` warnings, verified live twice against the production model)
+met — TP=4 now initializes cleanly, which is the only thing this issue was
+waiting on. The residual ~1038 `arena-full skip`/run (legitimate
+VRAM-scarcity fallback to the slower PCIe path, not an allocation failure)
+is split into `#65` and does not block a clean 100-case run here.
 
 **2026-08-02 — Split out of `#57` on human disposition.** `#57`'s AC3 had a
 TP=4 half that was blocked on `#59` with no path to closure until `#59`'s own
