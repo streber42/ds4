@@ -64,3 +64,62 @@ barriers) all touched the same decode loop. Re-verify AC2-4 against
 current HEAD, not against assumptions from when this code was first
 written; the overlap logic may also need to be re-examined for interaction
 with #61's changes before trusting it under concurrent load.
+
+**2026-08-02 — Work in progress, stashed pending GPU availability. Pop
+`stash@{0}` (SHA `e4f265c758ff40c80571566e0b7fa8ae57ecc326`, message
+"issue-53: AC1 re-confirmed, AC2 throughput measured...") FIRST, before
+doing anything else — it already contains real, verified progress on this
+issue and re-doing it from scratch would duplicate work:**
+- AC1 re-confirmed solid (the `#57`-followup consultant panel already
+  traced this exact overlap path in detail; see the stashed Comments
+  entry for why).
+- AC2 done: a dedicated 3-run throughput measurement on current HEAD
+  (`79e8181`) found 0.83/0.90/0.90 t/s generation (mean 0.88) — no
+  detectable win over `#51`'s own recorded 0.52-1.52 t/s spread. Log at
+  `quality-out/tp4_53_overlap_throughput.log` (already on disk,
+  untracked, not stashed).
+- AC3's TP=4 half formally deferred to `#63` (already scoped for it,
+  blocked on `#64`) — a 9-model AI-consultant panel (7/9 converged) plus
+  human sign-off backed this; don't re-litigate it, don't attempt a TP=4
+  quality run here.
+- `experiment-log.md` has a matching 2026-08-02 entry (also in the
+  stash) with full detail and an **interim, not final** disposition.
+
+**What's still genuinely outstanding after popping the stash:** AC3's
+pipeline half needs one more fresh `score_official` 100-case run with a
+proper provenance header — the existing `quality-out/q_pipeline_53.log`
+(healthy, avg_nll=0.371, already on disk) predates the `#64` fix commit
+by ~22 min and has no provenance header, so it was declined as evidence
+by human direction; don't cite it as-is. Two other untracked files in
+`quality-out/` are known-stale and should be disregarded, not cited, and
+not staged into any commit: `q_tp4_51_full.{log,tsv}` (crashed after 1
+case, pre-`#64`-fix) and the undated `q_pipeline_53.{log,tsv}` pair
+itself (superseded once the fresh rerun below lands).
+
+**GPU-lock protocol reminder:** acquire the lock
+(`ralph_engine.py gpu-acquire rocm-tensor-parallel --agent-id "$$"`)
+before any of this; if `LOCKED`, this issue stays `ready-for-agent` for
+the next dispatch rather than blocking synchronously — don't loop
+forever inside one session waiting for it.
+
+**Remaining steps once the GPU is free** (after popping the stash):
+1. Confirm VRAM idle on all 4 GPUs (`rocm-smi --showmeminfo vram`,
+   expect tens of MB, not GB, per GPU).
+2. Rebuild `score_official` fresh: `make ROCM_ARCH=gfx1201 rocm-quality`.
+3. Run the 100-case pipeline fixture (see
+   [[score-official-quality-fixture-invocation]] memory for the exact
+   command/model/manifest paths and the `AMD_SERIALIZE_KERNEL=3`
+   requirement) to `quality-out/q_pipeline_53_v2.{log,tsv}`, with a
+   provenance header (HEAD SHA, build command, full invocation) written
+   at the top of the log first.
+4. Release the GPU lock (`ralph_engine.py gpu-release rocm-tensor-parallel`).
+5. Compare the fresh `avg_nll` against the PRD bar (0.369-0.378) and
+   against the existing 0.371 as a sanity check — flag clearly, don't
+   paper over it, if they diverge meaningfully.
+6. Finalize the `experiment-log.md` 2026-08-02 entry (it's currently
+   marked interim) with this result and a final disposition.
+7. Check off the remaining AC3/AC4 boxes below with the real result, and
+   change `Status: ready-for-agent` to `Status: closed`.
+8. One commit for everything (the popped stash's changes plus this
+   session's): `feat(rocm-tensor-parallel): 53 — Overlap layer N+1
+   compute with layer N's all-reduce`.
