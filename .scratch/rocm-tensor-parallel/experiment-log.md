@@ -2158,4 +2158,149 @@ or whether "latch gone + AC1 literal" is enough to consider this resolved
 and unblock `#58`/`#63` — is left to a human. Issue status set to
 `ready-for-human`, not `closed`.
 
+## 2026-08-02 — Issue 53: overlap throughput measurement (AC2), TP=4 quality-fixture arm deferred to #63 (AC3)
+
+**Background.** `#53` was found improperly self-closed (commit `04ec7be`,
+same commit already known from `#51`'s and `#60`'s history to have
+self-closed several issues without verification) during the 2026-08-01
+tracker lint, and reopened on AC2-4. AC1 (the overlap code itself) was
+re-confirmed solid: it's genuinely in `ds4.c` (`ds4_tp4_spike_worker_main`
+region), and its most contentious design property — workers not being
+synchronized per-layer during the full-token overlap path — was already
+independently reviewed by the AI-consultant panel during the `#57`
+followup (Round 2/3, Cursor and Qwen3) and confirmed to be a deliberate,
+documented choice, not a bug. This entry covers what was still missing:
+AC2 and AC3.
+
+**Two stale artifacts found in the working tree, disregard them.**
+`quality-out/q_pipeline_53.{log,tsv}` (100-case pipeline run, healthy
+`avg_nll=0.371`) is **not evidence for this issue** — pipeline mode runs
+with `cuda_tensor_parallel=0` and never enters the `g->rocm_tp4`-gated
+overlap path; it's a control arm at best. `quality-out/q_tp4_51_full.{log,tsv}`
+is a TP=4 run that crashed after 1 case with `arena alloc failed for
+moe_owned_down`, and its timestamp (01:45) predates the `#64` fix commit
+(`79e8181`, landed 05:33) written specifically to eliminate that OOM class
+— it's stale, pre-fix evidence, not a real attempt against current HEAD.
+Neither file was touched or committed as part of this entry.
+
+**AC3 disposition: TP=4 quality-fixture arm deferred to `#63`, not
+duplicated here.** `#63` ("Re-run the TP=4 quality fixture...") already
+exists with the identical scope AC3's TP=4 half needs, split out of `#57`
+for the same underlying reason (arena OOM blocking a clean 100-case TP=4
+run). `#63` is `open`, `Blocked-by #64`, which is itself `ready-for-human`
+pending a human decision on the residual ~1038 `arena-full skip`/run PCIe
+fallback rate. Running a fresh TP=4 100-case fixture inside `#53` would
+either duplicate `#63`'s exact job or pre-empt the still-open `#64`
+decision. Ran this reasoning by the AI-consultant panel (`/ai-consultants:consult`,
+9/10 responded: Gemini, Codex, Mistral, Cursor, Kimi, Qwen3, GLM, DeepSeek,
+MiniMax) before committing to it — 7/9 substantive responses (Codex,
+Cursor, Kimi, Qwen3, GLM, DeepSeek, MiniMax) converged on deferring AC3's
+TP=4 arm to `#63` and not relying on an incidental number for AC2 (below);
+only Gemini dissented, preferring to run the full TP=4 fixture now. Human
+confirmed the majority approach. This mirrors `#57`'s own precedent
+(closed 2026-08-01 on its pipeline evidence, TP=4 half descoped to `#63`).
+
+**AC2: dedicated throughput measurement, current HEAD.** The panel also
+flagged that `#64`'s incidentally-recorded 0.59 t/s TP=4 generation figure
+(2 runs, 20-token `-p` prompt, recorded for a different issue's VRAM-arena
+verification) was too weak/informal to cite as AC2's evidence — 0.59 falls
+inside `#51`'s own recorded 0.52-1.52 t/s spread, so it can't honestly be
+called a measured comparison. Ran a dedicated, purpose-built measurement
+instead: GPU-locked, `dev-vllm` stopped, VRAM confirmed idle (<60 MiB used
+on all 4 GPUs) before starting; rebuilt (`make -j8 rocm`) against current
+HEAD (`79e8181`) to be certain the binary matched the `#64` fix; 3
+consecutive runs of the same command used for `#51`/`#60`'s own
+measurements (`DS4_TP4_INSTRUMENT=1 ./ds4 --rocm --gpu-devices 0,1,2,3
+--cuda-tensor-parallel --model /home/murphy/src/ds4/ds4flash.gguf -c 64 -p
+"The capital of France is" -n 40`). Log: `quality-out/tp4_53_overlap_throughput.log`.
+
+| run | prefill t/s | generation t/s | `spike_full_token_dispatch` ms/token | `spike_full_token_barrier` ms/token |
+|---|---|---|---|---|
+| 1 | 1.01 | 0.83 | 1229.109 | 0.477 |
+| 2 | 1.06 | 0.90 | 1126.509 | 0.520 |
+| 3 | 1.08 | 0.90 | 1128.030 | 0.585 |
+
+All 3 runs exited cleanly (code 0), zero `arena alloc failed` and zero
+`arena-full skip` occurrences across all 3 — better than `#64`'s own
+verification runs, though `#64` remains open on the residual-skip
+question for larger/longer runs, which this short `-n 40` measurement
+doesn't exercise.
+
+**Finding (the honest AC2 report):** generation throughput 0.83-0.90 t/s
+(mean 0.88 t/s) sits squarely inside `#51`'s already-recorded 0.52-1.52
+t/s spread for the full 43-layer rollout. **No detectable overlap win** —
+the result is indistinguishable from `#51`'s own run-to-run noise. This
+matches the issue's own framing going in ("expected to be a smaller win
+than #50/#51/#52... since most of the overhead this chain targets is
+host-side blocking, not the underlying communication latency itself").
+Per-token dispatch cost (~1130-1230 ms, almost entirely GPU-side compute
+across 43 layers) dwarfs the ~0.5 ms/token barrier-sync cost, meaning even
+a large relative change in all-reduce overlap efficiency has very little
+room to move the total. No toggle exists to run a controlled
+overlap-on/overlap-off A/B directly, so this is a before/after-in-time
+comparison against `#51`'s numbers, not a clean isolated ablation — stated
+as a limitation, not overclaimed as a measured percentage win.
+
+**Disposition (interim — issue NOT yet closed).** AC1 (code, already
+re-confirmed) and AC2 (this entry's throughput finding) are satisfied.
+AC3's TP=4 half is formally deferred to `#63`, tracked there against
+`#64`. AC3's pipeline half still needs a fresh run: the existing
+`quality-out/q_pipeline_53.{log,tsv}` (healthy, `avg_nll=0.371`) predates
+the `#64` fix commit (`79e8181`) by ~22 minutes and its build provenance
+is unverified (no header, per the standing
+`score-official-quality-fixture-invocation` trap), so on human direction
+this issue stays open rather than citing it as-is. GPUs were busy at the
+time of this entry, so the fresh pipeline rerun (rebuild
+`score_official`, re-run the 100-case fixture with a proper provenance
+header, `AMD_SERIALIZE_KERNEL=3`) is queued to run once the GPU is free —
+see the follow-up entry below for the outcome. AC4 (this entry) covers
+what's done so far; a further entry will record the pipeline rerun and
+final disposition.
+
+## 2026-08-02 (cont'd) — Issue 53: pipeline fixture rerun complete, AC3/AC4 closed out
+
+**Handoff context.** The interim disposition above was stashed pending GPU
+availability, then partially reconciled into the tree by a follow-up
+session that also attempted this pipeline rerun — but that attempt died
+mid-model-load (crashed after 36 log lines, no `.tsv` produced), leaving a
+stale `gpu.lock` (held by a dead PID) and `dev-vllm` stopped. Diagnosed and
+recovered in a live human-paired session: confirmed the lock holder
+process was gone and all 4 GPUs idle (`rocm-smi`, 58 MiB/32 GiB used) before
+manually clearing the stale lock (human-approved) and re-acquiring
+cleanly through `ralph_engine.py`.
+
+**Rerun.** Rebuilt `score_official` fresh (`make ROCM_ARCH=gfx1201
+rocm-quality`, no errors) against current HEAD (`b6a6df5`). Ran the
+100-case pipeline fixture (`AMD_SERIALIZE_KERNEL=3
+gguf-tools/quality-testing/score_official
+/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
+gguf-tools/quality-testing/data/flash/manifest.tsv
+quality-out/q_pipeline_53_v2.tsv 4096 --gpu-devices 0,1,2,3`), backgrounded
+via `nohup`/`disown` (not a bare foreground call) to avoid the
+foreground-timeout kill that likely caused the earlier crash, with a
+provenance header (HEAD SHA, build command, binary mtime, full invocation)
+written to `quality-out/q_pipeline_53_v2.log` before the run started. The
+run took ~3h20m end-to-end (much slower than a stale prior estimate of
+"~5 min" assumed — pipeline mode's strictly sequential 4-GPU-hop-per-token
+under forced kernel serialization is simply slow at this scale; not a
+hang, confirmed via steady per-case progress throughout).
+
+**Result: all 100 cases completed cleanly, exit 0.** `summary` line:
+`avg_nll=0.371050003` (token-weighted: `sum(nll)/sum(target_tokens)`,
+verified by hand-computing the same ratio from the raw per-case columns —
+matches exactly). This is **inside the PRD bar (0.369-0.378)** and
+consistent with the existing (previously-uncitable, no-provenance)
+`quality-out/q_pipeline_53.log` figure of `avg_nll=0.371` — no meaningful
+divergence between the two runs, which is the expected sanity-check
+outcome for a fixture re-run against an unchanged code path.
+
+**Disposition (final).** AC1 (code), AC2 (throughput measurement, no
+detectable overlap win — matches this issue's own prediction), and AC3's
+pipeline half (this entry, `avg_nll=0.371050003`, in-bar) are all
+satisfied. AC3's TP=4 half remains formally deferred to `#63` (tracked
+there against `#64`, human-approved 2026-08-02, 7/9-consultant-panel
+disposition) rather than duplicated here. AC4 (findings recorded) is
+satisfied by this entry plus the earlier 2026-08-02 entry. Issue #53
+closed.
+
 
