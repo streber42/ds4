@@ -2504,3 +2504,21 @@ per-token shift not episodic) both point at VRAM-headroom/precision-
 fallback territory (`#59`/`#65`), not a race. `#65` remains open to carry
 that thread forward. GPU lock released. Issue closed.
 
+
+## 2026-08-02 — Issue 63: TP=4 quality fixture re-run execution & findings
+
+**Goal:** Re-run the full 100-case quality fixture (`score_official`) on the TP=4 path against HEAD with `8a8f82a` as an ancestor using `AMD_SERIALIZE_KERNEL=3`.
+
+**Execution & Findings:**
+- Built `score_official` fresh via `make ROCM_ARCH=gfx1201 rocm-quality`.
+- Ran unit & kernel tests via `make -j8 test-rocm`: 100% clean pass across all 4 ROCm test targets (`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`, `test_engine_rocm_tp_refusal`).
+- Executed `score_official` on 4× AMD R9700 GPUs with `AMD_SERIALIZE_KERNEL=3 --gpu-devices 0,1,2,3 --cuda-tensor-parallel`.
+- **Quality Fixture Result:**
+  - `case_000`: `avg_nll = 16.321227` (PRD target bar is `0.370–0.378`; ~44× worse than pipeline baseline).
+  - `case_001`: Crashed with `ds4: ROCm prefill fallback copy failed for moe_down at 128.00/672.00 MiB: invalid argument` -> `gpu layer 0 ffn batch encode failed` -> `case_001 sync failed: rocm prefill failed`.
+- **Log Warning Counts:**
+  - `q8 fp16 cache budget exhausted`: 44 occurrences in the 2-case attempt.
+  - `arena alloc failed`: 0 occurrences.
+- **Disposition:** Verification failed due to deterministic prefill fallback crash on `case_001` (structural VRAM headroom / fallback copy failure tracked under `#65`) and severe quality regression (`avg_nll = 16.32`). Issue updated to `Status: ready-for-human`.
+
+

@@ -1,6 +1,6 @@
 # 63 — Re-run the TP=4 quality fixture against #57's counter-hoist fix once #59 lands
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -45,13 +45,22 @@ HEAD, whether or not this issue has run yet.
       vs. episodic race have different bucket signatures)
 - [ ] Count `q8 fp16 cache budget exhausted` and `arena alloc failed`
       occurrences in the log
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
 
 ## Blocked by
 
 *(nothing — see 2026-08-02 comment)*
 
 ## Comments
+
+**2026-08-02 — Verification attempt failed; Status: ready-for-human.**
+Attempted `score_official` execution in TP=4 mode with `AMD_SERIALIZE_KERNEL=3 --gpu-devices 0,1,2,3 --cuda-tensor-parallel`:
+- `make -j8 test-rocm` passed 100% (4/4 test binaries green).
+- `case_000` completed with `avg_nll = 16.321227` (PRD bar: 0.370-0.378; ~44x worse than pipeline baseline).
+- `case_001` crashed deterministically: `ds4: ROCm prefill fallback copy failed for moe_down at 128.00/672.00 MiB: invalid argument` -> `gpu layer 0 ffn batch encode failed` -> `case_001 sync failed: rocm prefill failed`.
+- Log warning counts: 44 `q8 fp16 cache budget exhausted` warnings; 0 `arena alloc failed` warnings.
+- Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`.
+- Requires structural VRAM headroom / fallback fix (tracked in `#65`) and TP=4 quality divergence resolution before a full 100-case run can complete cleanly.
 
 **2026-08-02 — Unblocked: #64 closed.** #64 closed with AC1 (zero `arena
 alloc failed` warnings, verified live twice against the production model)
@@ -79,3 +88,4 @@ for (`KNOWN_STATUSES` in `ralph_engine.py` doesn't include `open`), so this
 issue was invisible to `ralph unblocked`/agent dispatch despite having no
 real blockers left (#64 closed). No scope change — ACs are unchanged and
 already fully specified for an unattended agent run.
+
