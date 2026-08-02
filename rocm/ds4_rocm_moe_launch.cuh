@@ -731,10 +731,15 @@ static int routed_moe_launch(
             return 0;
         }
         if (!stream_full_layer) {
-            const int logical_tier = out ? out->device_id : 0;
-            gate_w = cuda_resolve_weight_ptr(model_map, gate_offset, gate_bytes, logical_tier, "moe_gate");
-            up_w = cuda_resolve_weight_ptr(model_map, up_offset, gate_bytes, logical_tier, "moe_up");
-            down_w = cuda_resolve_weight_ptr(model_map, down_offset, down_bytes, logical_tier, "moe_down");
+            /* Full unsharded 256-expert table, home-tier-only prefill
+             * fallback (issue #59): resolved via a bounded per-device
+             * 3-slot reusable buffer instead of the shared arena/range
+             * cache, so it doesn't accumulate a new VRAM chunk every
+             * layer for the process lifetime. See
+             * cuda_model_prefill_fallback_ptr in ds4_rocm_runtime.cuh. */
+            gate_w = cuda_model_prefill_fallback_ptr(g_moe_prefill_gate, model_map, gate_offset, gate_bytes, "moe_gate");
+            up_w = cuda_model_prefill_fallback_ptr(g_moe_prefill_up, model_map, up_offset, gate_bytes, "moe_up");
+            down_w = cuda_model_prefill_fallback_ptr(g_moe_prefill_down, model_map, down_offset, down_bytes, "moe_down");
         }
     }
     if (batch_stream_selected || batch_stream_split_selected) {

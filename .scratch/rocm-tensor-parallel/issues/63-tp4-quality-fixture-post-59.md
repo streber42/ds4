@@ -49,11 +49,15 @@ HEAD, whether or not this issue has run yet.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
+`.scratch/rocm-tensor-parallel/issues/64-eliminate-remaining-tp4-arena-oom.md`
 
-(TP=4 cannot complete a 100-case run at all until #59's arena-OOM fix lands —
-see `#62`'s two prior attempts, one crash and one 44x-PRD-bar garbage run,
-both gated by the same deterministic `moe_down` allocation failure.)
+(TP=4 cannot complete a clean 100-case run until every `arena alloc failed`
+is gone, not just the `moe_down` one — see `#62`'s two prior attempts, one
+crash and one 44x-PRD-bar garbage run, both gated by that allocation
+failure. `#59` fixed the specific `moe_down`/layer-0 instance and measurably
+improved things, but one `arena alloc failed` still occurs later in the run
+(`q8_0`, near the last tensor) — see `#59`'s final comment. `#64` carries
+the residual.)
 
 ## Comments
 
@@ -63,3 +67,9 @@ fix (itself pending a human decision, per `#59`'s Comments) landed. Rather
 than leave `#57` open indefinitely for a measurement it cannot influence,
 the human chose to close `#57` on its four satisfied ACs (AC1/AC2/AC4/AC5)
 and track the deferred TP=4 fixture run here.
+
+**2026-08-02 — Re-pointed from #59 to #64.** #59 closed with a real,
+measured improvement but did not eliminate the arena-alloc-failed warnings
+entirely (see #59's final comment and the 2026-08-02 experiment-log entry).
+This issue still needs a fully clean TP=4 initialization to produce a
+trustworthy 100-case run, so it stays blocked, now on #64.

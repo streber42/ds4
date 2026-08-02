@@ -36,12 +36,20 @@ cached VRAM pointers.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
+`.scratch/rocm-tensor-parallel/issues/64-eliminate-remaining-tp4-arena-oom.md`
 
 ## Comments
 
 **2026-08-01 — #62's HEAD re-measurement disposition: stay blocked, re-pointed
 at #59.** (Human: proceed straight to #59, no further TP=4 retries on #62.)
+
+**2026-08-02 — Re-pointed from #59 to #64.** #59 closed with a real,
+measured improvement (bounded the MoE prefill fallback's VRAM growth,
+moved the arena OOM from layer-0 to the last tensor) but did not eliminate
+the arena failure entirely — see #59's final comment. This issue still
+needs a TP=4 config that initializes with zero `arena alloc failed`
+warnings before its race-hypothesis experiment means anything, so it stays
+blocked, now on #64 (opened to carry the residual).
 
 `#62` re-ran the fixture on HEAD (post-`1fe4829`/`0cb9cf3`) and found neither
 of the outcomes anyone expected. Two TP=4 attempts, both hitting `arena alloc

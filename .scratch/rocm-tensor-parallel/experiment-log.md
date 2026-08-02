@@ -1935,3 +1935,73 @@ before returning to the human for AC1 sign-off. Combined with `make -j8
 test-rocm` passing on the final version, this is the evidence being
 presented for that sign-off — not a substitute for it, per the issue's own
 requirement that AC1's actual sign-off has to come from a human.
+
+## 2026-08-02 — #59 candidate-1 fix: bounded prefill-fallback buffer moves the arena OOM from `moe_down`/layer 0 to `q8_0`/layer 42, doesn't eliminate it
+
+**What changed.** `ds4_rocm_moe_launch.cuh:730-732`'s three
+`cuda_resolve_weight_ptr(..., "moe_gate"/"moe_up"/"moe_down")` calls — the
+ROCm TP=4 batch-prefill home-tier fallback that promotes each layer's full
+unsharded 256-expert gate/up/down table into VRAM — now go through a new
+`cuda_model_prefill_fallback_ptr` (`ds4_rocm_runtime.cuh`, added next to
+`cuda_model_arena_alloc`). It's a fixed 3-slot (one each for gate/up/down),
+per-device (`DS4_MAX_GPUS`-indexed) buffer that reuses in place on a cache
+hit (same model_map/offset/bytes) and otherwise frees-then-reallocs before
+copying fresh bytes from the mmap'd model image — the same source data the
+path it replaces used, just without accumulating in the shared
+`g_model_arenas` bump allocator. This is the audit's "candidate 1" from the
+2026-08-01 entry above, implemented per human disposition to do it directly
+in `#59` rather than defer to a new issue.
+
+**Method.** Live run, `ds4 --rocm --gpu-devices 0,1,2,3
+--cuda-tensor-parallel -m <prod model> -p "The capital of France is" -n 20`,
+`DS4_ROCM_WEIGHT_PATH_STATS=1`, GPU-locked, `dev-vllm` stopped. Compared
+against the 2026-08-01 audit's baseline numbers for the same failure mode
+(HEAD `185a2ae`, unmodified).
+
+| | before | after |
+|---|---|---|
+| first `arena alloc failed` | `moe_down`, before any layer completes (same tensor, deterministic across 2 runs) | `q8_0`, at offset 80.24 GiB of an 80.76 GiB model (i.e. after the last layer) |
+| arena-full skip / host-register count | 1212 / 1213 | 1601 arena-full skips (same cascade shape, later onset) |
+| MoE fallback growth | unbounded, ~1.6-1.7 GiB/layer, `g_model_arenas` never shrinks | bounded: 129 `prefill-fallback reload` events = 43 layers × 3 tensors exactly, 3 buffers reused throughout |
+
+**Reading.** The fix does what it was scoped to do: the specific `moe_down`
+OOM this issue was opened to chase is gone, and TP=4 now gets through the
+entire 43-layer model's prefill before any arena allocation fails. It does
+**not** fully satisfy AC3 — one `arena alloc failed` still fires (now for
+`q8_0`, the tensor nearest the very end of the model), and
+`g_model_cache_full` (`ds4_rocm_runtime.cuh:5749`, latched at `:5785`, never
+reset short of full teardown) still turns that single failure into the same
+shape of session-long PCIe-fallback cascade — just delayed almost to the end
+of the model instead of triggered at layer 0. Remaining live headroom is
+~0.9 GiB (`q8 fp16 cache budget exhausted` lines report `free=0.90 GiB`
+consistently through the run), thin enough that essentially any tenant's
+next allocation could be the one that trips it.
+
+**Invalid instrument, noted so it isn't repeated.** Judging output
+coherence via greedy generation on a raw, non-chat-templated `-p` prompt
+without `AMD_SERIALIZE_KERNEL=3` does not work as a quality check for
+*either* config — pipeline mode was run as a control on the identical
+command and produced equally garbled output. This matches `#58`'s
+already-documented pre-serialization dispatch race and is not evidence the
+patch regressed anything. No quality/NLL claim is made by this entry either
+way; that instrument is `score_official`, which belongs to `#63`.
+
+**Also tried, reverted.** An explicit `cudaDeviceSynchronize()` immediately
+before the new buffer's overwrite, to check for a stream-ordering hazard
+between one layer's kernels still reading the slot and the next layer's
+`cudaMemcpy` starting to overwrite it. Ran the serialized (`AMD_SERIALIZE_
+KERNEL=3`) command twice with and without the sync — arena-failure
+count/position were identical in all cases, so the sync was a no-op probe,
+not a fix, and wasn't shipped.
+
+**Verification.** `make -j8 rocm && make -j8 rocm-quality && make -j8
+test-rocm` all pass against the patched tree (all suites, including
+`test_rocm_xdev`'s cross-device transfer tests and `test_rocm_kernel_
+compare`'s numerical kernel checks — not a clean-tree baseline).
+
+**Disposition.** `#59` closes on AC1/AC4/AC5 with AC3 materially improved
+but not literally satisfied (one `arena alloc failed` remains, moved from
+first-layer to last-tensor). Residual — the `q8_0`-class failure, the ~0.9
+GiB structural headroom, and the `g_model_cache_full` permanent-latch design
+— split to `#64`. `#58`/`#63` re-pointed from `Blocked by #59` to `Blocked
+by #64`.

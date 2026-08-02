@@ -83,6 +83,30 @@ struct cuda_model_arena {
     uint64_t used;
 };
 
+/* Dedicated, per-device, single-slot reusable buffer for the ROCm TP=4
+ * batch-prefill MoE fallback (issue #59): each layer's full unsharded
+ * gate/up/down expert table (~0.5-0.6 GiB each) is only ever read once, by
+ * the home tier, during that layer's prefill pass, then never touched
+ * again -- but resolving it through the shared g_model_arenas bump
+ * allocator (cuda_model_arena_alloc) permanently consumed a fresh ~1 GiB+
+ * chunk per layer with no free path, exhausting VRAM headroom by ~layer 15
+ * of 43 (`ds4: ROCm model arena alloc failed for moe_down ... out of
+ * memory`). Keeping gate/up/down in their own fixed 3-slot pool (reload
+ * in place on offset change) bounds this path to a small constant instead
+ * of accumulating for the process lifetime, without touching the shared
+ * arena/range cache other callers (compressor_ape, rms_weight, q8_0, f16,
+ * f16_pair0/1) depend on. */
+struct cuda_moe_prefill_slot {
+    const void *model_map;
+    uint64_t offset;
+    uint64_t bytes;
+    char *device_ptr;
+    uint64_t capacity;
+};
+static cuda_moe_prefill_slot g_moe_prefill_gate[DS4_MAX_GPUS];
+static cuda_moe_prefill_slot g_moe_prefill_up[DS4_MAX_GPUS];
+static cuda_moe_prefill_slot g_moe_prefill_down[DS4_MAX_GPUS];
+
 struct cuda_model_image {
     const void *host_base;
     uint64_t size;
@@ -6036,6 +6060,80 @@ static const char *cuda_model_range_ptr_from_fd(
     g_model_range_bytes += bytes;
     cuda_model_load_progress_note(g_model_range_bytes);
     return (const char *)dev;
+}
+
+/* See cuda_moe_prefill_slot above.  Copies model_map+offset..+bytes into a
+ * per-device reusable buffer instead of the shared arena/range cache.  Same
+ * source bytes as the path it replaces (a direct host-memory read), so the
+ * data delivered to the MoE kernels is unchanged -- only the backing
+ * allocation's lifetime is bounded. */
+static const char *cuda_model_prefill_fallback_ptr(cuda_moe_prefill_slot *slots,
+                                                     const void *model_map,
+                                                     uint64_t offset,
+                                                     uint64_t bytes,
+                                                     const char *what) {
+    if (bytes == 0) return cuda_model_ptr(model_map, offset);
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= DS4_MAX_GPUS) dev = 0;
+    cuda_moe_prefill_slot &s = slots[dev];
+
+    if (s.device_ptr && s.model_map == model_map && s.offset == offset && s.bytes == bytes) {
+        return s.device_ptr;
+    }
+
+    if (s.capacity < bytes) {
+        if (s.device_ptr) {
+            (void)cudaFree(s.device_ptr);
+            s.device_ptr = NULL;
+            s.capacity = 0;
+        }
+        void *dev_ptr = NULL;
+        cudaError_t err = cudaMalloc(&dev_ptr, (size_t)bytes);
+        if (err != cudaSuccess) {
+            fprintf(stderr, DS4_GPU_LOG_PREFIX "prefill fallback alloc failed for %s (%.2f MiB): %s\n",
+                    what ? what : "weights", (double)bytes / 1048576.0, cudaGetErrorString(err));
+            (void)cudaGetLastError();
+            s.model_map = NULL;
+            s.offset = 0;
+            s.bytes = 0;
+            return NULL;
+        }
+        s.device_ptr = (char *)dev_ptr;
+        s.capacity = bytes;
+    }
+
+    const char *src = (const char *)model_map + offset;
+    const uint64_t chunk = 64ull * 1024ull * 1024ull;
+    for (uint64_t done = 0; done < bytes; done += chunk) {
+        const uint64_t n = bytes - done < chunk ? bytes - done : chunk;
+        cudaError_t err = cudaMemcpy(s.device_ptr + done, src + done, (size_t)n, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            fprintf(stderr, DS4_GPU_LOG_PREFIX "prefill fallback copy failed for %s at %.2f/%.2f MiB: %s\n",
+                    what ? what : "weights", (double)done / 1048576.0, (double)bytes / 1048576.0,
+                    cudaGetErrorString(err));
+            (void)cudaGetLastError();
+            s.model_map = NULL;
+            s.offset = 0;
+            s.bytes = 0;
+            return NULL;
+        }
+    }
+    cuda_model_drop_file_pages(offset, bytes);
+    cuda_model_discard_source_pages(model_map, g_model_registered_size, offset, bytes);
+
+    s.model_map = model_map;
+    s.offset = offset;
+    s.bytes = bytes;
+
+    if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
+        static uint64_t loaded = 0;
+        loaded++;
+        fprintf(stderr, DS4_GPU_LOG_PREFIX "prefill-fallback reload #%llu dev=%d for %s "
+                "(%.2f MiB, offset=%.2f GiB)\n",
+                (unsigned long long)loaded, dev, what ? what : "weights",
+                (double)bytes / 1048576.0, (double)offset / 1073741824.0);
+    }
+    return s.device_ptr;
 }
 
 static int cuda_model_copy_chunked(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size) {
