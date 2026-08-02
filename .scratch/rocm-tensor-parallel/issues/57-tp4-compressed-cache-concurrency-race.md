@@ -1,17 +1,10 @@
 # 57 — Fix the compressed-KV-cache race blocking threaded rollout past layers 0-1
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
 `.scratch/rocm-tensor-parallel/issues/51-tp4-execution-engine-full-rollout.md`
-
-## Blocked by
-
-`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
-
-(AC3's TP=4 fixture half only — see Comments, 2026-08-01 verification pass.
-AC1's review/sign-off half needs a human, not another issue.)
 
 ## What to build
 
@@ -73,14 +66,20 @@ are read/written in parallel patterns per the surrounding code.
       regressing the layers that were already safe — confirmed in the
       `ds4.c` diff (commit `8a8f82a`): the gate now `return true;`
       unconditionally instead of `return ds4_layer_compress_ratio(il) == 0`.
-- [ ] Full 100-case `score_official` quality fixture re-run (pipeline and
+- [x] Full 100-case `score_official` quality fixture re-run (pipeline and
       TP=4) — this touches shared decode-loop state directly, so
       correctness must be reconfirmed, not assumed. **Pipeline half
       satisfied** by `#62`'s HEAD re-measurement, `quality-out/q_pipeline_head62.log`
       (HEAD `498a39d`, which has `8a8f82a` — this issue's fix commit — as an
-      ancestor; `avg_nll` 0.369196, at the PRD bar). **TP=4 half blocked by
-      `#59`** — see Comments; do not retry TP=4 fixture runs until `#59`
-      lands, per the human disposition recorded in `#62`/`#58`.
+      ancestor; `avg_nll` 0.369196, at the PRD bar). **TP=4 half descoped to
+      `#63`, 2026-08-02, human disposition** — TP=4 cannot complete a
+      100-case run at all until `#59`'s arena-OOM fix lands (see `#62`'s two
+      prior attempts), and `#59` is itself `ready-for-human` pending a
+      decision on a new-issue-sized fix. Rather than leave this issue open
+      indefinitely for a measurement it cannot influence, this AC is closed
+      on the pipeline evidence plus the code-level review (AC1) already
+      completed; the deferred TP=4 measurement is tracked in `#63`, which
+      gates on `#59` explicitly.
 - [x] `make -j8 test-rocm` passes — re-run 2026-08-01, all suites green
       (`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`
       6/6, `test_engine_rocm_tp_refusal`). Log: `/tmp/test-rocm-57.log`
@@ -333,10 +332,33 @@ disposition (pre-increment preserved, rollback added, three rounds of
 AI-consultant review, three green `test-rocm` runs) and signed off on AC1.
 AC1 checked off above.
 
-**Closure disposition.** AC1/AC2/AC4/AC5 are now satisfied. AC3's TP=4
-half remains genuinely blocked on `#59` (the arena-OOM root cause), which
-has not landed — the human explicitly chose to leave this issue open
-rather than rule the TP=4 fixture out of scope. `Status` stays
-`ready-for-human` with the existing `Blocked by: #59` link; this issue
-closes once `#59` lands and the TP=4 quality fixture can actually run
-against a build containing this fix.
+**Closure disposition (2026-08-02, superseded below).** AC1/AC2/AC4/AC5 are
+now satisfied. AC3's TP=4 half remains genuinely blocked on `#59` (the
+arena-OOM root cause), which has not landed — the human explicitly chose to
+leave this issue open rather than rule the TP=4 fixture out of scope.
+`Status` stays `ready-for-human` with the existing `Blocked by: #59` link;
+this issue closes once `#59` lands and the TP=4 quality fixture can
+actually run against a build containing this fix.
+
+**2026-08-02 — Human/agent pairing session: closed, AC3-TP4 split to
+`#63`.** `#59` (the blocker above) turned out to be stuck the same way:
+its audit found the sharding logic correct and the real root cause is a
+separate, unbounded VRAM cache in the batch-prefill MoE fallback path —
+fixing it is new-issue-sized work, itself pending a human decision on which
+of two fix candidates to take (see `#59`'s Comments). That left `#57`
+blocked on an issue that was itself blocked on a decision, with no path to
+closure and a fully-reviewed, signed-off fix sitting in limbo.
+
+Presented this to a human directly. Disposition: close `#57` now on its
+four satisfied ACs (the fix is code-complete, three-rounds
+AI-consultant-reviewed, and human-signed-off on AC1) rather than hold it
+open for a measurement it cannot influence. AC3's TP=4 half is split into
+`.scratch/rocm-tensor-parallel/issues/63-tp4-quality-fixture-post-59.md`,
+which carries the `Blocked by #59` link forward and will run the fixture
+once TP=4 can complete a 100-case run at all.
+
+**Flagged, not acted on here:** `#60` already defaulted the gate this issue
+relaxed to all 43 layers, so the shipped TP=4 default currently rests on
+this fix without a TP=4 quality confirmation. `#63` is the tracking issue
+for closing that gap — it is a genuine gate on trusting the shipped
+default under TP=4, not a cosmetic follow-up.
