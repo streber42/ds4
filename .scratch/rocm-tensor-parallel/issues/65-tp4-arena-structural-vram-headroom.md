@@ -1,6 +1,6 @@
 # 65 — Recover structural VRAM headroom so arena tenants stop falling back to PCIe host-register
 
-Status: open
+Status: ready-for-agent
 
 ## Parent
 
@@ -97,3 +97,11 @@ chunk-shrinking attempt as evidence this class of change is easy to get
 wrong. This issue exists so that work isn't lost and isn't blocking `#64`'s
 closure or downstream issues (`#58`, `#63`) that only need AC1 (zero `arena
 alloc failed`), which `#64` already delivers.
+
+**2026-08-02 — Status normalized to `ready-for-agent`.** Was `Status: open`,
+a non-canonical value the ralph engine parser falls back to `ready-for-human`
+for, so this issue was invisible to `ralph unblocked`/agent dispatch. #64 is
+closed (the panel's stated precondition), so the block on attempting further
+arena changes no longer applies. No scope change — an agent picking this up
+should read the reverted-attempt note above before touching
+`cuda_model_arena_chunk_bytes` or related sizing logic.

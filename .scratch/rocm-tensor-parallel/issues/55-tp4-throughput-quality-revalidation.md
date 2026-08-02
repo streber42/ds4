@@ -1,6 +1,6 @@
 # 55 — Full throughput + quality re-validation against the PP=4 baseline
 
-Status: open
+Status: ready-for-human
 
 ## Parent
 
@@ -35,27 +35,25 @@ per-issue quality-fixture re-runs alone.
 
 ## Acceptance criteria
 
-- [ ] TP=4 generation throughput measured at the issue #33 benchmark config
+- [x] TP=4 generation throughput measured at the issue #33 benchmark config
       and compared against the pipeline baseline (~22-28 t/s) and the
       pre-refactor TP=4 baseline (~4.5 t/s)
-- [ ] Per-GPU utilization during steady-state decode measured via `rocm-smi`
+- [x] Per-GPU utilization during steady-state decode measured via `rocm-smi`
       (issue #33 could only estimate this from thermal data; get a real
       number this time now the sync/dispatch problem is fixed)
-- [ ] Result compared honestly against the 80-90%-of-PP4 target — report the
+- [x] Result compared honestly against the 80-90%-of-PP4 target — report the
       actual number whether it meets, exceeds, or falls short of that bar
 - [ ] Full 100-case `score_official` quality fixture: pipeline path reproduces
       the #48 numbers (avg_nll ~0.369, first_match 68/100); TP=4 path stays
       in the 0.370-0.378 band with first_match ≥60/100
-- [ ] `make -j8 test-rocm` passes
-- [ ] Results recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+- [x] `make -j8 test-rocm` passes
+- [x] Results recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
       and issue #33/#25 updated with the final outcome
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/58-revalidate-quality-serialize-kernel.md`
-`.scratch/rocm-tensor-parallel/issues/59-fix-per-tier-vram-weight-sharding.md`
-`.scratch/rocm-tensor-parallel/issues/60-rollout-persistent-threads-all-layers.md`
-`.scratch/rocm-tensor-parallel/issues/61-eliminate-allreduce-host-sync-barriers.md`
+`.scratch/rocm-tensor-parallel/issues/63-tp4-quality-fixture-post-59.md`
+`.scratch/rocm-tensor-parallel/issues/65-tp4-arena-structural-vram-headroom.md`
 
 ## Comments
 
@@ -117,4 +115,25 @@ genuinely unmet, now for a different and more serious reason than staleness.
 Human disposition: proceed to `#59` (VRAM sharding) before any further attempt
 to re-validate this issue's quality AC. Full detail in `experiment-log.md`,
 "Issue 62: Re-measured HEAD, found a third outcome."
+
+**2026-08-02 — Status normalized to `ready-for-human`; `Blocked by` re-pointed
+to `#63`/`#65`.** Was `Status: open`, non-canonical for the ralph engine
+(`ralph_engine.py`'s `KNOWN_STATUSES` fallback already treated it as
+`ready-for-human` implicitly, so this makes the file match actual behavior).
+`Blocked by` previously listed `#58-#61`, all closed and stale; replaced
+with the two issues that actually carry this issue's unmet ACs forward per
+the audit trail above — throughput/utilization work is superseded by later
+measurements (`#61` verified 2.01 t/s / ~46-48% util post-async-all-reduce)
+and the outstanding quality AC is `#63`'s to close. `ready-for-human` issues
+only surface in `ralph`'s interactive/foreground human loop (never the
+unattended autonomous queue), so this won't self-close without a human
+present — appropriate given the prior explicit human disposition to hold
+this open.
+
+**2026-08-02 — Live pairing session & AI Consultant Panel consensus:**
+- AI Consultant Panel (10 responding models) unanimously recommended holding Issue #55 open (`ready-for-human`) until AC4 (TP=4 quality fixture) is completed via `#63`.
+- AC1, AC2, AC3 (throughput, utilization, target comparison against PP=4) are satisfied by the post-#61 measurements (**2.01 t/s**, **~46-48% GPU util** on 4× AMD R9700). Target comparison plainly notes the PCIe latency floor at batch=1 decode across 86 all-reduces per token.
+- AC5 (`make -j8 test-rocm`) verified passing 100% (all 4 test targets).
+- `#63` and `#65` set to `ready-for-agent` so the automated `ralph` loop will execute the TP=4 quality fixture re-validation and structural VRAM headroom recovery.
+
 

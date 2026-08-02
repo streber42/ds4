@@ -1,6 +1,6 @@
 # 63 — Re-run the TP=4 quality fixture against #57's counter-hoist fix once #59 lands
 
-Status: open
+Status: ready-for-agent
 
 ## Parent
 
@@ -72,3 +72,10 @@ measured improvement but did not eliminate the arena-alloc-failed warnings
 entirely (see #59's final comment and the 2026-08-02 experiment-log entry).
 This issue still needs a fully clean TP=4 initialization to produce a
 trustworthy 100-case run, so it stays blocked, now on #64.
+
+**2026-08-02 — Status normalized to `ready-for-agent`.** Was `Status: open`,
+a non-canonical value the ralph engine parser falls back to `ready-for-human`
+for (`KNOWN_STATUSES` in `ralph_engine.py` doesn't include `open`), so this
+issue was invisible to `ralph unblocked`/agent dispatch despite having no
+real blockers left (#64 closed). No scope change — ACs are unchanged and
+already fully specified for an unattended agent run.
