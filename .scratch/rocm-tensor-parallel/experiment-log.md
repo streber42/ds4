@@ -2463,4 +2463,44 @@ not restore quality — falsified) and AC3 (`g_use_host_weights` audited,
 change) are genuinely done and verifiable independent of the pipeline
 run. AC1 and AC4 are incomplete pending the points above.
 
+## 2026-08-02 (cont'd) — Issue 58: closed. Pipeline arm finished, human sign-off on TP=4 scope, `test-rocm` clean
+
+**Human sign-off obtained (live pairing session), cited explicitly.** Asked
+directly whether the 5-case TP=4 smoke test (`avg_nll=15.6` vs pipeline's
+`0.42` on the identical case, then a crash on `case_001` in
+`#65`-territory VRAM-headroom code, unrelated to this issue's compressor-
+race premise) is sufficient for AC1's TP=4 arm, or whether this issue
+should stay blocked until a full 100-case TP=4 run is possible. Human
+chose: accept the smoke test — the result is already categorically
+unambiguous (37x off is not a borderline call more samples could flip),
+and completing further cases is blocked by a different, out-of-scope bug.
+Debugging that crash belongs to `#65` or a follow-up, not this issue.
+
+**AC1 — pipeline arm: complete.** `quality-out/q_pipeline_58_full.tsv`
+(PID `3866308`, started 17:26:30, finished ~18:5x UTC) ran all 100 cases
+clean: `summary cases=100 tokens=2289 avg_nll=0.371050003 first_match=66
+avg_lcp=6.310`. Bit-for-bit identical to `q_pipeline_53_v2.tsv`
+(HEAD `b6a6df5`) as predicted — `#64` did not perturb the pipeline path.
+Squarely in the PRD band (~0.369-0.378).
+
+**AC1 — TP=4 arm: accepted via smoke test per human sign-off above,**
+not a full 100-case run. See `quality-out/q_tp4_58_smoke5.tsv`/`.log`.
+
+**AC4 — `make -j8 test-rocm`: passes clean.** Run after `gpu-release` on
+the pipeline PID and re-`gpu-acquire`. Exit code 0, no failures across
+`test_rocm_xdev` (cross-device transfer, all-reduce, transport probe),
+`test_rocm_kernel_compare` (6/6 kernel comparisons), and
+`test_engine_rocm_tp_refusal` (rank-count/model-shape refusal checks).
+
+**AC5 — findings recorded.** This entry plus the prior three sessions'
+entries above constitute the full record.
+
+**Final disposition.** `#58`'s original premise (serialization would
+isolate the TP=4 quality gap to `#23`'s compressor-prefill race) is
+**falsified** — conclusively, not just for the untested cases. The TP=4
+quality gap remains unexplained by that hypothesis; the crash evidence and
+the pre-existing distribution-shape analysis (2026-08-01 entry, uniform
+per-token shift not episodic) both point at VRAM-headroom/precision-
+fallback territory (`#59`/`#65`), not a race. `#65` remains open to carry
+that thread forward. GPU lock released. Issue closed.
 

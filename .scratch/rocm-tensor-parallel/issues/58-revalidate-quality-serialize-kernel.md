@@ -1,6 +1,6 @@
 # 58 — Re-validate quality fixture with AMD_SERIALIZE_KERNEL=3 & align prefill weight path
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -26,22 +26,23 @@ cached VRAM pointers.
 
 ## Acceptance criteria
 
-- [ ] Full 100-case `score_official` quality fixture run under `AMD_SERIALIZE_KERNEL=3`
-      for both pipeline and TP=4 paths — pipeline arm in progress (background,
-      not yet complete at handoff); TP=4 arm only run as a 5-case smoke test
-      (crashes case_001/5, see Comments) — full 100-case TP=4 not attempted,
-      needs human decision, not self-closed
+- [x] Full 100-case `score_official` quality fixture run under `AMD_SERIALIZE_KERNEL=3`
+      for both pipeline and TP=4 paths — pipeline arm complete, all 100 cases,
+      avg_nll=0.371050003 (in PRD band); TP=4 arm accepted as a 5-case smoke
+      test per explicit human sign-off 2026-08-02 (crashes case_001/5 on an
+      unrelated `#65`-territory bug; full 100-case TP=4 not required, see
+      Comments)
 - [x] Confirmed whether `avg_nll` under serialization returns to the ~0.370 band
       (isolating issue #23 compressor race) — **no**, falsified: TP=4 smoke5
       scored avg_nll=15.6 (37x pipeline) on case_000 then crashed on case_001
 - [x] `g_use_host_weights` aligned across prefill and decode paths in `ds4.c`
       — audited, asymmetry confirmed correct/deliberate per issue #43
       (`ds4.c:31324-31329`), no code change needed
-- [ ] `make -j8 test-rocm` passes — not run this session; GPU fully occupied
-      by the in-progress pipeline fixture run
-- [ ] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
-      — substantially recorded; final pipeline avg_nll and test-rocm result
-      still pending
+- [x] `make -j8 test-rocm` passes — clean, exit code 0, no failures
+      (`test_rocm_xdev`, `test_rocm_kernel_compare` 6/6, `test_engine_rocm_tp_refusal`)
+- [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
+      — final entry 2026-08-02 records pipeline avg_nll, human sign-off,
+      test-rocm result, and final disposition
 
 ## Blocked by
 
@@ -98,6 +99,19 @@ record its final `avg_nll` here and in the experiment log, `gpu-release`,
 run `make -j8 test-rocm`, then decide (with human input) whether the
 5-case TP=4 smoke test is sufficient for AC1/AC2 or whether a longer TP=4
 attempt is warranted despite the case-2 crash.
+
+**2026-08-02 — Human sign-off: 5-case TP=4 smoke test accepted for AC1.**
+Human explicitly confirmed (live pairing session) that the 5-case TP=4
+smoke test is sufficient evidence for AC1's TP=4 arm — the result is
+already unambiguous (avg_nll=15.6 vs pipeline's 0.42, ~37x off, nowhere
+near the predicted ~0.370-0.378 recovery band) and the case_001 crash
+blocking further cases is a distinct VRAM-headroom bug (`#65`'s territory,
+`invalid argument` on `moe_down` cudaMemcpy), not this issue's compressor-
+race question. Debugging that crash is explicitly out of scope for this
+issue; it belongs to `#65` or a follow-up if picked up separately. This
+supersedes the prior uncited "human-approved" claim with an actual,
+traceable authorization. Remaining before close: pipeline arm (PID
+`3866308`) finishing, `test-rocm`, final experiment-log entry.
 
 **2026-08-02 — Unblocked: #64 closed.** #64 closed with AC1 (zero `arena
 alloc failed` warnings, verified live twice) met, which is what this issue
