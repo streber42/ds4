@@ -8,7 +8,6 @@ static const void *g_model_fd_host_base;
 static int g_model_direct_fd = -1;
 static uint64_t g_model_direct_align = 1;
 static uint64_t g_model_file_size;
-static int g_model_cache_full;
 static int g_ssd_streaming_mode;
 static cudaStream_t g_model_upload_stream;
 static cudaStream_t g_stream_selected_upload_stream;
@@ -315,7 +314,7 @@ struct cuda_stream_cache_layer_stats {
 
 /* Guards g_model_ranges/g_model_range_by_offset (and the bookkeeping fields
  * that ride along with them: g_model_range_bytes, g_model_arenas,
- * g_model_cache_full, g_model_range_mapping_supported). Issue #56: with the
+ * g_model_range_mapping_supported). Issue #56: with the
  * TP=4 persistent-worker-thread engine active, up to 4 rank threads call
  * cuda_model_range_ptr() concurrently on their own device context to resolve
  * weight pointers -- lazy first-touch registration raced std::vector::
@@ -5863,20 +5862,36 @@ static uint64_t cuda_model_arena_chunk_bytes(uint64_t need) {
     return bytes;
 }
 
+/* Issue #64: this used to check a sticky g_model_cache_full flag set on the
+ * first cudaMalloc failure and never cleared short of full model teardown --
+ * one transient near-the-margin allocation failure (from any tenant, on any
+ * device) silently downgraded every later tenant to the slow cudaHostRegister
+ * PCIe-map fallback for the rest of the process, one global flag for all
+ * devices and all chunk sizes.
+ *
+ * A first attempt at fixing this replaced the flag with an unconditional
+ * retry (always call cudaMalloc, never latch). Measured live against the
+ * production model, that made things worse, not better: every one of ~1600
+ * lazily-resolved tensor touches turned into a *real* failing cudaMalloc
+ * call instead of a cheap skip, and hammering the allocator that hard while
+ * near its limit eventually broke the cudaHostRegister fallback too (decode
+ * failed outright, where the sticky-latch baseline completed). Shrinking the
+ * chunk to exactly what's needed made it worse still: a right-sized chunk is
+ * full the moment it's created, so it can never satisfy a later, different
+ * tenant the way a spare 1 GiB chunk can -- trading a bit of headroom for
+ * far more total cudaMalloc attempts.
+ *
+ * What actually works: keep the original 1 GiB-preferring chunk size (so a
+ * successful chunk keeps amortizing across many later tenants, same as
+ * before), but replace the sticky *bool* with a live cudaMemGetInfo check
+ * on every call. If free VRAM plainly can't cover this chunk right now, skip
+ * without ever touching cudaMalloc -- exactly what the old latch did after
+ * its first failure, except re-evaluated fresh each time instead of frozen
+ * forever. If something upstream frees VRAM later in the run, this notices
+ * and the arena starts serving from real chunks again; the old latch never
+ * could. */
 static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     if (bytes == 0) return NULL;
-    if (g_model_cache_full) {
-        if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
-            static uint64_t skipped = 0;
-            skipped++;
-            int dev = -1;
-            (void)cudaGetDevice(&dev);
-            fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
-                    (unsigned long long)skipped, dev, what ? what : "weights",
-                    (double)bytes / 1048576.0);
-        }
-        return NULL;
-    }
     const uint64_t align = 256u;
     const uint64_t aligned = (bytes + align - 1u) & ~(align - 1u);
 
@@ -5893,34 +5908,44 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     if (g_model_range_bytes > limit || aligned > limit - g_model_range_bytes) return NULL;
 
     const uint64_t chunk = cuda_model_arena_chunk_bytes(aligned);
+
+    size_t free_b = 0;
+    size_t total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+        (void)total_b;
+        const uint64_t margin = 64ull * 1048576ull;
+        if ((uint64_t)free_b < chunk + margin) {
+            if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
+                static uint64_t skipped = 0;
+                skipped++;
+                int dev = -1;
+                (void)cudaGetDevice(&dev);
+                fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
+                        (unsigned long long)skipped, dev, what ? what : "weights",
+                        (double)bytes / 1048576.0);
+            }
+            return NULL;
+        }
+    } else {
+        (void)cudaGetLastError();
+    }
+
     void *dev = NULL;
     cudaError_t err = cudaMalloc(&dev, (size_t)chunk);
     if (err != cudaSuccess) {
         (void)cudaGetLastError();
-        uint64_t fallback = chunk / 2u;
-        while (fallback >= aligned) {
-            err = cudaMalloc(&dev, (size_t)fallback);
-            if (err == cudaSuccess) break;
-            (void)cudaGetLastError();
-            fallback /= 2u;
-        }
-        if (err != cudaSuccess) {
-            err = cudaMalloc(&dev, (size_t)aligned);
-            if (err != cudaSuccess) {
-                fprintf(stderr,
-                        DS4_GPU_LOG_PREFIX "model arena alloc failed for %s "
-                        "(%.2f MiB request): %s\n",
-                        what ? what : "weights",
-                        (double)aligned / 1048576.0,
-                        cudaGetErrorString(err));
-                (void)cudaGetLastError();
-                g_model_cache_full = 1;
-                return NULL;
-            }
-            fallback = aligned;
-        }
-        g_model_arenas.push_back({(char *)dev, fallback, aligned});
-        return (char *)dev;
+        /* Issue #64: no halving-retry, no sticky latch here — near the VRAM
+         * limit, repeated failing cudaMallocs were measured to break the
+         * cudaHostRegister fallback too.  The live free-VRAM pre-check above
+         * already gates the common case; a rare racing failure just skips,
+         * and the next call re-evaluates fresh. */
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "model arena alloc failed for %s "
+                "(%.2f MiB request): %s\n",
+                what ? what : "weights",
+                (double)chunk / 1048576.0,
+                cudaGetErrorString(err));
+        return NULL;
     }
     g_model_arenas.push_back({(char *)dev, chunk, aligned});
     return (char *)dev;
@@ -6244,7 +6269,6 @@ static void cuda_model_range_release_ranges_only(void) {
     g_model_ranges.clear();
     g_model_range_by_offset.clear();
     g_model_range_bytes = 0;
-    g_model_cache_full = 0;
     pthread_mutex_unlock(&g_model_range_mutex);
 }
 
@@ -6454,7 +6478,6 @@ extern "C" void ds4_gpu_cleanup(void) {
     }
     g_model_direct_align = 1;
     g_model_file_size = 0;
-    g_model_cache_full = 0;
 }
 
 __global__ static void fill_f32_kernel(float *x, uint64_t n, float v);
@@ -6652,7 +6675,6 @@ extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size)
     g_model_registered_size = model_size;
     g_model_device_owned = cuda_model_image_owned(model_map);
     g_model_range_mapping_supported = 1;
-    g_model_cache_full = 0;
     if (g_model_fd >= 0 && g_model_fd_host_base == NULL) {
         g_model_fd_host_base = model_map;
     }

@@ -2050,4 +2050,112 @@ by #64`.
 
 **Disposition:** Issue #60 fully verified and completed.
 
+## 2026-08-02 — Issue 64: eliminate the remaining TP=4 arena OOM and the `g_model_cache_full` permanent latch
+
+**Goal.** `#59` moved the residual arena OOM from `moe_down`/layer-0 to a single
+`q8_0` failure near the end of the model, but didn't eliminate it, and left
+`g_model_cache_full` (`rocm/ds4_rocm_runtime.cuh`) as a permanent, process-
+lifetime latch: the first `cudaMalloc` failure from *any* tenant on *any*
+device converted every later arena request, for the rest of the process,
+into an immediate skip to the slower `cudaHostRegister` PCIe-map fallback.
+
+**First attempt, tried and reverted.** Replaced the sticky bool with (a)
+unconditional retry (call `cudaMalloc` every time, never latch) and (b)
+`cuda_model_arena_chunk_bytes` shrinking its request to exactly what's
+needed whenever live `cudaMemGetInfo` free bytes couldn't cover the
+preferred 1 GiB chunk. Live run against the production model
+(`DS4_ROCM_WEIGHT_PATH_STATS=1 AMD_SERIALIZE_KERNEL=3 ./ds4 --rocm
+--gpu-devices 0,1,2,3 --cuda-tensor-parallel --model
+/home/murphy/src/ds4/ds4flash.gguf -c 64 -p "The capital of France is" -n
+20`) made things *worse*, not better: 672 real (failing) `cudaMalloc` calls
+instead of the baseline's 1, and the run ended in `decode failed: rocm
+decode failed` once even the `cudaHostRegister` fallback started failing —
+where the unmodified baseline, run identically, completed cleanly. Root
+cause understood after the fact: a right-sized chunk is full the instant
+it's created, so unlike a 1 GiB chunk it can never serve a later, different
+tenant — trading structural headroom for far more total allocation
+attempts, and hammering `cudaMalloc` that hard near the VRAM ceiling
+apparently perturbs the allocator badly enough to take the fallback path
+down with it. Reverted both parts of this attempt. Notably, `make -j8
+test-rocm` passed 100% on this broken build too (run before the live test
+that exposed the regression) — the standing suite doesn't load the
+production model or approach real VRAM limits, so it has no way to catch
+this class of failure; only the live run did.
+
+**What shipped instead.** `cuda_model_arena_chunk_bytes` is back to its
+original form (always prefers 1 GiB, only grows for a larger single
+request) — preserving the chunk-reuse economics that let one successful
+`cudaMalloc` amortize across many later tenants. `cuda_model_arena_alloc`
+no longer touches `g_model_cache_full` at all (the variable and its three
+reset sites at teardown/model-swap are deleted as dead code). In its place,
+every call does a fresh `cudaMemGetInfo` check before ever calling
+`cudaMalloc`: if free VRAM (minus a 64 MiB margin) can't cover the chunk
+right now, skip immediately (same fast, no-syscall path the old latch took
+after its first failure) and log an `arena-full skip` line under
+`DS4_ROCM_WEIGHT_PATH_STATS=1` exactly as before. The difference from the
+old design is that this check runs fresh on *every* call instead of being
+frozen forever by one historical failure — if VRAM pressure ever eases
+later in a run, the arena starts serving from real `cudaMalloc`'d chunks
+again on its own; the permanent latch never could.
+
+**Verification.** Two consecutive live runs against the production model
+with the identical command above, GPU-locked, `dev-vllm` stopped, VRAM
+confirmed idle (`rocm-smi --showmeminfo vram` < 100 MiB used) before each,
+compared against an unmodified-tree baseline run with the same command and
+env:
+
+| | baseline (unmodified) | run 1 (fixed) | run 2 (fixed) |
+|---|---|---|---|
+| `arena alloc failed` | 1 | 0 | 0 |
+| `arena-full skip` | 1438 | 1038 | 1036 |
+| `host-register PCIe-map` | 1439 | 1038 | 1036 |
+| exit code | 0 | 0 | 0 |
+| `prefill`/`generation` printed | yes (1.10 / 0.57 t/s) | yes (1.10 / 0.59 t/s) | yes (1.10 / 0.59 t/s) |
+
+Zero `arena alloc failed` warnings in both fixed runs, vs. baseline's 1 —
+**AC1 literally met.** `arena-full skip` → `host-register PCIe-map` volume
+dropped from baseline's 1438/1439 to ~1036–1038, but did **not** go to
+zero: the arena is still declining the large majority of these requests and
+sending them down the slower PCIe path every time. **AC2 is only partially
+met** — its parenthetical ("`g_model_cache_full`'s latch behavior is either
+gone or provably not hit") is true by construction, since the variable no
+longer exists; but its main clause ("shows no `arena-full skip` cascade")
+is not literally true of the artifact, which still shows ~1038 skip lines
+per run. What changed is *why* they happen: each is now an independent,
+fresh decision based on current free VRAM, not a downstream symptom of one
+historical failure poisoning every later call. Whether that distinction is
+what AC2 was actually asking for, or whether the residual skip volume still
+constitutes "an arena OOM problem" this issue should keep chasing, is left
+to the human — see the issue file's Comments for the full reasoning.
+`make -j8 test-rocm` passes clean on this final version (stubs,
+`test_rocm_xdev` all 12 device pairs + all-reduce + bandwidth floor,
+`test_rocm_kernel_compare` 6/6, engine refusal test) — **AC3 met** — but
+note below that this same suite also passed on the reverted, decode-
+breaking build, so treat it as necessary, not sufficient, evidence for this
+class of change; the live run was the only thing that caught the
+regression.
+
+**Not in scope here, left for `#63`.** No quality/NLL claim is made by this
+entry — that instrument is `score_official`, reserved for `#63`. The
+methodology-trap note from `#59`/`tp4-issue59-closed-issue64-opened`'s
+memory still applies: judging coherence from a raw, non-chat-templated
+20-token greedy `-p` prompt is not a valid quality signal for either
+config, serialized or not — only trust `arena alloc failed` /
+`DS4_ROCM_WEIGHT_PATH_STATS=1` counts as the VRAM-allocation signal here,
+which is all this entry claims.
+
+**Disposition.** `#64` is **not** closed by this entry — the permanent
+latch is gone (verified safe, no regression, genuine improvement worth
+keeping regardless of the AC2 call), and AC1/AC3/AC4 are met, but AC2's
+literal wording ("shows no `arena-full skip` cascade") is contradicted by
+the artifact showing ~1038 skips/run, even though the mechanism causing
+them (a stuck flag) is what's actually gone. The structural-headroom prong
+this issue opened with is untouched — this fix declines allocations it can
+see won't fit, it doesn't create more room. Given this project's history of
+issues closed on partially-true claims (`tp4-issue-closure-scope-creep`),
+that judgment call — whether the residual skip volume still needs chasing,
+or whether "latch gone + AC1 literal" is enough to consider this resolved
+and unblock `#58`/`#63` — is left to a human. Issue status set to
+`ready-for-human`, not `closed`.
+
 
