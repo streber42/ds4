@@ -27656,10 +27656,22 @@ static void metal_graph_tp4_spike_pool_shutdown(void) {
 }
 
 /* Whether layer il, in this process, should use the threaded spike path.
- * Issue #51: full rollout -- all 43 layers use the threaded path by
- * default. DS4_TP4_THREADED_LAYERS, if set, overrides the layer count
- * (0 disables the spike path entirely, for A/B and regression runs against
- * the pre-#50 sequential path, which stays byte-identical when disabled).
+ * Issue #66 (bisect of the TP=4 quality divergence across #49-#61):
+ * the persistent-thread full-token engine is numerically broken -- it reads
+ * peer partials (attn_out/shared_out_by_tier) from single per-tier buffers
+ * that every rank overwrites once per layer, while the async stream/event
+ * overlap lets a fast rank move past layer N and overwrite the buffer a
+ * lagging rank's all-reduce for layer N is still reading. The result is a
+ * systematic logit shift (case_000 avg_nll ~13-16 vs ~0.4 on the legacy
+ * path), with run-to-run variance typical of a race. Verified live on
+ * 4xR9700: DS4_TP4_THREADED_LAYERS=0 (legacy) = 0.398; default (threaded)
+ * = 13.24.
+ *
+ * The legacy sequential TP=4 path is byte-identical to pre-#50 behavior
+ * (proven at #48: avg_nll 0.377), so it is the default again.
+ * DS4_TP4_THREADED_LAYERS=N remains as a diagnostic switch to re-enable
+ * the threaded path for A/B and race debugging, but it is NOT the release
+ * path until the buffer-reuse race above is fixed.
  *
  * Issue #57 resolved the compressed-KV-cache race by having the orchestrator
  * update layer_n_comp[il] and layer_n_index_comp[il] once per layer before
@@ -27675,7 +27687,7 @@ static bool metal_graph_tp4_spike_layer_enabled(uint32_t il) {
             long v = strtol(e, NULL, 10);
             n_layers = (v > 0) ? (int)v : 0;
         } else {
-            n_layers = (int)DS4_N_LAYER;
+            n_layers = 0;
         }
     }
     if (n_layers <= 0 || il >= (uint32_t)n_layers) return false;
@@ -27762,6 +27774,9 @@ static bool metal_graph_encode_token_raw_swa(
 
     if (ok && g->rocm_tp4 && metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)) {
         /* Issue #53/#60: Overlap layer N+1 compute with layer N's all-reduce across all 43 layers.
+         * Issue #66: this whole-token threaded path is DISABLED by default (see
+         * metal_graph_tp4_spike_layer_enabled) pending a fix for the peer
+         * buffer-reuse race; it only runs under DS4_TP4_THREADED_LAYERS>0.
          * Pre-calculate compressed KV cache counters for all layers, then
          * dispatch the entire 43-layer token execution to persistent per-rank
          * worker threads. Each rank runs compute, all-reduce, and HC expand

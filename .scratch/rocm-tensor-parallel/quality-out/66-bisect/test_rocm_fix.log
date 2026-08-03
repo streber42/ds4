@@ -1,0 +1,966 @@
+/usr/bin/hipcc -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1151,gfx1201 -DDS4_ROCM_BUILD -I. -c -o tests/test_rocm_tp_stubs.o tests/test_rocm_tp_stubs.cu
+/usr/bin/hipcc -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1151,gfx1201 -I. -c -o tests/test_rocm_xdev.o tests/test_rocm_xdev.cu
+/usr/bin/hipcc -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1151,gfx1201 -DDS4_ROCM_BUILD -I. -c -o tests/test_rocm_kernel_compare.o tests/test_rocm_kernel_compare.cu
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -no-pie -I. -DDS4_ROCM_BUILD -o tests/test_engine_rocm_tp_refusal tests/test_engine_rocm_tp_refusal.c \
+	ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o \
+	ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o \
+	ds4_help.o ds4_gpu_args.o ds4_kvstore.o rax.o -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt -lstdc++ -lamdhip64
+/usr/bin/ld: cannot find ds4_help.o: No such file or directory
+/usr/bin/ld: cannot find ds4_kvstore.o: No such file or directory
+collect2: error: ld returned 1 exit status
+make: *** [Makefile:421: tests/test_engine_rocm_tp_refusal] Error 1
+make: *** Waiting for unfinished jobs....
+tests/test_rocm_xdev.cu:121:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  121 |         hipSetDevice(i);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:136:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  136 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:137:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  137 |             hipMemcpy(d_src[i], h_src, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:138:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  138 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:139:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  139 |             hipMemset(d_dst[j], 0, TEST_BUF_BYTES);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:147:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  147 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:148:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  148 |             hipMemcpy(h_dst, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:170:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  170 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:171:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  171 |             hipMemcpy(d_dst[j], h_a, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:172:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  172 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:173:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  173 |             hipMemcpy(d_src[i], h_b, TEST_BUF_BYtests/test_rocm_kernel_compare.cuT:E425S:,19 :h iwarning: pignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]M
+emcpyH  o425s | t T o D eivfi c(ew)_;d
+e      v| i            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~c
+e) hipFree(w_device);
+      |                   ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:181:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  181 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:182:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  182 |             hipMemcpy(h_res, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:187:76: warning: invalid conversion specifier 'k' [-Wformat-invalid-specifier]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                           ~^
+tests/test_rocm_kernel_compare.cu:576:23: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  576 |     if (sinks_device) hipFree(sinks_device);
+      |                       ^~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:188:29: warning: format specifies type 'int' but the argument has type 'size_t' (aka 'unsigned long') [-Wformat]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                      ~~
+      |                                                                                      %zu
+  188 |                             k, i, j, h_res[k], expected);
+      |                             ^
+tests/test_rocm_xdev.cu:188:35: warning: format specifies type 'double' but the argument has type 'int' [-Wformat]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                     ~~
+      |                                                                                                     %d
+  188 |                             k, i, j, h_res[k], expected);
+      |                                   ^
+tests/test_rocm_xdev.cu:188:48: warning: data argument not used by format string [-Wformat-extra-args]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  188 |                             k, i, j, h_res[k], expected);
+      |                                                ^
+tests/test_rocm_xdev.cu:206:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  206 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:207:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  207 |             hipMemcpy(d_src[i], h_src, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:208:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  208 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:209:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  209 |             hipMemset(d_dst[j], 0, TEST_BUF_BYTES);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:217:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  217 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:218:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  218 |             hipMemcpy(h_dst, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:234:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  234 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:235:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  235 |             hipMemcpy(d_dst[j], h_a, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:236:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  236 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:237:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  237 |             hipMemcpy(d_src[i], h_b, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:245:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  245 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:246:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  246 |             hipMemcpy(h_res, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:251:89: warning: invalid conversion specifier 'k' [-Wformat-invalid-specifier]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                        ~^
+tests/test_rocm_xdev.cu:252:29: warning: format specifies type 'int' but the argument has type 'size_t' (aka 'unsigned long') [-Wformat]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                   ~~
+      |                                                                                                   %zu
+  252 |                             k, i, j, h_res[k], expected);
+      |                             ^
+tests/test_rocm_xdev.cu:252:35: warning: format specifies type 'double' but the argument has type 'int' [-Wformat]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                                  ~~
+      |                                                                                                                  %d
+  252 |                             k, i, j, h_res[k], expected);
+      |                                   ^
+tests/test_rocm_xdev.cu:252:48: warning: data argument not used by format string [-Wformat-extra-args]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  252 |                             k, i, j, h_res[k], expected);
+      |                                                ^
+tests/test_rocm_xdev.cu:267:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  267 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:268:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  268 |         hipMalloc(&d_bench_src, BENCH_BUF_BYTES);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:269:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  269 |         hipSetDevice(1);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:270:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  270 |         hipMalloc(&d_bench_dst, BENCH_BUF_BYTES);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:275:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  275 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:282:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  282 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:295:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  295 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:318:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  318 |         hipSetDevice(0); hipFree(d_bench_src);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:318:26: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  318 |         hipSetDevice(0); hipFree(d_bench_src);
+      |                          ^~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:319:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  319 |         hipSetDevice(1); hipFree(d_bench_dst);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:319:26: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  319 |         hipSetDevice(1); hipFree(d_bench_dst);
+      |                          ^~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:327:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  327 |         hipSetDevice(i);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:328:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  328 |         hipFree(d_src[i]);
+      |         ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:329:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  329 |         hipFree(d_dst[i]);
+      |         ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:451:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  451 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:483:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  483 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:484:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  484 |         hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:485:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  485 |         hipMemset(d_result[r], 0xAB, bytes); /* dirty-fill to catch missing-zero bugs */
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:510:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  510 |         hipSetDevice(owner);
+      |         ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:511:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  511 |         hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:544:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  544 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:545:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  545 |         hipMemset(d_result[r], 0xCD, bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:569:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  569 |         hipSetDevice(owner);
+      |         ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:570:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  570 |         hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:606:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  606 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:607:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  607 |         hipMalloc(&d_p, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:608:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  608 |         hipMalloc(&d_r, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:610:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  610 |         hipMemcpy(d_p, h_p, small_bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:611:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  611 |         hipMemset(d_r, 0, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:618:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  618 |             hipMemcpy(h_r, d_r, small_bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:634:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  634 |         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+      |         ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:634:23: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  634 |         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+      |                       ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:649:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  649 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:650:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  650 |         hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:673:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  673 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:674:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  674 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:707:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  707 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:708:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  708 |             hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:709:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  709 |             hipMemset(d_result[r], 0xFE, bytes);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:732:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  732 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:733:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  733 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:756:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  756 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:757:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  757 |             hipStreamCreate(&rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:762:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  762 |             hipMemcpyAsync(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice, rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:763:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  763 |             hipMemsetAsync(d_result[r], 0x00, bytes, rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:786:53: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  786 |                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                     ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:786:70: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  786 |                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                                      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:795:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  795 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:796:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  796 |             hipStreamSynchronize(rank_streams[owner]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:797:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  797 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:806:57: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  806 |                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:806:74: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  806 |                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:813:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  813 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:814:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  814 |             hipStreamDestroy(rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:848:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  848 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:860:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  860 |             hipMemset(d_a, 0xFE, g_bytes);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:901:17: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  901 |                 hipDeviceSynchronize();
+      |                 ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:905:17: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  905 |                 hipMemcpy(h_c, d_c, g_bytes, hipMemcpyDeviceToHost);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:928:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  928 |         if (d_a) hipFree(d_a);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:929:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  929 |         if (d_b) hipFree(d_b);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:930:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  930 |         if (d_c) hipFree(d_c);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:935:29: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  935 |         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+      |                             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:935:46: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  935 |         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+      |                                              ^~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:936:29: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  936 |         if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+      |                             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:936:46: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  936 |         if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+      |                                              ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated when compiling for gfx1151.
+98 warnings generated when compiling for gfx1151.
+tests/test_rocm_kernel_compare.cu:425:19: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  425 |     if (w_device) hipFree(w_device);
+      |                   ^~~~~~~~~~~~~~~~~
+tests/test_rocm_kernel_compare.cu:576:23: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  576 |     if (sinks_device) hipFree(sinks_device);
+      |                       ^~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:121:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  121 |         hipSetDevice(i);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:136:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  136 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:137:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  137 |             hipMemcpy(d_src[i], h_src, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:138:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  138 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:139:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  139 |             hipMemset(d_dst[j], 0, TEST_BUF_BYTES);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:147:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  147 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:148:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  148 |             hipMemcpy(h_dst, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:170:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  170 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:171:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  171 |             hipMemcpy(d_dst[j], h_a, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:172:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  172 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:173:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  173 |             hipMemcpy(d_src[i], h_b, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:181:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  181 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:182:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  182 |             hipMemcpy(h_res, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:187:76: warning: invalid conversion specifier 'k' [-Wformat-invalid-specifier]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                           ~^
+tests/test_rocm_xdev.cu:188:29: warning: format specifies type 'int' but the argument has type 'size_t' (aka 'unsigned long') [-Wformat]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                      ~~
+      |                                                                                      %zu
+  188 |                             k, i, j, h_res[k], expected);
+      |                             ^
+tests/test_rocm_xdev.cu:188:35: warning: format specifies type 'double' but the argument has type 'int' [-Wformat]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                     ~~
+      |                                                                                                     %d
+  188 |                             k, i, j, h_res[k], expected);
+      |                                   ^
+tests/test_rocm_xdev.cu:188:48: warning: data argument not used by format string [-Wformat-extra-args]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  188 |                             k, i, j, h_res[k], expected);
+      |                                                ^
+tests/test_rocm_xdev.cu:206:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  206 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:207:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  207 |             hipMemcpy(d_src[i], h_src, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:208:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  208 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:209:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  209 |             hipMemset(d_dst[j], 0, TEST_BUF_BYTES);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:217:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  217 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:218:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  218 |             hipMemcpy(h_dst, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:234:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  234 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:235:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  235 |             hipMemcpy(d_dst[j], h_a, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:236:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  236 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:237:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  237 |             hipMemcpy(d_src[i], h_b, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:245:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  245 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:246:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  246 |             hipMemcpy(h_res, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:251:89: warning: invalid conversion specifier 'k' [-Wformat-invalid-specifier]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                        ~^
+tests/test_rocm_xdev.cu:252:29: warning: format specifies type 'int' but the argument has type 'size_t' (aka 'unsigned long') [-Wformat]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                   ~~
+      |                                                                                                   %zu
+  252 |                             k, i, j, h_res[k], expected);
+      |                             ^
+tests/test_rocm_xdev.cu:252:35: warning: format specifies type 'double' but the argument has type 'int' [-Wformat]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                                  ~~
+      |                                                                                                                  %d
+  252 |                             k, i, j, h_res[k], expected);
+      |                                   ^
+tests/test_rocm_xdev.cu:252:48: warning: data argument not used by format string [-Wformat-extra-args]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  252 |                             k, i, j, h_res[k], expected);
+      |                                                ^
+tests/test_rocm_xdev.cu:267:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  267 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:268:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  268 |         hipMalloc(&d_bench_src, BENCH_BUF_BYTES);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:269:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  269 |         hipSetDevice(1);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:270:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  270 |         hipMalloc(&d_bench_dst, BENCH_BUF_BYTES);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:275:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  275 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:282:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  282 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:295:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  295 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:318:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  318 |         hipSetDevice(0); hipFree(d_bench_src);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:318:26: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  318 |         hipSetDevice(0); hipFree(d_bench_src);
+      |                          ^~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:319:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  319 |         hipSetDevice(1); hipFree(d_bench_dst);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:319:26: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  319 |         hipSetDevice(1); hipFree(d_bench_dst);
+      |                          ^~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:327:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  327 |         hipSetDevice(i);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:328:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  328 |         hipFree(d_src[i]);
+      |         ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:329:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  329 |         hipFree(d_dst[i]);
+      |         ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:451:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  451 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:483:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  483 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:484:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  484 |         hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:485:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  485 |         hipMemset(d_result[r], 0xAB, bytes); /* dirty-fill to catch missing-zero bugs */
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:510:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  510 |         hipSetDevice(owner);
+      |         ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:511:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  511 |         hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:544:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  544 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:545:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  545 |         hipMemset(d_result[r], 0xCD, bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:569:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  569 |         hipSetDevice(owner);
+      |         ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:570:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  570 |         hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:606:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  606 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:607:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  607 |         hipMalloc(&d_p, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:608:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  608 |         hipMalloc(&d_r, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:610:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  610 |         hipMemcpy(d_p, h_p, small_bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:611:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  611 |         hipMemset(d_r, 0, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:618:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  618 |             hipMemcpy(h_r, d_r, small_bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:634:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  634 |         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+      |         ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:634:23: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  634 |         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+      |                       ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:649:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  649 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:650:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  650 |         hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:673:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  673 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:674:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  674 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:707:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  707 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:708:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  708 |             hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:709:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  709 |             hipMemset(d_result[r], 0xFE, bytes);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:732:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  732 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:733:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  733 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:756:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  756 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:757:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  757 |             hipStreamCreate(&rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:762:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  762 |             hipMemcpyAsync(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice, rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:763:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  763 |             hipMemsetAsync(d_result[r], 0x00, bytes, rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:786:53: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  786 |                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                     ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:786:70: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  786 |                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                                      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:795:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  795 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:796:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  796 |             hipStreamSynchronize(rank_streams[owner]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:797:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  797 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:806:57: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  806 |                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:806:74: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  806 |                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:813:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  813 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:814:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  814 |             hipStreamDestroy(rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:848:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  848 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:860:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  860 |             hipMemset(d_a, 0xFE, g_bytes);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:901:17: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  901 |                 hipDeviceSynchronize();
+      |                 ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:905:17: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  905 |                 hipMemcpy(h_c, d_c, g_bytes, hipMemcpyDeviceToHost);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:928:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  928 |         if (d_a) hipFree(d_a);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:929:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  929 |         if (d_b) hipFree(d_b);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:930:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  930 |         if (d_c) hipFree(d_c);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:935:29: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  935 |         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+      |                             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:935:46: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  935 |         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+      |                                              ^~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:936:29: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  936 |         if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+      |                             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:936:46: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  936 |         if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+      |                                              ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated when compiling for gfx1201.
+98 warnings generated when compiling for gfx1201.
+tests/test_rocm_kernel_compare.cu:425:19: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  425 |     if (w_device) hipFree(w_device);
+      |                   ^~~~~~~~~~~~~~~~~
+tests/test_rocm_kernel_compare.cu:576:23: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  576 |     if (sinks_device) hipFree(sinks_device);
+      |                       ^~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:121:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  121 |         hipSetDevice(i);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:136:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  136 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:137:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  137 |             hipMemcpy(d_src[i], h_src, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:138:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  138 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:139:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  139 |             hipMemset(d_dst[j], 0, TEST_BUF_BYTES);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:147:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  147 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:148:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  148 |             hipMemcpy(h_dst, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:170:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  170 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:171:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  171 |             hipMemcpy(d_dst[j], h_a, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:172:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  172 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:173:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  173 |             hipMemcpy(d_src[i], h_b, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:181:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  181 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:182:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  182 |             hipMemcpy(h_res, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:187:76: warning: invalid conversion specifier 'k' [-Wformat-invalid-specifier]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                           ~^
+tests/test_rocm_xdev.cu:188:29: warning: format specifies type 'int' but the argument has type 'size_t' (aka 'unsigned long') [-Wformat]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                      ~~
+      |                                                                                      %zu
+  188 |                             k, i, j, h_res[k], expected);
+      |                             ^
+tests/test_rocm_xdev.cu:188:35: warning: format specifies type 'double' but the argument has type 'int' [-Wformat]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                     ~~
+      |                                                                                                     %d
+  188 |                             k, i, j, h_res[k], expected);
+      |                                   ^
+tests/test_rocm_xdev.cu:188:48: warning: data argument not used by format string [-Wformat-extra-args]
+  187 |                     fprintf(stderr, "[FAIL] Accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  188 |                             k, i, j, h_res[k], expected);
+      |                                                ^
+tests/test_rocm_xdev.cu:206:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  206 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:207:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  207 |             hipMemcpy(d_src[i], h_src, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:208:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  208 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:209:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  209 |             hipMemset(d_dst[j], 0, TEST_BUF_BYTES);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:217:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  217 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:218:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  218 |             hipMemcpy(h_dst, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:234:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  234 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:235:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  235 |             hipMemcpy(d_dst[j], h_a, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:236:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  236 |             hipSetDevice(i);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:237:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  237 |             hipMemcpy(d_src[i], h_b, TEST_BUF_BYTES, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:245:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  245 |             hipSetDevice(j);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:246:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  246 |             hipMemcpy(h_res, d_dst[j], TEST_BUF_BYTES, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:251:89: warning: invalid conversion specifier 'k' [-Wformat-invalid-specifier]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                        ~^
+tests/test_rocm_xdev.cu:252:29: warning: format specifies type 'int' but the argument has type 'size_t' (aka 'unsigned long') [-Wformat]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                   ~~
+      |                                                                                                   %zu
+  252 |                             k, i, j, h_res[k], expected);
+      |                             ^
+tests/test_rocm_xdev.cu:252:35: warning: format specifies type 'double' but the argument has type 'int' [-Wformat]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                                                                                                  ~~
+      |                                                                                                                  %d
+  252 |                             k, i, j, h_res[k], expected);
+      |                                   ^
+tests/test_rocm_xdev.cu:252:48: warning: data argument not used by format string [-Wformat-extra-args]
+  251 |                     fprintf(stderr, "[FAIL] Host staging accumulate F32 divergence at [%kn] pair (%d -> %d): got %f, expected %f\n",
+      |                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  252 |                             k, i, j, h_res[k], expected);
+      |                                                ^
+tests/test_rocm_xdev.cu:267:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  267 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:268:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  268 |         hipMalloc(&d_bench_src, BENCH_BUF_BYTES);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:269:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  269 |         hipSetDevice(1);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:270:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  270 |         hipMalloc(&d_bench_dst, BENCH_BUF_BYTES);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:275:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  275 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:282:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  282 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:295:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  295 |         hipDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:318:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  318 |         hipSetDevice(0); hipFree(d_bench_src);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:318:26: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  318 |         hipSetDevice(0); hipFree(d_bench_src);
+      |                          ^~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:319:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  319 |         hipSetDevice(1); hipFree(d_bench_dst);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:319:26: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  319 |         hipSetDevice(1); hipFree(d_bench_dst);
+      |                          ^~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:327:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  327 |         hipSetDevice(i);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:328:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  328 |         hipFree(d_src[i]);
+      |         ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:329:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  329 |         hipFree(d_dst[i]);
+      |         ^~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:451:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  451 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:483:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  483 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:484:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  484 |         hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:485:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  485 |         hipMemset(d_result[r], 0xAB, bytes); /* dirty-fill to catch missing-zero bugs */
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:510:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  510 |         hipSetDevice(owner);
+      |         ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:511:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  511 |         hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:544:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  544 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:545:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  545 |         hipMemset(d_result[r], 0xCD, bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:569:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  569 |         hipSetDevice(owner);
+      |         ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:570:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  570 |         hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:606:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  606 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:607:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  607 |         hipMalloc(&d_p, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:608:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  608 |         hipMalloc(&d_r, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:610:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  610 |         hipMemcpy(d_p, h_p, small_bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:611:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  611 |         hipMemset(d_r, 0, small_bytes);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:618:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  618 |             hipMemcpy(h_r, d_r, small_bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:634:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  634 |         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+      |         ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:634:23: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  634 |         hipFree(d_p); hipFree(d_r); free(h_p); free(h_r);
+      |                       ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:649:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  649 |         hipSetDevice(r);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:650:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  650 |         hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:673:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  673 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:674:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  674 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:707:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  707 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:708:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  708 |             hipMemcpy(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:709:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  709 |             hipMemset(d_result[r], 0xFE, bytes);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:732:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  732 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:733:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  733 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:756:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  756 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:757:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  757 |             hipStreamCreate(&rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:762:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  762 |             hipMemcpyAsync(d_partial[r], h_partial[r], bytes, hipMemcpyHostToDevice, rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:763:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  763 |             hipMemsetAsync(d_result[r], 0x00, bytes, rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:786:53: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  786 |                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                     ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:786:70: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  786 |                 for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                                      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:795:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  795 |             hipSetDevice(owner);
+      |             ^~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:796:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  796 |             hipStreamSynchronize(rank_streams[owner]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:797:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  797 |             hipMemcpy(h_result[owner], d_result[owner], bytes, hipMemcpyDeviceToHost);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:806:57: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  806 |                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:806:74: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  806 |                     for (int r = 0; r < n_ranks; r++) { hipSetDevice(r); hipStreamDestroy(rank_streams[r]); }
+      |                                                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:813:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  813 |             hipSetDevice(r);
+      |             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:814:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  814 |             hipStreamDestroy(rank_streams[r]);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:848:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  848 |         hipSetDevice(0);
+      |         ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:860:13: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  860 |             hipMemset(d_a, 0xFE, g_bytes);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:901:17: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  901 |                 hipDeviceSynchronize();
+      |                 ^~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:905:17: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  905 |                 hipMemcpy(h_c, d_c, g_bytes, hipMemcpyDeviceToHost);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:928:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  928 |         if (d_a) hipFree(d_a);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:929:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  929 |         if (d_b) hipFree(d_b);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:930:18: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  930 |         if (d_c) hipFree(d_c);
+      |                  ^~~~~~~~~~~~
+tests/test_rocm_xdev.cu:935:29: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  935 |         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+      |                             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:935:46: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  935 |         if (d_partial[r]) { hipSetDevice(r); hipFree(d_partial[r]); }
+      |                                              ^~~~~~~~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:936:29: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  936 |         if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+      |                             ^~~~~~~~~~~~~~~
+tests/test_rocm_xdev.cu:936:46: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+  936 |         if (d_result[r])  { hipSetDevice(r); hipFree(d_result[r]); }
+      |                                              ^~~~~~~~~~~~~~~~~~~~
+2 warnings generated when compiling for host.
+98 warnings generated when compiling for host.

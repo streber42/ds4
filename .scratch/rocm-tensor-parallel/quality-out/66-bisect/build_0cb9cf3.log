@@ -1,0 +1,94 @@
+make -B gguf-tools/quality-testing/score_official \
+	CORE_OBJS="ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o" \
+	CFLAGS="-O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD" \
+	DS4_LINK="/usr/bin/hipcc -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1201" \
+	DS4_LINK_LIBS="-lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt"
+make[1]: Entering directory '/home/murphy/src/ds4-bisect66-0cb9cf3'
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD -c -o ds4_gpu_args.o ds4_gpu_args.c
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD -c -o ds4.o ds4.c
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD -c -o ds4_distributed.o ds4_distributed.c
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD -c -o ds4_tp.o ds4_tp.c
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD -c -o ds4_ssd.o ds4_ssd.c
+/usr/bin/hipcc -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1201 -c -o ds4_rocm.o ds4_rocm.cu
+/usr/bin/hipcc -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1201 -c -o ds4_rocm_compat.o ds4_rocm_compat.cu
+/usr/bin/hipcc -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1201 -c -o ds4_rocm_unavailable.o ds4_rocm_unavailable.cu
+/usr/bin/hipcc -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1201 -c -o ds4_rocm_xdev.o ds4_rocm_xdev.cu
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD   -c -o ds4_layer_pack.o ds4_layer_pack.c
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -DDS4_ROCM_BUILD -c -o rax.o rax.c
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:3662:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 3662 |     cudaGetDevice(&orig_dev);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:33:23: note: expanded from macro 'cudaGetDevice'
+   33 | #define cudaGetDevice hipGetDevice
+      |                       ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:3664:33: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 3664 |     if (orig_dev != target_dev) cudaSetDevice(target_dev);
+      |                                 ^~~~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:34:23: note: expanded from macro 'cudaSetDevice'
+   34 | #define cudaSetDevice hipSetDevice
+      |                       ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:3670:33: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 3670 |     if (orig_dev != target_dev) cudaSetDevice(orig_dev);
+      |                                 ^~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:34:23: note: expanded from macro 'cudaSetDevice'
+   34 | #define cudaSetDevice hipSetDevice
+      |                       ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:5460:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 5460 |         cudaDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:35:31: note: expanded from macro 'cudaDeviceSynchronize'
+   35 | #define cudaDeviceSynchronize hipDeviceSynchronize
+      |                               ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:6054:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 6054 |         cudaDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:35:31: note: expanded from macro 'cudaDeviceSynchronize'
+   35 | #define cudaDeviceSynchronize hipDeviceSynchronize
+      |                               ^
+5 warnings generated when compiling for gfx1201.
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:3662:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 3662 |     cudaGetDevice(&orig_dev);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:33:23: note: expanded from macro 'cudaGetDevice'
+   33 | #define cudaGetDevice hipGetDevice
+      |                       ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:3664:33: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 3664 |     if (orig_dev != target_dev) cudaSetDevice(target_dev);
+      |                                 ^~~~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:34:23: note: expanded from macro 'cudaSetDevice'
+   34 | #define cudaSetDevice hipSetDevice
+      |                       ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:3670:33: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 3670 |     if (orig_dev != target_dev) cudaSetDevice(orig_dev);
+      |                                 ^~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:34:23: note: expanded from macro 'cudaSetDevice'
+   34 | #define cudaSetDevice hipSetDevice
+      |                       ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:5460:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 5460 |         cudaDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:35:31: note: expanded from macro 'cudaDeviceSynchronize'
+   35 | #define cudaDeviceSynchronize hipDeviceSynchronize
+      |                               ^
+In file included from ds4_rocm.cu:99:
+./rocm/ds4_rocm_runtime.cuh:6054:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+ 6054 |         cudaDeviceSynchronize();
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+./ds4_rocm.h:35:31: note: expanded from macro 'cudaDeviceSynchronize'
+   35 | #define cudaDeviceSynchronize hipDeviceSynchronize
+      |                               ^
+5 warnings generated when compiling for host.
+/usr/bin/hipcc -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1201 -O3 -g -march=native -Wall -Wextra -std=c11 -I. -o gguf-tools/quality-testing/score_official \
+	-x c gguf-tools/quality-testing/score_official.c \
+	-x none ds4_gpu_args.o ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o rax.o -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
+make[1]: Leaving directory '/home/murphy/src/ds4-bisect66-0cb9cf3'
+BUILD_DONE_0cb9cf3 EXIT=0

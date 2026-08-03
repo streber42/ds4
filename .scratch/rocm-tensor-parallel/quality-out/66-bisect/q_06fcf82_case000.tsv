@@ -1,0 +1,2 @@
+id	prompt_tokens	target_tokens	nll	avg_nll	first_match	greedy_lcp	api_ref_tokens	api_target_tokens	api_target_mae	api_target_mean_delta	api_top_items	api_top_mapped	api_top_coverage	api_top1_count	api_top1_match	api_top1_rate	api_topn_ref	api_topn_hit	api_topn_recall	api_top_logprob_count	api_top_mae	api_top_mean_delta	api_pair_total	api_pair_agree	api_pair_rate
+case_000	17	24	9.775822087	0.407325920	0	0	24	24	0.407325920	-0.407325920	120	100	0.833333333	24	19	0.791666667	100	34	0.340000000	100	7584.648082033	7584.452565591	76	73	0.960526316

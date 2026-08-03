@@ -1,0 +1,96 @@
+/usr/bin/hipcc -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1151,gfx1201 -o tests/test_rocm_tp_stubs tests/test_rocm_tp_stubs.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
+/usr/bin/hipcc -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1151,gfx1201 -o tests/test_rocm_xdev tests/test_rocm_xdev.o ds4_rocm_xdev.o -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
+/usr/bin/hipcc -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=gfx1151,gfx1201 -o tests/test_rocm_kernel_compare tests/test_rocm_kernel_compare.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_rocm_xdev.o -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
+cc -O3 -ffast-math -g -march=native -Wall -Wextra -std=c99 -D_GNU_SOURCE -fno-finite-math-only -no-pie -I. -DDS4_ROCM_BUILD -o tests/test_engine_rocm_tp_refusal tests/test_engine_rocm_tp_refusal.c \
+	ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o \
+	ds4_rocm_unavailable.o ds4_rocm_xdev.o ds4_layer_pack.o \
+	ds4_help.o ds4_gpu_args.o ds4_kvstore.o rax.o -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt -lstdc++ -lamdhip64
+DS4_ROCM_TP_BRINGUP=1 ./tests/test_rocm_tp_stubs
+ds4: FATAL: ROCm tensor-parallel entry point 'ds4_gpu_tp_gate_encode' is not implemented.
+ds4:        Tensor-parallel inference cannot proceed past this kernel.
+ds4:        Set DS4_ROCM_TP_BRINGUP=1 to bypass with a neutral return
+ds4:        for plumbing bring-up only -- output will NOT be correct.
+ds4: #### DS4_ROCM_TP_BRINGUP=1 ACTIVE -- 'ds4_gpu_tp_gate_encode' returning a NEUTRAL (no-op, reports success) value. Output is NOT correct. Bring-up mode only. ####
+Running ROCm TP stub loud failure and bring-up tests...
+[PASS] Loud failure by default verified.
+[PASS] Bring-up mode escape hatch verified (boolean-contract entry point).
+[PASS] Bring-up mode escape hatch verified (errno-contract entry point).
+All ROCm TP stub tests passed!
+./tests/test_rocm_xdev
+================================================================================
+Running ROCm Cross-Device Transfer Module Standalone Tests
+================================================================================
+
+[INFO] Detected 4 ROCm GPU device(s).
+[PASS] Establish Mesh initialized successfully.
+
+--- Peer Mesh Status ---
+  Device Pair (0 -> 1): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (0 -> 2): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (0 -> 3): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (1 -> 0): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (1 -> 2): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (1 -> 3): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (2 -> 0): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (2 -> 1): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (2 -> 3): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (3 -> 0): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (3 -> 1): canAccess=1 (rev=1), peer_ok=1
+  Device Pair (3 -> 2): canAccess=1 (rev=1), peer_ok=1
+[PASS] Peer capability detected per pair and bidirectional access verified.
+
+--- Testing Byte-Exact Copy (Direct Peer Mode) ---
+[PASS] Byte-exact copy verified across all ordered device pairs.
+
+--- Testing Accumulate F32 / F16 (Direct Peer Mode) ---
+[PASS] Accumulate F32 produces numerically correct sums against CPU reference.
+
+--- Testing Host-Staging Fallback Mode ---
+[PASS] Host-staging fallback copy verified byte-exact across all pairs.
+[PASS] Host-staging fallback accumulate verified numerically correct.
+
+--- Bandwidth Benchmark & Floor Assertion ---
+  Direct Peer Copy (0 -> 1): 24.07 GB/s (elapsed=0.028 s)
+  Host Staging Copy (0 -> 1): 13.78 GB/s (elapsed=0.049 s)
+[PASS] Bandwidth floor assertion passed (Peer >= 5.0 GB/s, Host >= 2.0 GB/s).
+
+--- Testing TP Transport Reachability Decision ---
+[PASS] Pure decision logic covers host-staging, peer-only, and unreachable cases.
+[PASS] tp_transport_probe reports reachable for the real 4-device topology (half=2).
+[PASS] tp_transport_probe refuses malformed inputs cleanly.
+
+--- All-Reduce F32 (TP=4 collective) ---
+[PASS] 4-rank all-reduce produces correct sums on every owner device.
+[PASS] 4-rank all-reduce (host-staging fallback) produces correct sums.
+[PASS] all-reduce n_peers=0 passes through my_partial unchanged.
+[PASS] all-reduce cached staging buffer produces correct results across repeated calls.
+[PASS] all-reduce bit-pattern probe (#44-#48 silent drop/double-count hazard) verified exact 15.0 sum across all ranks.
+[PASS] all-reduce async multi-stream event synchronization and non-blocking submission verified.
+  [INFO] stream-fence probe: spin+full chain wall time 17.6 ms (spin_cycles=50000000)
+[PASS] same-device default<->secondary stream fence (ds4_rocm_xdev_spike_stream_wait/record_event_on) verified under artificial delay.
+
+================================================================================
+ALL CROSS-DEVICE TRANSFER STANDALONE TESTS PASSED SUCCESSFULLY!
+================================================================================
+./tests/test_rocm_kernel_compare
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+[PASS] rms_norm_plain   max_abs_err=1.19209e-07 over 4096 elements -- ds4_gpu_rms_norm_plain_tensor vs double-precision RMSNorm reference (n=4096)
+[PASS] add              max_abs_err=0 over 8192 elements -- ds4_gpu_add_tensor vs elementwise float addition (n=8192)
+[PASS] tp_matmul_q8_0_kslice_rows max_abs_err=0.00353241 over 4096 elements -- ds4_gpu_matmul_q8_0_kslice_rows_tensor TP kslice matvec vs double-precision ref (in=1024, out=4096, k-slice=512)
+[PASS] tp_hc_expand_add max_abs_err=0 over 8192 elements -- ds4_gpu_add_tensor (TP HC-expand-add accumulation primitive) vs elementwise float addition (n=8192)
+[PASS] tp_attention_prefill_raw_heads_range max_abs_err=4.47035e-08 over 64 elements -- ds4_gpu_attention_prefill_raw_heads_range_tensor TP prefill row split vs double-precision softmax-attention ref (n_kv=6, q_row0=2, n_q=4, n_head=2, head_dim=8)
+[PASS] moe_handoff_pack max_abs_err=0 over 1584 elements -- ds4_gpu_moe_handoff_pack_tensor vs host-packed byte-exact reference (n_embd=384, n_expert=6)
+
+6/6 kernel comparisons passed
+./tests/test_engine_rocm_tp_refusal
+-- rank-count refusal --
+  engine_create_with_gpu_config -> rc=1, engine=(nil)
+  captured stderr:
+----
+ds4: --cuda-tensor-parallel requires an even number of GPUs >= 2 (--gpu-devices gave 3)
+
+----
+-- rank-count refusal: PASS --
+-- model-shape refusal --
+  skipping: DS4_TEST_NON_DEEPSEEK_MODEL not set (need a small non-DeepSeek-family GGUF, e.g. GLM 5.2, to exercise this path)
+test_engine_rocm_tp_refusal PASS

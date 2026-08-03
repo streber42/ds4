@@ -1,0 +1,2 @@
+# id	prompt_file	continuation_file	response_file
+case_000	gguf-tools/quality-testing/data/flash/prompts/case_000.txt	gguf-tools/quality-testing/data/flash/continuations/case_000.txt	gguf-tools/quality-testing/data/flash/responses/case_000.json

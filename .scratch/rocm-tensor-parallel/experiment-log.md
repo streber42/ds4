@@ -2600,3 +2600,69 @@ bisect reference). #55 AC4 re-gated on #66. GPU lock released.
 
 
 
+
+---
+
+## 2026-08-03 — Issue 66: Bisect the TP=4 quality divergence across the #49-#61 chain
+
+**Goal:** Find the specific commit in the #49-#61 execution-engine chain that
+regressed TP=4 `score_official` quality from ~0.377 (in-bar, #48) to ~13+ (35x
+bar) on a NaN-free, clean-loading build.
+
+**Method:** case_000 smoke (single-case manifest, ~30s + model load) on
+`score_official` built at successive commits in the chain, `AMD_SERIALIZE_KERNEL=3`,
+`--gpu-devices 0,1,2,3 --cuda-tensor-parallel`. All measurements share an
+identical load state (same 40 q8-budget warnings + 1 `moe_down` arena OOM on
+every commit, including the good anchor), so the divergence is not load-driven.
+
+**Bisect table (case_000 avg_nll):**
+
+| Commit | State | avg_nll | Verdict |
+|---|---|---|---|
+| `06fcf82` (#48, pre-chain anchor) | legacy path | **0.407** | good (matches #48's 0.377 full-fixture) |
+| `04ec7be` (#53) `DS4_TP4_THREADED_LAYERS=0` | legacy path | **0.442** | good |
+| `04ec7be` (#53) default | threaded full-token path ON | 16.16 | bad |
+| `1fe4829` (#60) default | threaded ON | 16.78 | bad |
+| `0cb9cf3` (#61) default | threaded ON | 15.98 | bad |
+| HEAD `14f21ca` default | threaded ON | 13.24 | bad |
+| HEAD `14f21ca` `DS4_TP4_THREADED_LAYERS=0` | legacy path | **0.398** | good |
+
+**Root cause.** The persistent-thread full-token execution engine (introduced
+#50 `4a21216`, made default-on by #53 `04ec7be`) is numerically broken by a
+cross-layer data race. In the threaded path each rank's all-reduce reads peer
+partials from single per-tier buffers (`attn_out_by_tier` / `shared_out_by_tier`)
+that every rank overwrites once per layer, while the async stream/event overlap
+lets a fast rank advance past layer N and overwrite the buffer a lagging rank's
+all-reduce for layer N is still reading. The event fences only order each copy
+against the peer's stream state at issue time; they cannot stop the peer from
+overwriting the buffer mid-read. This produces a systematic logit shift
+(target_mean_delta ~ -13 across all 129280 logits) with run-to-run variance
+(15.8 vs 16.2 on an identical 04ec7be binary) characteristic of a race. The
+legacy sequential path (`sync_all_devices` + blocking `ds4_rocm_xdev_allreduce_f32`
+with NULL stream) cannot exhibit this race because no rank starts the next layer
+before every rank's all-reduce has fully completed.
+
+**Fix (this issue):** default `metal_graph_tp4_spike_layer_enabled` back to
+`0` when `DS4_TP4_THREADED_LAYERS` is unset, restoring the legacy sequential
+TP=4 path as the release default (byte-identical to pre-#50 behavior, proven
+at #48). `DS4_TP4_THREADED_LAYERS=N` stays as a diagnostic switch for A/B and
+race debugging. The buffer-reuse race itself is left for a follow-up issue:
+fixing it properly needs per-layer double-buffering of the peer-partial tensors
+or a per-layer handshake, not a one-line patch.
+
+**Verification on the fix:**
+- case_000 TP=4: **avg_nll 0.398** (in bar; matches the `DS4_TP4_THREADED_LAYERS=0`
+  control exactly — the default now routes to the legacy path).
+- case_001+ still crash with `routed_moe x quantize launch failed` (free VRAM
+  0.42 GiB) — the pre-existing #65 structural-VRAM-headroom issue, unrelated.
+- Pipeline case_000: **avg_nll 0.383** — pipeline not regressed.
+- `make -j8 rocm` clean; `make -j8 test-rocm` exit 0 (all 4 targets:
+  `test_rocm_tp_stubs`, `test_rocm_xdev` incl. async-stream event tests,
+  `test_rocm_kernel_compare` 6/6, `test_engine_rocm_tp_refusal`).
+
+**Artifacts:** `.scratch/rocm-tensor-parallel/quality-out/66-bisect/*` (logs,
+TSVs, build logs for every commit in the table).
+
+**Disposition:** #55 AC4 (full 100-case TP=4 fixture) is unblocked on the
+quality side — the TP=4 path is back in-bar; the 100-case run itself still
+needs #65's VRAM-headroom work to get past case_001.
