@@ -78,8 +78,13 @@ mutually exclusive):
 
 ## Blocked by
 
-*(nothing — `#64`'s latch/cascade fix is closed and this does not depend on
-further work there)*
+`.scratch/rocm-tensor-parallel/issues/66-bisect-tp4-quality-divergence-49-61.md`
+
+*(The TP=4 quality regression (avg_nll=13.10, 35× the PRD bar) must be fixed
+before VRAM-headroom work can be meaningfully measured — any arena-skip count
+under a broken compute graph is noise, not signal. Note: #66's own Blocked-by
+entry cites #65 for the full 100-case fixture only; the bisect itself proceeds
+on case_000 smoke, so #66 runs first.)*
 
 ## Comments
 
