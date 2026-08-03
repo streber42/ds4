@@ -1,6 +1,6 @@
 # 39 — Enable f16 cuBLAS attention output in TP=4 batch prefill
 
-Status: resolved
+Status: closed
 
 ## Parent
 
