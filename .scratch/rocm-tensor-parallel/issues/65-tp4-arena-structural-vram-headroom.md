@@ -1,6 +1,6 @@
 # 65 — Recover structural VRAM headroom so arena tenants stop falling back to PCIe host-register
 
-Status: ready-for-agent
+Status: ready-for-human
 
 ## Parent
 
@@ -105,3 +105,11 @@ closed (the panel's stated precondition), so the block on attempting further
 arena changes no longer applies. No scope change — an agent picking this up
 should read the reverted-attempt note above before touching
 `cuda_model_arena_chunk_bytes` or related sizing logic.
+
+**2026-08-03 — Prefill Fallback Weight Copy Crash Resolved:**
+The deterministic `moe_down` prefill fallback copy crash (`invalid argument` on `cudaMemcpyHostToDevice`) that blocked `score_official` execution in TP=4 mode has been fixed:
+- Removed `posix_madvise(DONTNEED)` calls from `cuda_model_prefill_fallback_ptr`.
+- Added `cuda_model_find_existing_device_ptr` and a 3-tier fallback copy chain (Device-to-Device -> Host-to-Device -> Direct `pread` from `g_model_fd` + `cudaMemcpyHostToDevice`).
+- Updated `gate`, `up`, and `down` tensor wrappers in `routed_moe_launch` to point to the fallback buffers.
+- Verified: All 43 layers of prefill fallback weight loading now complete 100% cleanly without crashing or erroring.
+- Logit NaN investigation revealed that after prefill completes, all 129,280 output logits evaluate to `-nan` (`nan_cnt=129280/129280`), isolating the remaining TP=4 quality divergence issue to numerical NaN propagation in the TP=4 prefill computation graph.

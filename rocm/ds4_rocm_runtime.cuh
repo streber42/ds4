@@ -6087,6 +6087,33 @@ static const char *cuda_model_range_ptr_from_fd(
     return (const char *)dev;
 }
 
+static const char *cuda_model_find_existing_device_ptr(const void *model_map, uint64_t offset, uint64_t bytes) {
+    if (!model_map || bytes == 0) return NULL;
+    const uint64_t end = offset + bytes;
+    auto exact = g_model_range_by_offset.find(offset);
+    if (exact != g_model_range_by_offset.end()) {
+        const cuda_model_range &r = g_model_ranges[exact->second];
+        if (r.host_base == model_map && end >= offset && bytes <= r.bytes && r.device_ptr) {
+            return r.device_ptr;
+        }
+    }
+    for (const cuda_model_range &r : g_model_ranges) {
+        if (r.host_base == model_map && offset >= r.offset && end >= offset && end <= r.offset + r.bytes && r.device_ptr) {
+            return r.device_ptr + (offset - r.offset);
+        }
+        if (r.host_base == model_map && r.host_registered && r.registered_base && r.registered_device_base) {
+            const uintptr_t h0 = (uintptr_t)((const char *)model_map + offset);
+            const uintptr_t h1 = h0 + bytes;
+            const uintptr_t r0 = (uintptr_t)r.registered_base;
+            const uintptr_t r1 = r0 + r.registered_bytes;
+            if (h1 >= h0 && h0 >= r0 && h1 <= r1) {
+                return r.registered_device_base + (h0 - r0);
+            }
+        }
+    }
+    return NULL;
+}
+
 /* See cuda_moe_prefill_slot above.  Copies model_map+offset..+bytes into a
  * per-device reusable buffer instead of the shared arena/range cache.  Same
  * source bytes as the path it replaces (a direct host-memory read), so the
@@ -6131,7 +6158,23 @@ static const char *cuda_model_prefill_fallback_ptr(cuda_moe_prefill_slot *slots,
     const uint64_t chunk = 64ull * 1024ull * 1024ull;
     for (uint64_t done = 0; done < bytes; done += chunk) {
         const uint64_t n = bytes - done < chunk ? bytes - done : chunk;
-        cudaError_t err = cudaMemcpy(s.device_ptr + done, src + done, (size_t)n, cudaMemcpyHostToDevice);
+        const char *existing_dev = cuda_model_find_existing_device_ptr(model_map, offset + done, n);
+        cudaError_t err = cudaErrorInvalidValue;
+        if (existing_dev) {
+            err = cudaMemcpy(s.device_ptr + done, existing_dev, (size_t)n, cudaMemcpyDeviceToDevice);
+        }
+        if (err != cudaSuccess) {
+            err = cudaMemcpy(s.device_ptr + done, src + done, (size_t)n, cudaMemcpyHostToDevice);
+        }
+        if (err != cudaSuccess && g_model_fd >= 0) {
+            char *tmp = (char *)malloc((size_t)n);
+            if (tmp) {
+                if (cuda_pread_full(g_model_fd, tmp, n, offset + done)) {
+                    err = cudaMemcpy(s.device_ptr + done, tmp, (size_t)n, cudaMemcpyHostToDevice);
+                }
+                free(tmp);
+            }
+        }
         if (err != cudaSuccess) {
             fprintf(stderr, DS4_GPU_LOG_PREFIX "prefill fallback copy failed for %s at %.2f/%.2f MiB: %s\n",
                     what ? what : "weights", (double)done / 1048576.0, (double)bytes / 1048576.0,
@@ -6143,9 +6186,6 @@ static const char *cuda_model_prefill_fallback_ptr(cuda_moe_prefill_slot *slots,
             return NULL;
         }
     }
-    cuda_model_drop_file_pages(offset, bytes);
-    cuda_model_discard_source_pages(model_map, g_model_registered_size, offset, bytes);
-
     s.model_map = model_map;
     s.offset = offset;
     s.bytes = bytes;

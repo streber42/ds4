@@ -2522,3 +2522,23 @@ that thread forward. GPU lock released. Issue closed.
 - **Disposition:** Verification failed due to deterministic prefill fallback crash on `case_001` (structural VRAM headroom / fallback copy failure tracked under `#65`) and severe quality regression (`avg_nll = 16.32`). Issue updated to `Status: ready-for-human`.
 
 
+## 2026-08-03 — Issue 65 / 63: Root Cause & Resolution for `moe_down` Fallback Crash, Discovery of Logit NaN Propagation
+
+**Goal:** Investigate and resolve the deterministic `moe_down` prefill fallback copy crash (`invalid argument` on `cudaMemcpyHostToDevice`) that blocked `score_official` in TP=4 mode.
+
+**Root Cause Identified & Fixed:**
+1. **Host-Registered Page Conflict:** In `rocm/ds4_rocm_runtime.cuh`, when arena allocations failed for tenant weights during `case_000` (e.g., `moe_owned_gate` on dev 1), `cudaHostRegisterMapped` pinned host pages in `model_map`. In ROCm/HIP, calling `hipMemcpyHostToDevice` from a host pointer that overlaps mapped registered memory of another device causes HIP to reject the transfer with `hipErrorInvalidValue` (`invalid argument`). Additionally, `cuda_model_prefill_fallback_ptr` was calling `posix_madvise(DONTNEED)` during prefill passes, invalidating active file page tables.
+2. **Missing Tensor Wrapper Updates:** In `rocm/ds4_rocm_moe_launch.cuh`, fallback pointers (`gate_w`, `up_w`, `down_w`) were fetched, but the `gate`, `up`, `down` `ds4_gpu_tensor` wrapper structures were not updated to point to `down_w`. Downstream quantize and kernel calls (`q8_K_quantize_kernel`) received stale or null `down->ptr` addresses.
+3. **Fix Applied:**
+   - Removed improper `posix_madvise`/`posix_fadvise` calls from `cuda_model_prefill_fallback_ptr`.
+   - Added `cuda_model_find_existing_device_ptr` to reuse existing GPU pointers (`cudaMemcpyDeviceToDevice`) for cached/registered ranges.
+   - Built a 3-tier fallback chain: Device-to-Device -> Host-to-Device -> Direct `pread` from `g_model_fd` into temporary heap buffer + `cudaMemcpyHostToDevice`.
+   - Updated `gate`, `up`, and `down` tensor wrappers in `routed_moe_launch` to point cleanly to the fallback buffers `gate_w`, `up_w`, and `down_w`.
+
+**Verification:**
+- **Prefill Fallback Weight Copy:** Successfully completed all 43 layers (`#0` through `#129`) of prefill fallback weight loading without any crash, `cudaMemcpy` error, or `arena alloc failed` warning.
+- **Logit NaN Diagnosis:** Added diagnostic logging to `local_logits` in `score_official.c`. Identified that post-prefill, all 129,280 output logits evaluated to `-nan` (`nan_cnt=129280/129280`). This pinpointed the exact root cause of high NLL (`16.32`) / logit copy failures in TP=4 mode: numerical NaN propagation in the TP=4 prefill computation graph across 43 layers.
+- **Unit & Kernel Test Suite:** `make -j8 test-rocm` passed 100% clean across all 4 ROCm test binaries (`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`, `test_engine_rocm_tp_refusal`).
+
+
+

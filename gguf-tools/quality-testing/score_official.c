@@ -427,17 +427,26 @@ static int api_alt_token_id(ds4_engine *engine, const api_alt *alt) {
 
 static bool local_logits(ds4_session *session, float *logits, int n_vocab,
                          double *logsum, int *argmax) {
-    if (ds4_session_copy_logits(session, logits, n_vocab) != n_vocab) return false;
+    int copied = ds4_session_copy_logits(session, logits, n_vocab);
+    if (copied != n_vocab) {
+        fprintf(stderr, "local_logits copy_logits returned %d != n_vocab=%d\n", copied, n_vocab);
+        return false;
+    }
     float max_logit = -INFINITY;
     int best = -1;
+    int nan_cnt = 0;
     for (int i = 0; i < n_vocab; i++) {
         const float v = logits[i];
+        if (isnan(v)) nan_cnt++;
         if (isfinite(v) && (best < 0 || v > max_logit)) {
             max_logit = v;
             best = i;
         }
     }
-    if (best < 0) return false;
+    if (best < 0) {
+        fprintf(stderr, "local_logits best < 0: max_logit=%f nan_cnt=%d/%d logits[0]=%f\n", max_logit, nan_cnt, n_vocab, logits[0]);
+        return false;
+    }
     double sum = 0.0;
     for (int i = 0; i < n_vocab; i++) {
         const float v = logits[i];
