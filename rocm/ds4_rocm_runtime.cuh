@@ -5907,7 +5907,7 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     const uint64_t limit = cuda_model_cache_limit_bytes();
     if (g_model_range_bytes > limit || aligned > limit - g_model_range_bytes) return NULL;
 
-    uint64_t chunk = cuda_model_arena_chunk_bytes(aligned);
+    const uint64_t chunk = cuda_model_arena_chunk_bytes(aligned);
 
     size_t free_b = 0;
     size_t total_b = 0;
@@ -5915,19 +5915,16 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
         (void)total_b;
         const uint64_t margin = 64ull * 1048576ull;
         if ((uint64_t)free_b < chunk + margin) {
-            chunk = (aligned + margin + 1048575ull) & ~1048575ull;
-            if ((uint64_t)free_b < chunk + margin) {
-                if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
-                    static uint64_t skipped = 0;
-                    skipped++;
-                    int dev = -1;
-                    (void)cudaGetDevice(&dev);
-                    fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
-                            (unsigned long long)skipped, dev, what ? what : "weights",
-                            (double)bytes / 1048576.0);
-                }
-                return NULL;
+            if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
+                static uint64_t skipped = 0;
+                skipped++;
+                int dev = -1;
+                (void)cudaGetDevice(&dev);
+                fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
+                        (unsigned long long)skipped, dev, what ? what : "weights",
+                        (double)bytes / 1048576.0);
             }
+            return NULL;
         }
     } else {
         (void)cudaGetLastError();
