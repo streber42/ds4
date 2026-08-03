@@ -5907,7 +5907,7 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     const uint64_t limit = cuda_model_cache_limit_bytes();
     if (g_model_range_bytes > limit || aligned > limit - g_model_range_bytes) return NULL;
 
-    const uint64_t chunk = cuda_model_arena_chunk_bytes(aligned);
+    uint64_t chunk = cuda_model_arena_chunk_bytes(aligned);
 
     size_t free_b = 0;
     size_t total_b = 0;
@@ -5915,16 +5915,19 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
         (void)total_b;
         const uint64_t margin = 64ull * 1048576ull;
         if ((uint64_t)free_b < chunk + margin) {
-            if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
-                static uint64_t skipped = 0;
-                skipped++;
-                int dev = -1;
-                (void)cudaGetDevice(&dev);
-                fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
-                        (unsigned long long)skipped, dev, what ? what : "weights",
-                        (double)bytes / 1048576.0);
+            chunk = (aligned + margin + 1048575ull) & ~1048575ull;
+            if ((uint64_t)free_b < chunk + margin) {
+                if (getenv("DS4_ROCM_WEIGHT_PATH_STATS")) {
+                    static uint64_t skipped = 0;
+                    skipped++;
+                    int dev = -1;
+                    (void)cudaGetDevice(&dev);
+                    fprintf(stderr, DS4_GPU_LOG_PREFIX "arena-full skip #%llu dev=%d for %s (%.2f MiB)\n",
+                            (unsigned long long)skipped, dev, what ? what : "weights",
+                            (double)bytes / 1048576.0);
+                }
+                return NULL;
             }
-            return NULL;
         }
     } else {
         (void)cudaGetLastError();
@@ -6302,8 +6305,19 @@ static void cuda_model_range_release_ranges_only(void) {
             (void)cudaFree(r.device_ptr);
         }
     }
-    for (const cuda_model_arena &a : g_model_arenas) {
-        if (a.device_ptr) (void)cudaFree(a.device_ptr);
+    for (int dev = 0; dev < DS4_MAX_GPUS; dev++) {
+        if (g_moe_prefill_gate[dev].device_ptr) {
+            (void)cudaFree(g_moe_prefill_gate[dev].device_ptr);
+            memset(&g_moe_prefill_gate[dev], 0, sizeof(g_moe_prefill_gate[dev]));
+        }
+        if (g_moe_prefill_up[dev].device_ptr) {
+            (void)cudaFree(g_moe_prefill_up[dev].device_ptr);
+            memset(&g_moe_prefill_up[dev], 0, sizeof(g_moe_prefill_up[dev]));
+        }
+        if (g_moe_prefill_down[dev].device_ptr) {
+            (void)cudaFree(g_moe_prefill_down[dev].device_ptr);
+            memset(&g_moe_prefill_down[dev], 0, sizeof(g_moe_prefill_down[dev]));
+        }
     }
     g_model_arenas.clear();
     g_model_ranges.clear();

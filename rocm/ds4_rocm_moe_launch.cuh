@@ -742,12 +742,6 @@ static int routed_moe_launch(
             down_w = cuda_model_prefill_fallback_ptr(g_moe_prefill_down, model_map, down_offset, down_bytes, "moe_down");
         }
     }
-    ds4_gpu_tensor gate_tmp = gate ? *gate : ds4_gpu_tensor{};
-    ds4_gpu_tensor up_tmp = up ? *up : ds4_gpu_tensor{};
-    ds4_gpu_tensor down_tmp = down ? *down : ds4_gpu_tensor{};
-    if (gate_w) { gate_tmp.ptr = (void *)gate_w; gate_tmp.bytes = gate_bytes; gate = &gate_tmp; }
-    if (up_w) { up_tmp.ptr = (void *)up_w; up_tmp.bytes = gate_bytes; up = &up_tmp; }
-    if (down_w) { down_tmp.ptr = (void *)down_w; down_tmp.bytes = down_bytes; down = &down_tmp; }
     if (batch_stream_selected || batch_stream_split_selected) {
         if (!down_slot_ptrs ||
             stream_batch_unique == 0) {

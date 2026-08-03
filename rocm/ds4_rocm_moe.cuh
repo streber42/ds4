@@ -2135,7 +2135,7 @@ __global__ static void moe_down_sum6_qwarp32_ptrs_batch_kernel(
     for (uint32_t slot = 0; slot < DS4_ROCM_N_EXPERT_USED; slot++) {
         if (slot >= n_expert) continue;
         int32_t compact_i = selected[(uint64_t)tok * n_expert + slot];
-        if (compact_i < 0) compact_i = 0;
+        if (compact_i < 0) continue;
         const char *down_base = down_slots[(uint32_t)compact_i];
         if (!down_base) continue;
         const cuda_block_q2_K *wr = (const cuda_block_q2_K *)(down_base + (uint64_t)row * down_row_bytes);
@@ -3391,7 +3391,7 @@ __global__ static void moe_gate_up_mid_q2K_rows_w32_ptrs_kernel(
         return;
     }
     int32_t compact_i = selected[(uint64_t)tok * n_expert + slot];
-    if (compact_i < 0) compact_i = 0;
+    if (compact_i < 0) return;
     const char *gate_base = gate_slots[(uint32_t)compact_i];
     const char *up_base = up_slots[(uint32_t)compact_i];
     if (!gate_base || !up_base) return;
@@ -3463,7 +3463,7 @@ __global__ static void moe_down_q2K_sum_rows_w32_ptrs_batch_kernel(
     for (uint32_t slot = 0; slot < DS4_ROCM_N_EXPERT_USED; slot++) {
         if (slot >= n_expert) continue;
         int32_t compact_i = selected[(uint64_t)tok * n_expert + slot];
-        if (compact_i < 0) compact_i = 0;
+        if (compact_i < 0) continue;
         const char *down_base = down_slots[(uint32_t)compact_i];
         if (!down_base) continue;
         const unsigned char *dr =

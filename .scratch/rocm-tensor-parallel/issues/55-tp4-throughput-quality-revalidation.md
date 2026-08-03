@@ -1,6 +1,6 @@
 # 55 — Full throughput + quality re-validation against the PP=4 baseline
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
@@ -135,5 +135,13 @@ this open.
 - AC1, AC2, AC3 (throughput, utilization, target comparison against PP=4) are satisfied by the post-#61 measurements (**2.01 t/s**, **~46-48% GPU util** on 4× AMD R9700). Target comparison plainly notes the PCIe latency floor at batch=1 decode across 86 all-reduces per token.
 - AC5 (`make -j8 test-rocm`) verified passing 100% (all 4 test targets).
 - `#63` and `#65` set to `ready-for-agent` so the automated `ralph` loop will execute the TP=4 quality fixture re-validation and structural VRAM headroom recovery.
+
+**2026-08-03 — Prefill NaN Root Cause Identified & Resolved (`case_000` Clean Verification):**
+- Isolated and fixed the root cause of NaN propagation (`nan_cnt = 129280 / 129280`) in TP=4 prefill:
+  1. In `rocm/ds4_rocm_moe_launch.cuh`, activation tensor wrappers `gate`, `up`, `down` were being overwritten with fallback weight pointers (`gate_w`, `up_w`, `down_w`), causing intermediate kernels to overwrite weight memory in VRAM and corrupt expert weights. Removed lines 740–745.
+  2. In `rocm/ds4_rocm_moe.cuh`, unselected expert slots (`compact_i < 0`) were fixed to skip unselected/dummy slots (`continue`/`return`) rather than defaulting to Expert 0.
+  3. In `rocm/ds4_rocm_runtime.cuh`, prefill fallback MoE buffers are now freed in `cuda_model_range_release_ranges_only` to recover ~1.75 GiB VRAM headroom.
+- Re-tested `score_official` in TP=4 mode: `case_000` completed 100% cleanly with **zero NaNs** (`nan_cnt = 0`).
+
 
 
