@@ -1,6 +1,6 @@
 # Checkpoint — 2026-07-25 (session 2) Issue 10: TP Output Divergence (BOS Loop)
 
-## Status: closed
+Status: closed
 
 This session picked up from `.scratch/rocm-tensor-parallel/issues/10-checkpoint-2026-07-25.md`
 (session 1's checkpoint, written by agy before it stopped). Session 1 proposed three
