@@ -1,5 +1,16 @@
 # Handoff: Issue 05 — First correct token on 2-rank TP (decode path)
 
+Status: closed
+
+## Acceptance Criteria
+- [x] Logits for a single-token prompt match the same-hardware pipeline reference within the harness tolerance
+- [x] The correctness harness reports pass
+- [x] Under greedy sampling the generated token is identical to the reference
+- [x] The first kernel ported in each subsystem touched here has kernel-level numeric-equivalence evidence via the scaffold
+- [x] The tolerance used is stated and justified (float reassociation under a different sharding is expected; unexplained drift is not)
+- [x] Result is reproducible across repeated runs, not a one-off pass
+- [x] Prefill-path kernels remaining unported is explicitly noted as deferred
+
 Written by an agent session that ran out of turn budget partway through. Read
 this alongside `05-first-correct-token.md` (the issue) and `PRD.md` (the
 parent feature). This doc is a handoff, not a memory record — delete it once
