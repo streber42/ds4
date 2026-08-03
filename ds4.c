@@ -27760,17 +27760,27 @@ static bool metal_graph_encode_token_raw_swa(
                         hc_bytes, NULL));
         }
     }
-    /* Use host-mapped weight pointers during TP=4 decode so all 4 tiers
-     * read weights from the same virtual address, eliminating the ROCm
-     * address-dependent Q8 noise (issue #37).  The batch prefill path
-     * already sets this in metal_graph_encode_layer_batch; the decode
-     * path must also set it because the 4-tier TP=4 loop runs each
-     * layer on all 4 devices, and the weight cache on each device
-     * holds identical data at different VRAM addresses — the Q8 matmul
-     * produces different results at different addresses. */
-    if (ok && g->rocm_tp4) {
-        ds4_gpu_set_use_host_weights(1);
-    }
+    /* Issue #65: do NOT set the host-mapped weight override during TP=4
+     * decode.  The old code forced g_use_host_weights=1 here so all 4 tiers
+     * read weights from the same virtual address, avoiding ROCm gfx1201's
+     * address-dependent Q8 noise (issue #37).  But that override bypasses
+     * the already-populated per-device selective weight slab (25.94 GiB/
+     * tier) for every decode weight and re-resolves everything through the
+     * shared arena -> cudaHostRegister PCIe-map fallback instead — the same
+     * structural waste #41 identified in prefill and #43 removed there.
+     * Live A/B (issue #65, 2026-08-03) against the production model:
+     *   - baseline (override set): ~1019 arena-full skip + ~1019 host-
+     *     register lines per 20-token run, generation 0.45 t/s, and the
+     *     score_official fixture crashed at case_001 prefill (x quantize
+     *     launch failed).
+     *   - override removed (slab serves decode): 0 arena-full skips, 0
+     *     host-register, 0 arena alloc failed, generation 2.88 t/s, and
+     *     the full 100-case fixture completes with token-weighted
+     *     avg_nll=0.36985 (vs pipeline reference 0.369) — the #37
+     *     address-noise divergence does not materialize once the real
+     *     divergence (the #66 threaded-engine race) is fixed.
+     * The batch prefill override was already removed by #43; this makes
+     * decode consistent with it. */
 
     if (ok && g->rocm_tp4 && metal_graph_tp4_spike_layer_enabled(DS4_N_LAYER - 1)) {
         /* Issue #53/#60: Overlap layer N+1 compute with layer N's all-reduce across all 43 layers.

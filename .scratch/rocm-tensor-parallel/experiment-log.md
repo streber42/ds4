@@ -2666,3 +2666,84 @@ TSVs, build logs for every commit in the table).
 **Disposition:** #55 AC4 (full 100-case TP=4 fixture) is unblocked on the
 quality side — the TP=4 path is back in-bar; the 100-case run itself still
 needs #65's VRAM-headroom work to get past case_001.
+
+## 2026-08-03 — Issue 65: eliminate the decode-side host-weights override → arena-full skips 1019→0, full 100-case fixture completes
+
+### Background / root cause
+
+Baseline at HEAD aadec9c (#66): ~1019 `arena-full skip` + ~1019
+`host-register PCIe-map` lines per 20-token live run under
+`DS4_ROCM_WEIGHT_PATH_STATS=1` (issue #64 established ~1038/run as the
+baseline; 1019 matches within variance). 0 `arena alloc failed`, exit 0.
+
+Instrumentation of `cuda_model_arena_alloc` (`rocm/ds4_rocm_runtime.cuh`)
+showed the arena packs tenants efficiently (a 1 GiB chunk holds ~30+ small
+q8_0 reuses plus one large tenant), but the run ends with only ~210 MiB of
+"free" VRAM that is *not* allocatable as a 64–128 MiB contiguous chunk
+(`cudaMemGetInfo` reports free=210 MiB; `cudaMalloc(128 MiB)` fails OOM).
+A halving-chunk-size attempt (chunk 1 GiB→512→256→128→64 MiB with a
+64 MiB margin, keeping the fresh-margin skip) was tried and **reverted**:
+it converted cheap skips into 294 real `cudaMalloc` failures and crashed
+decode via the last-resort `cudaMalloc` at
+`cuda_model_range_ptr_impl` — violating #65's AC2 (arena alloc failed must
+stay 0). Chunk sizing is not the answer; the structural problem is that
+decode re-resolves weights the slab already holds.
+
+### Root cause
+
+`ds4.c` (`metal_graph_encode_token_raw_swa`, ~27675) set
+`g_use_host_weights=1` for all TP=4 decode. That global override bypasses
+the already-populated per-device selective weight slab (25.94 GiB/tier,
+1328 ranges/tier) for *every* decode weight and re-resolves everything
+through the shared arena → `cudaHostRegister` PCIe-map fallback — the same
+structural waste #41 identified in prefill and #43 removed there. With the
+slab bypassed, the arena fills after ~18×1 GiB chunks and the remaining
+~498 owned-table resolutions + q8_0/attn_out_a/f16 decode weights fall to
+PCIe host-register every token.
+
+### Fix
+
+Removed the decode-side `ds4_gpu_set_use_host_weights(1)` call (and its
+now-stale #37 comment, replaced with this A/B record). Decode now resolves
+weights through the per-device slab (fast VRAM), exactly like batch prefill
+already did post-#43. The 2.37e-4 address-dependent Q8 noise #37 was
+guarding against does not materialize once the real divergence — the #66
+threaded-engine peer-partial race — is fixed.
+
+### Verification (all live on production model, AMD_SERIALIZE_KERNEL=3)
+
+20-token live runs (`./ds4 --rocm --gpu-devices 0,1,2,3
+--cuda-tensor-parallel ... -c 64 -n 20`):
+
+| run | arena-full skip | host-register | arena alloc failed | exit | generation |
+|---|---|---|---|---|---|
+| baseline (HEAD aadec9c) | 1019 | 1019 | 0 | 0 | 0.45 t/s |
+| A/B #1 (switch on) | 0 | 0 | 0 | 0 | 2.88 t/s |
+| A/B #2 (switch on) | 0 | 0 | 0 | 0 | 2.86 t/s |
+| final binary | 0 | 0 | 0 | 0 | 2.87 t/s |
+
+Full 100-case TP=4 score_official fixture
+(`gguf-tools/quality-testing/score_official <prod-model>
+gguf-tools/quality-testing/data/flash/manifest.tsv <out> 4096
+--gpu-devices 0,1,2,3 --cuda-tensor-parallel`):
+
+| run | cases complete | token-weighted avg_nll |
+|---|---|---|
+| baseline (HEAD aadec9c) | crashes at case_001 prefill (`routed_moe x quantize launch failed: invalid argument`, free VRAM 0.42 GiB) | n/a |
+| A/B #1 (switch on) | 100/100 | 0.369852439 |
+| final binary | 100/100 | 0.369852439 (byte-identical) |
+
+avg_nll 0.36985 matches the pipeline reference (0.369) and is in the PRD
+bar. The case_001 prefill crash is gone — it was a downstream symptom of
+the arena being exhausted by the decode-side bypass, not a separate bug.
+
+`make -j8 test-rocm`: exit 0 (test_rocm_tp_stubs, test_rocm_xdev,
+test_rocm_kernel_compare 6/6, test_engine_rocm_tp_refusal).
+
+### Disposition
+
+#65 AC1 ✓ (0 skips vs ~1038 baseline, re-run 3× live + 2× full fixture),
+AC2 ✓ (0 arena alloc failed, 100/100 decode completes), AC3 ✓ (test-rocm),
+AC4 ✓ (this entry). The g_use_host_weights prefill diagnostic switch
+(DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL, ds4.c ~31330) is untouched; the
+decode-side override is simply removed.
