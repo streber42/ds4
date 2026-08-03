@@ -64,8 +64,9 @@ unambiguous (13 vs 0.37) and doesn't need 100 cases to detect.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/65-tp4-arena-structural-vram-headroom.md`
-
-*(#65 blocks the *full* 100-case run, not the single-case bisect smoke;
-the bisect itself can proceed immediately on case_000 since the signal is
-categorically unambiguous at 35× bar.)*
+*(Nothing blocks this issue's machine dispatch: the bisect runs on case_000
+smoke, which needs no VRAM headroom, so it starts immediately. Issue #65's
+structural-VRAM-headroom work gates only the *full* 100-case fixture (and
+#55 AC4) — it is ordered after this issue, not before it. Keep this section
+free of `.scratch/…` path references, which the ralph parser reads as hard
+machine blockers.)*

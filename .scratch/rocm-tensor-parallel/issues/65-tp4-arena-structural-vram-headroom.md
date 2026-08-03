@@ -1,6 +1,6 @@
 # 65 — Recover structural VRAM headroom so arena tenants stop falling back to PCIe host-register
 
-Status: ready-for-human
+Status: ready-for-agent
 
 ## Parent
 
