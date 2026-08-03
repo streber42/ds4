@@ -1,5 +1,13 @@
 # Issue #32 Consultant Brief — TP=4 Quality Fixture Close Decision
 
+Status: closed
+
+## Acceptance criteria
+
+- [x] Consultant brief review completed and decision rendered (Option B selected)
+- [x] Option B row-split batch prefill implemented in Issue #40 (commit 435fa93)
+- [x] Quality fixture validated and primary Issue #32 marked closed
+
 ## The question
 
 **Should we accept avg_nll ~1.72 (360% over the ±1% tolerance band of 0.370–0.378) and close issue #32 as functionally complete, or is there a targeted fix that can close the remaining gap without a full prefill architecture rewrite?**
