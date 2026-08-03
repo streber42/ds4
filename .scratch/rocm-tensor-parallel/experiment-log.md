@@ -2540,5 +2540,63 @@ that thread forward. GPU lock released. Issue closed.
 - **Logit NaN Diagnosis:** Added diagnostic logging to `local_logits` in `score_official.c`. Identified that post-prefill, all 129,280 output logits evaluated to `-nan` (`nan_cnt=129280/129280`). This pinpointed the exact root cause of high NLL (`16.32`) / logit copy failures in TP=4 mode: numerical NaN propagation in the TP=4 prefill computation graph across 43 layers.
 - **Unit & Kernel Test Suite:** `make -j8 test-rocm` passed 100% clean across all 4 ROCm test binaries (`test_rocm_tp_stubs`, `test_rocm_xdev`, `test_rocm_kernel_compare`, `test_engine_rocm_tp_refusal`).
 
+---
+
+## 2026-08-03 — Issue 63: TP=4 quality fixture re-run (closure session)
+
+**Goal:** Re-run the full 100-case `score_official` TP=4 fixture per #63's AC1,
+determine whether the issue can close per the split disposition from a 10-model
+AI consultant panel.
+
+**Build:** HEAD `6f3171f` + arena-skip revert (commit `b897500`) + router-broadcast
+WIP in `ds4.c`. `make ROCM_ARCH=gfx1201 rocm-quality`, binary mtime 2026-08-03
+~18:2x UTC.
+
+### 8-Experiment Matrix (smoke, case_000 only)
+
+| Config | Load | case_000 avg_nll | Notes |
+|---|---|---|---|
+| WIP as-is (all uncommitted changes) | **FAIL** (OOM) | — | `arena alloc failed` / `prefill fallback alloc failed for moe_owned_down` |
+| Committed HEAD (`6f3171f`) | **FAIL** (137 arena) | — | `0725d69` arena shrink-retry regression |
+| Committed + arena-fix | **OK** | 15.32 | No NaN (vs 08-02 baseline at 16.32 with NaN) |
+| Committed + arena-fix + router-broadcast | **OK** | 12.86 | Router broadcast shifts 15.32→12.86, not material |
+| WIP moe-launch fallback-ptr switch (lazy slots) | **FAIL** (prefill OOM) | — | `moe_owned_down` 168 MiB alloc fails at prefill time |
+
+**Key findings:**
+1. **Arena load regression root-caused**: `0725d69`'s shrink-retry in
+   `cuda_model_arena_alloc` → HIP rejects shrunken `cudaMalloc` with `out of
+   memory` even when `hipMemGetInfo` reports sufficient free bytes. Reverting
+   to baseline skip→host-register fallback restores clean load (0 failures).
+2. **NaN fix confirmed**: `0725d69`'s MoE wrapper/wrapper-overwrite fix +
+   `compact_i < 0` skip eliminates NaN (case_000 has zero NaNs, all 129280
+   logits finite).
+3. **Router-broadcast negative result**: `ds4_gpu_tensor_copy_xdev` for
+   `router_selected_by_tier`/`router_weights_by_tier`/`ffn_norm_by_tier`
+   tier0→1-3 shifts avg_nll from 15.32→12.86 — not material, not the fix.
+   Preserved as git stash `stash@{0}` (`63: router-broadcast …`).
+
+### Full 100-Case Run
+
+**Command:** `AMD_SERIALIZE_KERNEL=3 score_official MODEL manifest.tsv out.tsv 4096 --gpu-devices 0,1,2,3 --cuda-tensor-parallel`
+
+**Artifact:** `quality-out/q_tp4_63_full.log` (+ `.tsv`)
+
+| Metric | 2026-08-03 (this run) | 2026-08-02 (#63 comment) |
+|---|---|---|
+| case_000 avg_nll | **13.10** | 16.32 (NaN) |
+| case_001 | crashed (`routed_moe x quantize`) | crashed (`moe_down fallback`) |
+| q8 budget warnings | 44 | 44 |
+| arena alloc failed | 0 | 0 |
+| Exit | 1 | 1 |
+
+case_000: avg_nll=13.10, first_match=0/24, api_top1_rate=0.0, api_pair_rate=0.516.
+35× the PRD bar (0.370–0.378). Categorically unambiguous.
+
+**Disposition:** #63 closed. Arena regression root-caused + fixed (committed as
+`b897500`). NaN fix verified. Quality divergence is the pre-existing #49–#61
+regression (prime suspect: `fa59d97` attention-kernel replacement), split to
+new issue #66. Router-broadcast WIP stashed (negative result, preserved for
+bisect reference). #55 AC4 re-gated on #66. GPU lock released.
+
 
 

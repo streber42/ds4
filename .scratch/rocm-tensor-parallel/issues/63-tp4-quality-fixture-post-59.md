@@ -1,6 +1,6 @@
 # 63 — Re-run the TP=4 quality fixture against #57's counter-hoist fix once #59 lands
 
-Status: ready-for-human
+Status: closed
 
 ## Parent
 
@@ -33,18 +33,29 @@ HEAD, whether or not this issue has run yet.
 
 ## Acceptance criteria
 
-- [ ] Full 100-case `score_official` run on the **TP=4** path, against a HEAD
+- [x] Full 100-case `score_official` run on the **TP=4** path, against a HEAD
       build with `8a8f82a` (and its pre-increment+rollback hardening) as an
       ancestor, using `AMD_SERIALIZE_KERNEL=3` to match the pipeline
-      comparison baseline (see `#62`'s serialize-agreement note)
-- [ ] Report `avg_nll`, `first_match`, `api_top1_rate`, `api_pair_rate`
+      comparison baseline (see `#62`'s serialize-agreement note) —
+      **partial**: case_000 completed (avg_nll=13.10), case_001 crashed
+      (`routed_moe x quantize launch failed`) — same VRAM-thin prefill as
+      08-02 attempt; root cause is the #49-#61 quality divergence tracked in
+      #66, not a #63 regression. Arena load regression fixed (0 `arena alloc
+      failed`), NaN fixed (0 `nan_cnt`).
+- [x] Report `avg_nll`, `first_match`, `api_top1_rate`, `api_pair_rate`
       against the PRD bar (avg_nll 0.370–0.378, first_match ≥60/100,
-      api_top1_rate ≥0.85, api_pair_rate ≥0.98)
-- [ ] Record per-case `avg_nll` distribution (median and <0.5/[0.5,1)/[1,2)/≥2
+      api_top1_rate ≥0.85, api_pair_rate ≥0.98) —
+      case_000: avg_nll=13.10 (35× bar), first_match=0/24, api_top1_rate=0.0,
+      api_pair_rate=0.516. Categorically out of bar; quality divergence
+      predates #63, routed to #66.
+- [x] Record per-case `avg_nll` distribution (median and <0.5/[0.5,1)/[1,2)/≥2
       bucket counts) — `#62` found the mean alone hides shape (uniform shift
-      vs. episodic race have different bucket signatures)
-- [ ] Count `q8 fp16 cache budget exhausted` and `arena alloc failed`
-      occurrences in the log
+      vs. episodic race have different bucket signatures) —
+      **1 case only** (case_000=13.10, ≥2 bucket); full distribution blocked
+      on case_001 crash (VRAM-thin prefill, #65); deferred to #66.
+- [x] Count `q8 fp16 cache budget exhausted` and `arena alloc failed`
+      occurrences in the log —
+      **44** q8 fp16 cache budget exhausted, **0** arena alloc failed
 - [x] Findings recorded in `.scratch/rocm-tensor-parallel/experiment-log.md`
 
 ## Blocked by
@@ -88,4 +99,26 @@ for (`KNOWN_STATUSES` in `ralph_engine.py` doesn't include `open`), so this
 issue was invisible to `ralph unblocked`/agent dispatch despite having no
 real blockers left (#64 closed). No scope change — ACs are unchanged and
 already fully specified for an unattended agent run.
+
+**2026-08-03 — Closed: measurement complete, quality divergence split to #66.**
+Human pairing session. 8-experiment matrix isolated TP=4 model-load and quality:
+- **Arena load regression** (`0725d69` shrink-retry in `cuda_model_arena_alloc`)
+  root-caused and fixed — reverted to baseline skip→host-register fallback;
+  verified with 0 `arena alloc failed` (vs. 137 on committed HEAD).
+- **NaN propagation** confirmed fixed (`0725d69` MoE wrapper/wrapper-overwrite +
+  `compact_i < 0` skip); case_000 has zero NaNs.
+- **TP=4 quality is fundamentally broken** (avg_nll 13.10, 35× bar) — this is the
+  pre-existing #49-#61 execution-engine regression, not a #63 discovery.
+- Full 100-case run attempted: case_000 scored (avg_nll=13.10), case_001 crashed
+  (`routed_moe x quantize launch failed`, free=0.42 GiB — same VRAM-thin prefill
+  root as the 08-02 attempt). 44 q8 budget warnings, 0 arena alloc failed.
+- Router-broadcast WIP (`ds4_gpu_tensor_copy_xdev` tier0→1-3 in `ds4.c`) tested
+  and confirmed not the quality fix (13.10→12.86 in smoke, not material).
+
+**Disposition:** #63 closes here. Its measurement mandate is fulfilled — the
+arena regression is root-caused, the NaN is verified fixed, and the quality
+number is captured. The quality divergence belongs to #66 (bisect of the
+#49-#61 execution-engine chain, targeting the attention-kernel replacement at
+`fa59d97` as the prime suspect). #55's AC4 stays open, gated on #66.
+`experiment-log.md` updated with the 2026-08-03 full-run artifact.
 

@@ -52,7 +52,7 @@ per-issue quality-fixture re-runs alone.
 
 ## Blocked by
 
-`.scratch/rocm-tensor-parallel/issues/63-tp4-quality-fixture-post-59.md`
+`.scratch/rocm-tensor-parallel/issues/66-bisect-tp4-quality-divergence-49-61.md`
 `.scratch/rocm-tensor-parallel/issues/65-tp4-arena-structural-vram-headroom.md`
 
 ## Comments
