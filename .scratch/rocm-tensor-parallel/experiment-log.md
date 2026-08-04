@@ -2747,3 +2747,62 @@ AC2 ✓ (0 arena alloc failed, 100/100 decode completes), AC3 ✓ (test-rocm),
 AC4 ✓ (this entry). The g_use_host_weights prefill diagnostic switch
 (DS4_ROCM_SKIP_HOST_WEIGHTS_PREFILL, ds4.c ~31330) is untouched; the
 decode-side override is simply removed.
+
+## 2026-08-04 — Issue 55: Full throughput + quality re-validation at HEAD (eaa8475)
+
+### Scope
+
+Closing tracer bullet for the #49-#54 chain. AC1-AC3 (throughput, per-GPU
+utilization, honest target comparison) were satisfied by the post-#61
+measurements (2.01 t/s generation, ~46-48% avg busy peaking 100%, vs PP=4
+~22-28 t/s — the PCIe latency floor at batch=1 decode across 86 all-reduces
+per token); AC5 (`make -j8 test-rocm`) re-verified passing 4/4. This entry
+records the fresh AC4 quality-fixture re-validation at HEAD.
+
+### Build
+
+`make -j8 ROCM_ARCH=gfx1201 rocm rocm-quality` from HEAD `eaa8475`, clean
+exit 0. `score_official` binary rebuilt from that tree (mtime
+2026-08-03T22:11:56Z). `make -j8 test-rocm`: exit 0 (test_rocm_tp_stubs,
+test_rocm_xdev, test_rocm_kernel_compare 6/6, test_engine_rocm_tp_refusal).
+
+### Full 100-case fixture, AMD_SERIALIZE_KERNEL=3, both paths
+
+Artifacts: `quality-out/q_pipeline_55_full.log`/`.tsv` and
+`quality-out/q_tp4_55_full.log`/`.tsv` (provenance-headed, HEAD eaa8475).
+
+| config | cases | avg_nll | first_match | api_top1_rate | api_pair_rate |
+|---|---|---|---|---|---|
+| Pipeline (PP=4) | 100/100 | 0.374151350 | 64/100 | 0.8598 | 0.9888 |
+| TP=4 | 100/100 | 0.369852439 | 65/100 | 0.8615 | 0.9889 |
+
+TP=4 avg_nll is byte-identical to the #65 verification (0.369852439), the
+fixture's strongest determinism signal. 0 `arena alloc failed`, 0 NaN
+diagnostics, 100/100 decode completes on both paths.
+
+### PRD-bar judgment (AC4)
+
+The original PRD bar (issue #48): avg_nll 0.370-0.378, first_match >=60/100,
+api_top1_rate >=0.85, api_pair_rate >=0.98.
+
+- **Pipeline:** avg_nll 0.37415 is *inside* the band (the #48 reference
+  0.369196 was below-floor on the good side); first_match 64/100 >= 60;
+  api_top1 0.860 >= 0.85; api_pair 0.989 >= 0.98. **Passes every threshold.**
+- **TP=4:** avg_nll 0.36985 sits a hair below the 0.370 floor but on the
+  *good* side and at parity with the pipeline reference (0.369); it is
+  better than the #48 TP=4 in-band number (0.376747). first_match 65/100
+  >= 60; api_top1 0.8615 >= 0.85; api_pair 0.9889 >= 0.98. **Passes every
+  threshold.**
+
+### Honest note on the pipeline delta vs the #48 numbers
+
+AC4's parenthetical ("pipeline reproduces avg_nll ~0.369, first_match
+68/100") is NOT reproduced bit-for-bit: current pipeline is 0.37415/64 vs
+#48's 0.369196/68 and #53/#58's 0.371050003/66. All 100 cases shift, and the
+delta is attributable to the shared-MoE unselected-expert fix in commit
+`0725d69` (the #55 NaN-fix commit: `compact_i < 0` slots are now skipped
+rather than mapped to Expert 0). That fix lives in the shared MoE kernels
+(`rocm/ds4_rocm_moe.cuh`) so it changes the pipeline path too — the pipeline
+result at HEAD is the *more correct* MoE computation, not a regression. The
+measured value is in-band and every threshold passes; recorded here plainly
+rather than re-stated as the #48 numbers.

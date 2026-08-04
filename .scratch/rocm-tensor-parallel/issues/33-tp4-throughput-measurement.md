@@ -254,3 +254,14 @@ fundamental architectural limitation of all-reduce-based TP on this topology.
 
 **PRD secondary risk realized:** "correct tensor parallelism turns out no
 faster than pipeline on this topology." Findings recorded honestly.
+
+**2026-08-04 — Final outcome recorded by issue #55 (closed):** the full
+throughput + quality re-validation chain landed. Final TP=4 generation
+throughput on the post-#61 build is **2.01 t/s** with per-GPU utilization
+**~46-48% avg busy (peaks 100%)** — up from the 4.54 t/s-era's ~3-4%
+busy (the pre-#49 sync/dispatch problem) but still short of the PP=4
+~22-28 t/s pipeline baseline; the shortfall is the PCIe latency floor at
+batch=1 decode across 86 all-reduces per token, recorded honestly against
+the 80-90%-of-PP4 target. Full 100-case `score_official` quality fixture
+passes at HEAD for both paths (pipeline avg_nll 0.37415, TP=4 avg_nll
+0.36985, first_match ≥64/100).

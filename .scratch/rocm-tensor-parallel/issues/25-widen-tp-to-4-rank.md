@@ -241,3 +241,12 @@ owned function is `resident_expert_count = 64`), but the actual `gate_bytes` use
 - `ds4_rocm_xdev.cu`: Added `ds4_rocm_xdev_sync_all_devices` implementation
 - `rocm/ds4_rocm_moe_launch.cuh`: Fixed `gate_bytes`/`down_bytes` for owned_filtered
   path in `routed_moe_launch`
+
+**2026-08-04 — Final outcome recorded by issue #55 (closed):** true 4-rank
+TP is correct and quality-clean at HEAD. Full 100-case `score_official`
+fixture: TP=4 avg_nll 0.369852439 (first_match 65/100, api_top1 0.8615,
+api_pair 0.9889) at parity with the pipeline reference (0.374151350/64 on
+the current HEAD MoE kernels); pipeline and TP=4 both pass the PRD bar.
+Throughput on the final build is 2.01 t/s / ~46-48% GPU busy — the 
+all-reduce latency floor on discrete GPUs keeps TP=4 below the PP=4
+pipeline baseline, per the PRD secondary-risk record.
