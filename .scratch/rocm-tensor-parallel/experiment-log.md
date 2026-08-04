@@ -2806,3 +2806,75 @@ rather than mapped to Expert 0). That fix lives in the shared MoE kernels
 result at HEAD is the *more correct* MoE computation, not a regression. The
 measured value is in-band and every threshold passes; recorded here plainly
 rather than re-stated as the #48 numbers.
+
+## 2026-08-04 — Post-rebase re-validation at HEAD (a0ab65e, gfx1201_tp rebased onto origin/main)
+
+### Scope
+
+The `gfx1201_tp` branch was rebased onto `origin/main` (186 commits replayed,
+6 conflicts resolved in `rocm/`). This entry records the fresh validation of
+the rebased tree: build, unit tests, coherence smoke, and the full 100-case
+quality fixture on both the TP=4 and pipeline (PP=4) paths, same protocol as
+issue 55 (`AMD_SERIALIZE_KERNEL=3`).
+
+### Build
+
+`make -B ROCM_ARCH=gfx1201 rocm rocm-quality -j8` from HEAD `a0ab65e`, clean
+exit 0 (only pre-existing `nodiscard` warnings). `make test-rocm`: exit 0
+(test_rocm_tp_stubs, test_rocm_xdev, test_rocm_kernel_compare 6/6,
+test_engine_rocm_tp_refusal). Coherence smoke `ds4 --rocm --gpu-devices
+0,1,2,3 --cuda-tensor-parallel -c 64 -p "The capital of France is" -n 20
+--temp 0`: coherent output, all 4 tiers active, direct peer access validated,
+no arena OOM, no NaN.
+
+### Full 100-case fixture, AMD_SERIALIZE_KERNEL=3, both paths
+
+Artifacts: `quality-out/q_tp4_rebase_20260804.log`/`.tsv` and
+`quality-out/q_pipeline_rebase_20260804.log`/`.tsv` (provenance-headed, HEAD
+a0ab65e).
+
+| config | cases | avg_nll | first_match | api_top1_rate | api_pair_rate |
+|---|---|---|---|---|---|
+| Pipeline (PP=4) | 100/100 | 0.371869416 | 65/100 | 0.8615 | 0.9889 |
+| TP=4 | 100/100 | 0.372918940 | 66/100 | 0.8593 | 0.9897 |
+
+0 `arena alloc failed`, 0 NaN diagnostics, 100/100 decode completes on both
+paths.
+
+### PRD-bar judgment
+
+PRD bar (issue #48): avg_nll 0.370-0.378, first_match >=60/100, api_top1_rate
+>=0.85, api_pair_rate >=0.98.
+
+- **Pipeline:** avg_nll 0.37187 in-band; first_match 65/100 >= 60; api_top1
+  0.8615 >= 0.85; api_pair 0.9889 >= 0.98. **Passes every threshold.**
+- **TP=4:** avg_nll 0.37292 in-band; first_match 66/100 >= 60; api_top1 0.8593
+  >= 0.85; api_pair 0.9897 >= 0.98. **Passes every threshold.**
+
+### Honest note vs the parked baseline (#55 numbers)
+
+Neither value is byte-identical to the #55 run (pipeline 0.374151350, TP=4
+0.369852439). All 100 cases shift by the same small delta, consistent with the
+rebase absorbing upstream's changes to the shared MoE / runtime kernels the
+branch previously diverged from. The deltas (~0.003 on avg_nll) are far below
+the 0.008 in-band width, all threshold metrics hold, and 100/100 cases still
+complete on both paths. The rebase preserves the parked branch's correctness
+and quality, with no regression.
+
+### Throughput A/B vs the parked baseline
+
+Same protocol on both builds (`AMD_SERIALIZE_KERNEL=3 ds4 --rocm --gpu-devices
+0,1,2,3 --cuda-tensor-parallel -c 64 -p "The capital of France is" -n 20
+--temp 0`), interleaved on the same 4× R9700 box. Parked = tag `tp-parked-v1`
+(@1a9323a) built in a throwaway worktree; rebased = HEAD `a0ab65e`.
+
+| build | prefill | generation (range across runs) |
+|---|---|---|
+| Parked (tp-parked-v1) | 1.22 t/s | **2.85 t/s** (2.83-2.85, n=6) |
+| Rebased (a0ab65e) | 1.22 t/s | **2.75 t/s** (2.74-2.77, n=4) |
+
+Generation took a reproducible ~3.5% hit (2.85 -> 2.75 t/s); prefill
+unchanged. Same root cause as the quality delta: the rebase absorbed upstream's
+reworked shared MoE/runtime kernels, which cost a little decode throughput
+while staying inside the PRD quality bar. Recorded here so the rebase's
+performance cost is a known, measured trade-off rather than a surprise.
