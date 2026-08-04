@@ -48,3 +48,7 @@ __pycache__/
 build.log
 smoke.log
 .DS_Store
+
+# Quality-fixture runs must write into .scratch/rocm-tensor-parallel/quality-out/,
+# not the repo root; ignore strays so evidence can't silently strand here.
+/quality-out/

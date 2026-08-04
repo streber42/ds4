@@ -1,15 +1,69 @@
 # ROCm/gfx1201 Tensor Parallelism — Proof of Concept
 
-Tag: `tp-poc-v1` (at commit `59ba21f`)
+Tag: `tp-parked-v1` (final state, 2026-08-04). The earlier tag `tp-poc-v1` (commit
+`59ba21f`) captures the mid-project state described from
+[the historical snapshot](#historical-snapshot-2026-07-26-tag-tp-poc-v1) down.
 
-Status: **proof of concept, not production-ready.** The tensor-parallel GPU compute path
-ports cleanly and is numerically correct — but only when kernel dispatch is serialized. The
-default (fast) path has a known, unresolved multi-GPU dispatch-ordering bug (also present in
-plain pipeline mode) that produces incoherent output. See [Known limitations](#known-limitations).
+Status: **parked.** Correct, validated, off by default, ~10× slower than pipeline. See
+[`docs/adr/0001-dense-tp4-parked-sequential-default.md`](../../docs/adr/0001-dense-tp4-parked-sequential-default.md)
+for the decision record.
 
 This is the shareable output of the PRD at [`PRD.md`](PRD.md): implementing the 31 stubbed
 ROCm tensor-parallel GPU entry points so DeepSeek-V4-Flash can run tensor-parallel across 4x
 AMD R9700 (gfx1201) instead of pipeline layer-split only.
+
+## Final state — 2026-08-04, tag `tp-parked-v1`
+
+The project ran to issue #66 plus a wrap-up (67 issues, all closed; #67/#68 filed as
+parked re-entry points). Outcome against the PRD's three success criteria:
+
+1. **Correct — met.** Native 4-rank TP (not the two-pairs Option A described in the
+   historical snapshot below; #25–#31 widened the design). Full 100-case
+   `score_official` fixture at HEAD `eaa8475`, under `AMD_SERIALIZE_KERNEL=3`:
+
+   | config | avg_nll | first_match | api_top1_rate | api_pair_rate |
+   |---|---|---|---|---|
+   | 4-GPU pipeline (PP=4) | 0.374151 | 64/100 | 0.8598 | 0.9888 |
+   | **4-GPU dense TP=4** | **0.369852** | **65/100** | **0.8615** | **0.9889** |
+
+   Both pass every PRD bar; 100/100 cases complete, zero arena failures, zero NaNs.
+
+2. **Faster — missed by ~10×.** TP=4 decode: **~2.87 t/s** (live 20-token runs,
+   serialized) vs the PP=4 baseline of **~22–28 t/s**. Root cause: dense TP=4 performs
+   **86 hidden-state all-reduces per token**; at batch=1 each is a synchronous PCIe
+   round-trip, so the sync bill alone exceeds the ~35 ms/token budget that 28 t/s
+   implies. The persistent-thread engine built to hide this latency (#50/#60) has a
+   cross-layer peer-partial buffer race (#66) and is **disabled by default**
+   (`DS4_TP4_THREADED_LAYERS` unset ⇒ legacy sequential path); even racing it measured
+   only 2.01 t/s.
+
+3. **Utilized — moot.** ~46–48% average GPU busy under the (racy) threaded engine vs
+   ~30% pipeline, but utilization at one-tenth the throughput is not a win.
+
+**What the work delivered anyway:** the shared-MoE unselected-expert fix (`0725d69`)
+corrected pipeline-path math (unselected expert slots no longer silently ran Expert 0);
+the slab/arena work (#59/#64/#65) eliminated ~1019 per-token PCIe host-register
+fallbacks; and the cross-device (`ds4_rocm_xdev`) and sharding-policy (`ds4_tp_shard.h`)
+modules are validated building blocks for any future sharding.
+
+**Re-entry points if resumed:** issue
+[#68](issues/68-explore-expert-parallel-decode.md) — expert-parallel decode (hipfire
+reports 25.6 t/s on identical hardware with EP sharding, which avoids the per-token
+hidden-state collectives) — then [#67](issues/67-fix-threaded-engine-peer-partial-race.md)
+— the threaded-engine race fix. In that order; see the ADR for why.
+
+The reproduction commands in the historical snapshot below still work at
+`tp-parked-v1`; the quality fixture still requires `AMD_SERIALIZE_KERNEL=3` for
+trustworthy output (the gfx1201 HWS dispatch-ordering issue is a hardware-scheduler
+behavior, confirmed unchanged under ROCm 7.14).
+
+---
+
+## Historical snapshot — 2026-07-26, tag `tp-poc-v1`
+
+Everything below describes the project mid-flight (issues #00–#18 era: two-rank design
+run as two pipelined TP pairs, throughput unmeasured post-fix). It is kept for the
+record; where it conflicts with the final state above, the final state is authoritative.
 
 ## What works
 

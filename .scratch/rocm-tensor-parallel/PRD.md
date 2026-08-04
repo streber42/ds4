@@ -1,6 +1,16 @@
 # PRD: ROCm/gfx1201 Tensor Parallelism for ds4
 
-Status: ready-for-agent
+Status: parked
+
+**Outcome (2026-08-04, tag `tp-parked-v1`):** all 67 issues closed. Success
+criterion 1 (correctness) met — TP=4 avg_nll 0.3699 at parity with the pipeline
+reference, every quality bar passed on the full 100-case fixture. Criterion 2
+(faster than the ~28 t/s pipeline) unmet by ~10× — TP=4 decode is ~2.87 t/s, bound
+by 86 hidden-state all-reduces per token over PCIe at batch=1. Criterion 3
+(utilization) moot at that throughput. Decision record:
+`docs/adr/0001-dense-tp4-parked-sequential-default.md`. Parked re-entry points:
+issue #68 (expert-parallel decode), then #67 (threaded-engine race fix). Do not
+dispatch this PRD as agent work without a human reopening it.
 
 **Proof of concept published:** tag `tp-poc-v1` captures the current state of this port —
 what works, what does not, current throughput, and how to reproduce. See
