@@ -48,8 +48,8 @@ approved:
 
 ## Acceptance criteria
 
-- [ ] hipfire's 25.6 t/s claim independently reproduced (or refuted) on this
-      machine, with the config recorded
+- [x] hipfire's 25.6 t/s claim independently reproduced (or refuted) on this
+      machine, with the config recorded — **refuted**, see 2026-08-07 comment
 - [ ] A written go/no-go recommendation: expected decode t/s for an ds4 EP
       path, the per-token communication budget backing that estimate, and the
       implementation scope — or a documented decision not to proceed
@@ -63,3 +63,34 @@ a human decision to invest.)*
 ## Comments
 
 **2026-08-04 — Filed as part of the project park (wrap-up of #49–#66).**
+
+**2026-08-07 — AC1 resolved: the motivating 25.6 t/s number is refuted, not
+reproduced.** A sibling benchmark campaign in `/home/murphy/src/dev_ds4`
+(`.scratch/deepseek-benchmark/`) independently tested hipfire's `serve --tp 4`
+EP path on this exact 4× R9700 hardware, for DeepSeek V4 Flash, one day after
+this project's park (2026-08-05, issue T5/C3,
+`.scratch/deepseek-benchmark/issues/05-t5-c3-hipfire-mq2-tp4.md`, commit
+`264d09d` in that repo). Measured **prefill 15.7 t/s, decode 4.0 t/s** at
+pp=2048 (3/3 runs) — not 25.6 t/s, and **6.6× slower** than this project's own
+PP=4 pipeline baseline (~26.5–28 t/s), not parity with it. At pp≥8192,
+hipfire's EP decode loop deadlocked the daemon (`ep_serve_ds4`'s watchdog never
+fires); reproduced twice. Root cause per that issue: hipfire's EP path runs
+plain autoregressive decode with **no MTP speculative decode** (unlike its
+non-EP/pipeline path), and per-step cost grows with KV length — the 25.6 t/s
+figure is very likely a short-context/small-batch number, or reflects a
+hipfire build/config that campaign didn't reproduce. hipfire is under active
+development (pushed 2026-08-07, per its GitHub metadata), so this is a
+point-in-time result, not a permanent verdict on EP as a technique — but the
+specific empirical claim that made this issue's priority ordering (#68 before
+#67) no longer holds as measured.
+
+**Recommendation on AC2 (informational, not a go/no-go decision — that stays
+with a human per this issue's `ready-for-human` status):** don't commission
+new ds4-native EP implementation work on the strength of the hipfire number
+alone; it's gone. If EP is still wanted, the honest next step is either (a)
+re-test hipfire's current `main` (it has moved since 2026-08-05) with a
+longer, context-controlled protocol to see if 25.6 t/s ever reappears under
+conditions the sibling campaign's harness didn't hit, or (b) treat this issue
+as unblocked-but-unpromising and deprioritize it below the WMMA v2 lead in
+`../gfx1201-wmma-v2/` (cheaper, orthogonal to TP/EP, never tested). Full
+citations in `/home/murphy/src/dev_ds4/.scratch/deepseek-benchmark/artifacts/research-ds4-r9700-rocm.md`.
