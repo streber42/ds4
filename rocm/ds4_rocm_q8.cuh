@@ -174,6 +174,45 @@ __global__ static void matmul_q8_0_preq_warp8_kernel(
     if (lane == 0) out[row] = acc;
 }
 
+/* Tensor-parallel k-slice variant of matmul_q8_0_preq_warp8_kernel: each
+ * rank holds only its owned contiguous K range (block_start..+slice_blocks)
+ * of a Q8_0 weight whose rows still span the full in-dim, so the row stride
+ * (full_blocks * 34) differs from the slice length actually summed over.
+ * Partial outputs from every rank's k-slice sum (via cross-device accumulate)
+ * to the full projection -- see ds4_gpu_matmul_q8_0_kslice_rows_tensor. */
+__global__ static void matmul_q8_0_kslice_preq_warp8_kernel(
+        float *out,
+        const unsigned char *w,
+        const int8_t *xq,
+        const float *xscale,
+        uint64_t slice_dim,
+        uint64_t out_dim,
+        uint64_t full_blocks,
+        uint64_t block_start,
+        uint64_t slice_blocks,
+        int use_dp4a) {
+    const uint64_t row = (uint64_t)blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint64_t tok = blockIdx.y;
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim) return;
+    out += tok * out_dim;
+    xq += tok * slice_blocks * 32u;
+    xscale += tok * slice_blocks;
+    const unsigned char *wr = w + row * full_blocks * 34u + block_start * 34u;
+    float acc = 0.0f;
+    for (uint64_t b = lane; b < slice_blocks; b += 32u) {
+        uint64_t i0 = b * 32u;
+        uint64_t bn = slice_dim - i0 < 32u ? slice_dim - i0 : 32u;
+        const __half *scale_h = (const __half *)(wr + b * 34u);
+        const int8_t *qs = (const int8_t *)(wr + b * 34u + 2u);
+        const int8_t *xqb = xq + b * 32u;
+        int dot = dot_i8_block(qs, xqb, bn, use_dp4a);
+        acc += __half2float(*scale_h) * xscale[b] * (float)dot;
+    }
+    acc = warp_sum_f32(acc);
+    if (lane == 0) out[row] = acc;
+}
+
 __global__ static void matmul_q8_0_preq_rows_w32_kernel(
         float *out,
         const unsigned char *w,
@@ -669,10 +708,128 @@ __global__ static void matmul_q8_0_f32_batch_sharedx_warp_rows_w32_toktile_kerne
     }
 }
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-typedef _Float16 __attribute__((ext_vector_type(16))) ds4_q8_half16_t;
+/* DS4_ROCM_NO_WMMA compiles the batched WMMA prefill matmul out entirely, so
+ * the same build can be run without any matrix-core path as a correctness
+ * reference to A/B the kernels below against. The launch site in
+ * ds4_rocm_matmul.cuh carries the same guard. */
+#if (defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)) && !defined(DS4_ROCM_NO_WMMA)
+#if !defined(DS4_RDNA4)
+/* gfx11 (RDNA 3/3.5): WMMA inputs are <16 x _Float16> */
+typedef _Float16 __attribute__((ext_vector_type(16))) ds4_q8_wmma_half_t;
 typedef float    __attribute__((ext_vector_type(8)))  ds4_q8_float8_t;
+#endif
 
+#if defined(DS4_RDNA4)
+/* gfx12 (RDNA 4): this kernel goes through rocwmma library fragments rather
+ * than the raw __builtin_amdgcn_wmma_..._gfx12 intrinsic.
+ *
+ * The raw builtin's per-lane operand layout for gfx12's halved (<8 x f16>)
+ * WMMA fragments is undocumented outside AMD's compiler internals, and the
+ * gfx11 body below (and the literal gfx12 port that used to live here)
+ * assumed the same "N accumulating calls per K-tile, contiguous or
+ * interleaved element split" convention gfx11 uses. That assumption was
+ * checked against a CPU reference on real gfx1201 hardware and falsified:
+ * three different fragment-fill/call-count layouts (a straight 2-call port,
+ * a 4-call contiguous-half split, and a 4-call interleaved split) all
+ * produced wrong logits (mean_abs error ~100+ against fp32 accumulation,
+ * vs. ~0.02 for this rocwmma path) -- the 2-call port simply dropped half of
+ * every Q8_0 block's weights. rocwmma already handles gfx12 correctly
+ * elsewhere in this file (moe_down_q2K_hotlist_wmma_*_kernel), so this path
+ * reuses that library instead of re-deriving the raw ISA operand mapping. */
+__launch_bounds__(128, 2)
+__global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
+        float *out,
+        const unsigned char *w,
+        const float *x,
+        uint32_t n_tokens,
+        uint32_t in_dim,
+        uint32_t out_dim,
+        uint64_t row_bytes) {
+    constexpr uint32_t M_TILE = 64u;
+    constexpr uint32_t N_TILE = 64u;
+    constexpr uint32_t K_TILE = 32u;
+    constexpr uint32_t WARPS = 4u;
+    constexpr uint32_t M_PER_WARP = M_TILE / WARPS;
+    constexpr uint32_t N_TILES_PER_WARP = N_TILE / 16u;
+
+    const uint32_t block_m = (uint32_t)blockIdx.x * M_TILE;
+    const uint32_t block_n = (uint32_t)blockIdx.y * N_TILE;
+    if (block_m >= out_dim || block_n >= n_tokens) return;
+
+    const uint32_t tid = threadIdx.x;
+    const uint32_t warp_id = tid >> 5u;
+    const uint32_t n_blocks = in_dim >> 5u;
+
+    using frag_a = rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, half, rocwmma::row_major>;
+    using frag_b = rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, half, rocwmma::col_major>;
+    using frag_c = rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>;
+    frag_c acc[N_TILES_PER_WARP];
+#pragma unroll
+    for (uint32_t i = 0; i < N_TILES_PER_WARP; i++) rocwmma::fill_fragment(acc[i], 0.0f);
+
+    __shared__ _Float16 lds_x[N_TILE * K_TILE];
+    __shared__ half shWA[WARPS][16][16];
+
+    for (uint32_t bi = 0; bi < n_blocks; bi++) {
+        for (uint32_t j = tid; j < N_TILE * K_TILE; j += blockDim.x) {
+            const uint32_t nt = j >> 5u;
+            const uint32_t kk = j & 31u;
+            const uint32_t tok = block_n + nt;
+            float xv = 0.0f;
+            if (tok < n_tokens) xv = x[(uint64_t)tok * in_dim + bi * 32u + kk];
+            lds_x[j] = (_Float16)xv;
+        }
+        /* Two K=16 sub-blocks per 32-wide bi block (Q8_0's w0: k[0:16],
+         * w1: k[16:32]), each its own rocwmma matrix_a tile staged into
+         * shared memory and matched against a col_major matrix_b view
+         * directly over lds_x (already laid out K-contiguous per token,
+         * which is exactly what col_major storage needs -- no restaging). */
+        for (uint32_t half_i = 0; half_i < 2u; half_i++) {
+            for (uint32_t j = tid; j < WARPS * 16u * 16u; j += blockDim.x) {
+                const uint32_t wid = j / (16u * 16u);
+                const uint32_t rem = j - wid * 16u * 16u;
+                const uint32_t row_in_warp = rem / 16u;
+                const uint32_t kk = rem - row_in_warp * 16u;
+                const uint32_t row = block_m + wid * M_PER_WARP + row_in_warp;
+                const uint32_t safe_row = row < out_dim ? row : (out_dim - 1u);
+                const unsigned char *bp = w + (uint64_t)safe_row * row_bytes + (uint64_t)bi * 34u;
+                uint16_t s_bits;
+                _Float16 sc;
+                __builtin_memcpy(&s_bits, bp, 2);
+                __builtin_memcpy(&sc, &s_bits, 2);
+                const int8_t *wq = (const int8_t *)(bp + 2u + half_i * 16u);
+                shWA[wid][row_in_warp][kk] = (half)(sc * (_Float16)(float)(int)wq[kk]);
+            }
+            __syncthreads();
+
+            frag_a a;
+            rocwmma::load_matrix_sync(a, &shWA[warp_id][0][0], 16);
+#pragma unroll
+            for (uint32_t ntile = 0; ntile < N_TILES_PER_WARP; ntile++) {
+                frag_b b;
+                rocwmma::load_matrix_sync(b, (const half *)(lds_x + ntile * 16u * K_TILE + half_i * 16u), K_TILE);
+                rocwmma::mma_sync(acc[ntile], a, b, acc[ntile]);
+            }
+            __syncthreads();
+        }
+    }
+
+    __shared__ float shC[WARPS][16][16];
+#pragma unroll
+    for (uint32_t ntile = 0; ntile < N_TILES_PER_WARP; ntile++) {
+        rocwmma::store_matrix_sync(&shC[warp_id][0][0], acc[ntile], 16, rocwmma::mem_row_major);
+        __syncthreads();
+        for (uint32_t j = tid & 31u; j < 16u * 16u; j += 32u) {
+            const uint32_t row_in_warp = j / 16u;
+            const uint32_t nn = j - row_in_warp * 16u;
+            const uint32_t row = block_m + warp_id * M_PER_WARP + row_in_warp;
+            const uint32_t tok = block_n + ntile * 16u + nn;
+            if (row < out_dim && tok < n_tokens) out[(uint64_t)tok * out_dim + row] = shC[warp_id][row_in_warp][nn];
+        }
+        __syncthreads();
+    }
+}
+#else
 /* Four-wave, 64x64 output-tile Q8_0 batched GEMM for large prefill chunks.
  * This is the hipfire/llama.cpp-style MMQ shape adapted to DS4's existing
  * F32 activation buffers: each block stages a 64-token x 32-K activation tile
@@ -737,8 +894,10 @@ __global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
 
         const int8_t *w0 = (const int8_t *)(bp + 2u);
         const int8_t *w1 = (const int8_t *)(bp + 18u);
-        ds4_q8_half16_t a0;
-        ds4_q8_half16_t a1;
+
+        /* gfx11: 16-element input fragments */
+        ds4_q8_wmma_half_t a0;
+        ds4_q8_wmma_half_t a1;
 #pragma unroll
         for (uint32_t i = 0; i < 16u; i++) {
             a0[i] = sc * (_Float16)(float)(int)w0[i];
@@ -749,8 +908,8 @@ __global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
         for (uint32_t ntile = 0; ntile < N_TILES_PER_WARP; ntile++) {
             const uint32_t nt = ntile * 16u + lane16;
             const _Float16 *xb = lds_x + nt * K_TILE;
-            const ds4_q8_half16_t b0 = *(const ds4_q8_half16_t *)(xb);
-            const ds4_q8_half16_t b1 = *(const ds4_q8_half16_t *)(xb + 16u);
+            const ds4_q8_wmma_half_t b0 = *(const ds4_q8_wmma_half_t *)(xb);
+            const ds4_q8_wmma_half_t b1 = *(const ds4_q8_wmma_half_t *)(xb + 16u);
             if (ntile == 0u) {
                 acc0 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a0, b0, acc0);
                 acc0 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a1, b1, acc0);
@@ -780,6 +939,8 @@ __global__ static void matmul_q8_0_f32_batch_wmma_4w_kernel(
         }
     }
 }
+#endif /* DS4_RDNA4 */
+
 
 template <int TILES_N=8, int BM=16, int BN=16, int BK=16>
 __global__ static void matmul_q8_0_f32_batch_wmma_onthefly_kernel(

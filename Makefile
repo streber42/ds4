@@ -55,14 +55,14 @@ CPU_CORE_OBJS = ds4_cpu.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
 ROCM_ARCH ?= gfx1151
-ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH)
+ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH) $(ROCM_EXTRA_CFLAGS)
 ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt
 DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
 DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+.PHONY: all help clean test test-metal-session-batch test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-no-wmma
 
 ifeq ($(UNAME_S),Darwin)
 .PHONY: metal-decode-schedule-bench metal-prefill-variant-bench check-mxfp4-half-lut
@@ -184,6 +184,13 @@ strix-halo:
 		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
 
 rocm: strix-halo
+
+rocm-no-wmma:
+	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent \
+		CORE_OBJS="ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_layer_pack.o" \
+		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD -DDS4_ROCM_NO_WMMA" \
+		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
+		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
 
 ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
 	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)

@@ -209,6 +209,12 @@ static int cuda_matmul_q8_0_tensor_f16_gemm(
     if (!xh) return 0;
     f32_to_f16_kernel<<<(xh_count + 255u) / 256u, 256>>>(xh, (const float *)x->ptr, xh_count);
     if (!cuda_ok(cudaGetLastError(), "q8 f16 activation convert launch")) return 0;
+#ifdef __HIP_PLATFORM_AMD__
+    if (g_hipblaslt_ready &&
+        hipblaslt_gemm_tn_f16_out_f32((float *)out->ptr, w_f16, xh,
+                                      (uint32_t)out_dim, (uint32_t)n_tok, (uint32_t)in_dim, "q8_matmulf16"))
+        return 1;
+#endif
     const float alpha = 1.0f;
     const float beta = 0.0f;
     cublasStatus_t st = cublasGemmEx(g_cublas,
@@ -316,9 +322,16 @@ static int cuda_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *mode
     uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
     if (weight_offset > model_size ||
         !cuda_u64_mul_checked(blocks, 34u, &row_bytes) ||
-        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
-        weight_bytes > model_size - weight_offset ||
-        !cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes)) return 0;
+    if (weight_bytes > model_size - weight_offset) {
+        fprintf(stderr,
+            "ds4: q8_0 matmul size guard FAIL label=%s offset=%llu bytes=%llu model=%llu out_dim=%llu in_dim=%llu\n",
+            label ? label : "?",
+            (unsigned long long)weight_offset, (unsigned long long)weight_bytes,
+            (unsigned long long)model_size, (unsigned long long)out_dim, (unsigned long long)in_dim);
+        return 0;
+    }
+    if (!cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) return 0;
     if (n_tok > 1 && !g_quality_mode &&
@@ -327,7 +340,8 @@ static int cuda_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *mode
                                          in_dim, out_dim, x, n_tok, label ? label : "shared_expert")) {
         return 1;
     }
-    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0");
+    const int logical_tier = ds4_tensor_device_idx(out);
+    const char *wptr = cuda_resolve_weight_ptr(model_map, weight_offset, weight_bytes, logical_tier, "q8_0");
     if (!wptr) return 0;
     if (n_tok == 1 && !cuda_q8_prequant_decode_enabled()) {
         const bool extended_sharedx =
@@ -387,7 +401,10 @@ static int cuda_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *mode
         return cuda_ok(cudaGetLastError(), "matmul_q8_0 f32 warp launch");
     }
     if (n_tok > 1) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+/* Same guard as the kernel definition in ds4_rocm_q8.cuh: a DS4_ROCM_NO_WMMA
+ * build has no batched WMMA kernel to launch and falls through to the
+ * sharedx/warp-row tiers below. */
+#if (defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)) && !defined(DS4_ROCM_NO_WMMA)
         if (!g_quality_mode && (in_dim % 32u) == 0u &&
             out_dim >= 1024u &&
             n_tok >= 256u &&
@@ -526,6 +543,72 @@ static int cuda_matmul_q8_0_tensor_labeled(ds4_gpu_tensor *out, const void *mode
 extern "C" int ds4_gpu_matmul_q8_0_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok) {
     return cuda_matmul_q8_0_tensor_labeled(out, model_map, model_size, weight_offset,
                                            in_dim, out_dim, x, n_tok, "q8_0");
+}
+
+/* Tensor-parallel k-slice matvec: out[out_dim] += W[:, in_start:+in_count] @
+ * x, where W rows still span full in_dim (only this rank's owned K range is
+ * read) and x holds just the owned slice. Callers sum every rank's partial
+ * via cross-device accumulate to recover the full projection. Ported from
+ * the CUDA TP path (ds4_cuda.cu ds4_gpu_matmul_q8_0_kslice_rows_tensor);
+ * decode-only callers here always pass n_tok == 1. */
+extern "C" int ds4_gpu_matmul_q8_0_kslice_rows_tensor(
+        ds4_gpu_tensor       *out,
+        const void           *model_map,
+        uint64_t              model_size,
+        uint64_t              weight_offset,
+        uint64_t              in_dim,
+        uint64_t              out_dim,
+        uint64_t              in_start,
+        uint64_t              in_count,
+        const ds4_gpu_tensor *x,
+        uint64_t              n_tok) {
+    if (!out || !x || !model_map || in_dim == 0 || out_dim == 0 ||
+        in_count == 0 || n_tok == 0 || n_tok > 65535u) return 0;
+    if ((in_start % 32u) != 0 || (in_count % 32u) != 0 ||
+        in_start > in_dim || in_count > in_dim - in_start) return 0;
+    const uint64_t full_blocks = (in_dim + 31u) / 32u;
+    const uint64_t block_start = in_start / 32u;
+    const uint64_t slice_blocks = in_count / 32u;
+    uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (weight_offset > model_size ||
+        !cuda_u64_mul_checked(full_blocks, 34u, &row_bytes) ||
+        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !cuda_u64_mul3_checked(n_tok, in_count, sizeof(float), &x_bytes) ||
+        !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
+    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "q8_0_kslice");
+    if (!wptr) return 0;
+
+    const uint64_t xq_bytes = n_tok * slice_blocks * 32u;
+    const uint64_t scale_offset = (xq_bytes + 15u) & ~15ull;
+    const uint64_t tmp_bytes = scale_offset + n_tok * slice_blocks * sizeof(float);
+    void *tmp = cuda_tmp_alloc(tmp_bytes, "q8_0 kslice prequant");
+    if (!tmp) return 0;
+    int8_t *xq = (int8_t *)tmp;
+    float *xscale = (float *)((char *)tmp + scale_offset);
+    const int use_dp4a = 1;
+    const dim3 qgrid((unsigned)slice_blocks, (unsigned)n_tok, 1u);
+    quantize_q8_0_f32_kernel<<<qgrid, 32>>>(
+            xq,
+            xscale,
+            (const float *)x->ptr,
+            in_count,
+            slice_blocks);
+    if (!cuda_ok(cudaGetLastError(), "matmul_q8_0_kslice quantize launch")) return 0;
+    const dim3 grid(((unsigned)out_dim + 7u) / 8u, (unsigned)n_tok, 1u);
+    matmul_q8_0_kslice_preq_warp8_kernel<<<grid, 256>>>(
+            (float *)out->ptr,
+            reinterpret_cast<const unsigned char *>(wptr),
+            xq,
+            xscale,
+            in_count,
+            out_dim,
+            full_blocks,
+            block_start,
+            slice_blocks,
+            use_dp4a);
+    return cuda_ok(cudaGetLastError(), "matmul_q8_0_kslice launch");
 }
 
 extern "C" int ds4_gpu_matmul_q8_0_decode_mpp_tensor(
@@ -806,13 +889,15 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         in_dim == 0u || out_dim == 0u || n_tok == 0u ||
         in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
     uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (out->device_id >= 0 && out->device_id < g_n_gpus) (void)ds4_gpu_set_current_device(out->device_id);
     if (weight_offset > model_size ||
         !cuda_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
         weight_bytes > model_size - weight_offset ||
         !cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
         !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
         x->bytes < x_bytes || out->bytes < out_bytes) return 0;
-    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "f16");
+    const int logical_tier = ds4_tensor_device_idx(out);
+    const char *wptr = cuda_resolve_weight_ptr(model_map, weight_offset, weight_bytes, logical_tier, "f16");
     if (!wptr) return 0;
     const __half *w = (const __half *)wptr;
     const int ordered_decode = n_tok == 1u;
@@ -822,6 +907,12 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
         if (!xh) return 0;
         f32_to_f16_kernel<<<(xh_count + 255) / 256, 256>>>(xh, (const float *)x->ptr, xh_count);
         if (!cuda_ok(cudaGetLastError(), "f16 activation convert launch")) return 0;
+#ifdef __HIP_PLATFORM_AMD__
+        if (g_hipblaslt_ready &&
+            hipblaslt_gemm_tn_f16_out_f32((float *)out->ptr, w, xh,
+                                          (uint32_t)out_dim, (uint32_t)n_tok, (uint32_t)in_dim, "f16_matmulf16"))
+            return 1;
+#endif
         const float alpha = 1.0f;
         const float beta = 0.0f;
         cublasStatus_t st = cublasGemmEx(g_cublas,
@@ -903,8 +994,9 @@ extern "C" int ds4_gpu_matmul_f16_pair_tensor(
         out1->bytes < out_dim * sizeof(float)) {
         return 0;
     }
-    const __half *w0 = (const __half *)cuda_model_range_ptr(model_map, weight0_offset, weight_bytes, "f16_pair0");
-    const __half *w1 = (const __half *)cuda_model_range_ptr(model_map, weight1_offset, weight_bytes, "f16_pair1");
+    const int logical_tier = ds4_tensor_device_idx(out0);
+    const __half *w0 = (const __half *)cuda_resolve_weight_ptr(model_map, weight0_offset, weight_bytes, logical_tier, "f16_pair0");
+    const __half *w1 = (const __half *)cuda_resolve_weight_ptr(model_map, weight1_offset, weight_bytes, logical_tier, "f16_pair1");
     if (!w0 || !w1) return 0;
     if (!g_quality_mode && !cuda_runtime_config()->graph_dump) {
         if (in_dim <= 8192u && in_dim * sizeof(float) <= 65536u) {
