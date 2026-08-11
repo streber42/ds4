@@ -97,12 +97,20 @@ re-opening. Resolve it before spending on any of them.
 - Beware the arena OOM that contaminated #49's absolute numbers (it measured
   ~1.4 t/s vs issue #33's clean-load ~4.5 t/s). #64/#65 addressed this; confirm
   a clean load before trusting absolute figures, and report whether you got one.
+- **Keep the measurement prompt under 256 tokens**, unless
+  `.scratch/gfx1201-wmma-v2/issues/03-fix-broken-gfx12-wmma-in-this-repo.md` has
+  already landed. Reason: `rocm/ds4_rocm_matmul.cuh:404` dispatches the currently
+  *broken* gfx12 WMMA kernel at `n_tok >= 256`, so a longer prompt prefills a
+  numerically corrupt KV cache that every decode step then attends over. It
+  should not distort the *timing* ranking this issue is after — a wrong matmul
+  costs about what a right one does — but the generated text will be garbage.
+  **Do not burn a GPU session debugging that**; if you see incoherent output with
+  a ≥256-token prompt, this is the known cause. Say which prompt length you used.
 
 ## Blocked by
 
-*(None. This is measurement on the existing default path and does not depend on
-the WMMA work — that kernel only fires for `n_tok >= 256`, i.e. prefill, and this
-issue measures decode.)*
+*(None — but see the prompt-length guardrail above, which is what keeps this
+independent of issue 03 rather than blocked on it.)*
 
 ## Answer
 
