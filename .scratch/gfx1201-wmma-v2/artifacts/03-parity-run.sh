@@ -12,7 +12,7 @@ set -u
 BIN=$1; TAG=$2; MODE=$3
 M=/var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
 ART=.scratch/gfx1201-wmma-v2/artifacts
-P=$ART/03-parity-prompt.txt
+P=${PROMPT:-$ART/03-parity-prompt.txt}
 
 ARGS=(-m "$M" --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 --prompt-file "$P")
 case $MODE in

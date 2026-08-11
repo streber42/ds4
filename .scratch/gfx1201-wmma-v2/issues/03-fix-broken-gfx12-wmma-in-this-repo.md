@@ -200,10 +200,42 @@ fp16-vs-fp32 rounding, not a divergence in the computation — and both
 continuations are fluent, on-topic English, which categorically excludes the
 gibberish failure mode issue 01 saw from the raw-builtin port.
 
-So the clause is not met as written. Whether it *can* be met in this tree for
-any prompt whose greedy path passes through a sub-0.5-logit tie is the open
-question for the human: the AC is achievable only by choosing a prompt with no
-near-tie in its first 30 steps, which would test less, not more.
+**Replication on an independent prompt.** To test that explanation rather than
+assert it, a second prompt was built (`03-tiefree-prompt.txt`: same 2633-token
+report body, a low-entropy "copy this sentence verbatim" task instead of the
+open-ended question) with a decision rule fixed in advance: screen the WMMA
+build's 30 steps first, and only accept the prompt as an AC-4 candidate if no
+step has a top-2 gap below 1.0.
+
+It failed the screen — step 9 gap **0.050**, step 15 gap 0.692 — so it was
+discarded as an AC-4 candidate and used instead as a falsifiable prediction:
+*if* the near-tie explanation is right, the two builds should first diverge at
+step 9 and nowhere earlier.
+
+```
+PREDICTION: first divergence at step 9 (the only sub-0.5 gap, 0.050)
+OBSERVED  : first divergence at step 9
+```
+
+Steps 0–8 match exactly, with gaps of 0.771–15.4. Two independent prompts, two
+divergences, each landing on precisely that run's tightest tie and nowhere
+else. (`artifacts/03-tiefree-step-compare.txt`.)
+
+So the clause is not met as written, and the reason is now a measured property
+of this model on this tree rather than a hypothesis: a 30-token greedy window
+here reliably contains at least one sub-0.5-logit tie (the model opens every
+response with a free-form `"We need to ..."` reasoning preamble, which is dense
+in stylistic near-ties), and any two builds differing by ~0.4 in mean logit —
+including two *correct* builds with different rounding — will split on it.
+
+That makes byte-identical greedy generation the wrong cross-build parity
+criterion on this tree, not a failing grade for this kernel. Deciding what
+replaces it in the AC is the human's call. The obvious candidate, and what the
+evidence above actually supports, is: **identical token selection at every step
+whose top-2 logit gap exceeds the measured mean cross-build delta** — which
+both prompts satisfy without exception. Prompt-shopping for a tie-free window
+was deliberately not pursued past the one pre-registered attempt; it would be
+outcome-shopping, and it would test less than the criterion above.
 
 ### Dispatch traffic — the blast radius
 
@@ -249,15 +281,22 @@ make the new kernel more reachable than the broken one already was.
 
 **Status `ready-for-human`.** Everything in scope is implemented, built, and
 measured; `make test-rocm` passes 6/6 kernel comparisons plus the cross-device
-and TP-refusal suites on the default multi-arch build. (`make test` is not
-runnable on this host at all: its `CORE_OBJS` include `ds4_cuda.o`, built with
-`$(NVCC)`, and there is no CUDA toolchain here — pre-existing and unrelated to
-this change.) The single open item is a judgement call on
-the byte-identical-generation clause of AC 4, which is unmet for a fully
-characterized reason (a 0.39-logit near-tie at step 24 of 30). Two ways
-forward, both cheap, and picking between them is the human's call: relax the
-clause to "argmax + top-5 + no near-tie-free divergence", or re-run against a
-prompt whose first 30 greedy steps contain no sub-1-logit tie.
+and TP-refusal suites on the default multi-arch build. (`make test` was run and
+does not complete on this host, for a pre-existing reason unrelated to this
+change: `make: /usr/local/cuda/bin/nvcc: No such file or directory` /
+`*** [Makefile:278: ds4_cuda.o] Error 127` — `CORE_OBJS` include a CUDA
+translation unit regardless of backend, and this is a ROCm-only machine.)
+
+The single open item is the byte-identical-generation clause of AC 4. It is
+unmet, and the cause is characterized and replicated on two independent
+prompts: each build's greedy path splits at that run's single sub-0.5-logit
+tie and agrees at every other step. Recommended resolution — replace the
+clause with "identical selection at every step whose top-2 logit gap exceeds
+the measured mean cross-build delta", which the evidence satisfies without
+exception and which loses nothing as a corruption detector. Re-running against
+a tie-free prompt is the alternative, but one pre-registered attempt at
+building such a prompt already failed its own screen (0.050 at step 9), and
+chasing further would be outcome-shopping.
 
 **Finding about the other tree, not acted on.** `~/src/ds4`'s `Makefile:191`
 passes `ROCM_EXTRA_CFLAGS=-DDS4_ROCM_NO_WMMA` to its `rdna4` target, but nothing
@@ -274,9 +313,14 @@ tree's `rocm-no-wmma` does not have the bug: `ROCM_EXTRA_CFLAGS` is wired into
 
 **Artifacts** under `.scratch/gfx1201-wmma-v2/artifacts/`:
 `03-parity-run.sh` and `03-compare-logits.py` (the harness),
-`03-parity-prompt.txt` (the fixed 2633-token prompt),
+`03-parity-prompt.txt` and `03-tiefree-prompt.txt` (the two fixed prompts),
 `03-logit-parity-summary.txt`, `03-dispatch-summary.txt`,
-`03-logprob-step-compare.txt`, and the per-run generation/stderr logs. The two
+`03-logprob-step-compare.txt`, `03-tiefree-step-compare.txt`, and the per-run
+generation/stderr logs. (`03-gen-wmma.txt`/`03-stderr-wmma.txt`, the
+provenance header for the first prompt's WMMA logprobs run, were lost to an
+over-broad prune; the equivalent header for the same run's NO_WMMA half
+survives as `03-gen-nowmma.txt`, and the invocation is identical modulo the
+binary.) The two
 13 MB `rocprofv3` trace directories and three 1.6 MB full-vocab logit dumps
 were distilled into those summaries and not committed; the scripts regenerate
 them.

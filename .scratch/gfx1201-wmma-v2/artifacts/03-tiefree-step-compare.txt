@@ -1,0 +1,37 @@
+Independent-prompt replication (03-tiefree-prompt.txt, 2657 prompt tokens)
+step  wmma_sel        nowmma_sel      same   gap_wmma  gap_nowmma
+   0  'We'            'We'            True      3.395       3.627
+   1  ' need'         ' need'         True      2.834       1.950
+   2  ' to'           ' to'           True     15.447      15.116
+   3  ' copy'         ' copy'         True      7.806       7.229
+   4  ' the'          ' the'          True      4.450       4.333
+   5  ' exact'        ' exact'        True      1.249       0.771
+   6  ' sentence'     ' sentence'     True     12.023      11.760
+   7  ' from'         ' from'         True      1.915       1.762
+   8  ' the'          ' the'          True     14.361      14.791
+   9  ' user'         ' task'         False     0.050       0.151
+  10  "'s"            '.'             False     6.195       2.138
+  11  ' message'      ' The'          False     1.406      11.779
+  12  '.'             ' task'         False     3.961       0.461
+  13  ' The'          ' says'         False     6.296       8.660
+  14  ' user'         ':'             False     2.138       8.263
+  15  ' provided'     ' "'            False     0.692      10.895
+  16  ' a'            'copy'          False     5.114       2.266
+  17  ' long'         ' the'          False     3.384      19.119
+  18  ' engineering'  ' following'    False     3.229      16.955
+  19  ' report'       ' sentence'     False    18.242      16.345
+  20  ','             ' exactly'      False     3.224      16.502
+  21  ' but'          ' once'         False     1.243      18.077
+  22  ' the'          ','             False     3.276      14.132
+  23  ' task'         ' character'    False     7.255      18.808
+  24  ' is'           ' for'          False     2.966      12.519
+  25  ' to'           ' character'    False     1.679      14.161
+  26  ' copy'         ','             False     6.547      10.911
+  27  ' a'            ' and'          False     1.688      17.106
+  28  ' specific'     ' write'        False     8.922      15.450
+  29  ' sentence'     ' nothing'      False    14.556      17.539
+
+Pre-registered screen on the WMMA build alone: min top-2 gap = 0.050 at step 9
+(second-lowest 0.692 at step 15) -> prompt FAILS a 'no sub-1.0 tie in 30 steps'
+screen, so it was discarded as an AC-4 candidate and used as a prediction test.
+Prediction: divergence should first occur at step 9. Observed: step 9.
