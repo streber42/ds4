@@ -1,0 +1,7 @@
+# tag=preflight-trace-nowmma build=nowmma shape=trace passes=2
+# binary=./ds4-bench.nowmma md5=8281b27866a96089cee16491abffc066
+# prompt=.scratch/gfx1201-wmma-v2/artifacts/04-sweep-prompt.txt md5=9e8288c7601e0468e54f4b67dd7ed8ab
+# head=c291492 date=2026-08-11T13:52:28-07:00
+# rocprofv3 --kernel-trace --output-format csv -d .scratch/gfx1201-wmma-v2/artifacts/04-trace-preflight-trace-nowmma -o trace -- env ./ds4-bench.nowmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/04-sweep-prompt.txt --gen-tokens 0 --step-incr 2048 --warm-weights --passes 2 --ctx-start 2048 --ctx-max 4096 --csv .scratch/gfx1201-wmma-v2/artifacts/04-csv-preflight-trace-nowmma.csv
+ds4: GPU config: 4 devices [0,1,2,3] requested, budgets 30,30,30,30 GB; auto=true
+# exit=0 wall_sec=66

@@ -1,0 +1,7 @@
+# tag=short-wmma-r1 build=wmma shape=short passes=3
+# binary=./ds4-bench.wmma md5=b4fcb9ab9517214b93df275be310f1f4
+# prompt=.scratch/gfx1201-wmma-v2/artifacts/04-sweep-prompt.txt md5=9e8288c7601e0468e54f4b67dd7ed8ab
+# head=c291492 date=2026-08-11T13:44:02-07:00
+# env ./ds4-bench.wmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/04-sweep-prompt.txt --gen-tokens 0 --step-incr 2048 --warm-weights --passes 3 --ctx-start 2048 --ctx-max 4096 --csv .scratch/gfx1201-wmma-v2/artifacts/04-csv-short-wmma-r1.csv
+ds4: GPU config: 4 devices [0,1,2,3] requested, budgets 30,30,30,30 GB; auto=true
+# exit=0 wall_sec=76

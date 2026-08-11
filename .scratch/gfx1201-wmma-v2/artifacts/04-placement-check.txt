@@ -1,0 +1,24 @@
+Issue 04: are the short (ctx-max 4096) and full (ctx-max 32768) sweeps comparable?
+Issue 02's error was reading a memory-pressure artifact as a kernel property, so
+weight placement and streaming state are checked rather than assumed.
+
+--- short (04-stderr-short-wmma-r1.txt) ---
+ds4: CUDA tier 0 (device 0) selective weights: 24.93 GiB in 393 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.95 GiB in 400 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.98 GiB in 406 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 7.90 GiB in 129 ranges
+ds4-bench: context buffers 453.50 MiB (ctx=4097, backend=rocm, prefill_chunk=4096, raw_kv_rows=4352, compressed_kv_rows=1026)
+  ssd/streaming/expert-cache messages: 0
+--- full (04-stderr-full-wmma-r1.txt) ---
+ds4: CUDA tier 0 (device 0) selective weights: 24.93 GiB in 393 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.95 GiB in 400 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.98 GiB in 406 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 7.90 GiB in 129 ranges
+ds4-bench: context buffers 1053.75 MiB (ctx=32769, backend=rocm, prefill_chunk=4096, raw_kv_rows=4352, compressed_kv_rows=8194)
+  ssd/streaming/expert-cache messages: 0
+
+Placement is identical: same 4 tiers, same GiB, same range counts (393/400/406/129),
+same prefill_chunk=4096 and raw_kv_rows=4352. Only compressed_kv_rows scales with ctx
+(1026 -> 8194), costing 453.50 -> 1053.75 MiB of context buffers. Zero streaming
+messages in either shape -- unlike issues 01/02, which ran under --ssd-streaming on a
+single 32 GiB R9700. The two tables are therefore comparable.

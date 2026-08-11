@@ -17,7 +17,40 @@ consistent taper.
 
 ## Answer
 
-**Result: WMMA v2 win is real but narrow-context-only. The kernel's n_tok≥256 guard
+> **SUPERSEDED 2026-08-11 by issue 04
+> (`04-cold-start-controlled-prefill-sweep.md`). Do not cite the headline or the
+> table below as a measurement of the WMMA kernel.**
+>
+> Issue 04 established two things that invalidate this result:
+>
+> 1. **The A/B was null.** This sweep's two columns were produced by
+>    `~/src/ds4`'s `make rdna4` and `make rdna4-wmma` targets, per this issue's
+>    own acceptance criteria. Those two targets are provably the same build:
+>    `rdna4` sets `ROCM_EXTRA_CFLAGS=-DDS4_ROCM_NO_WMMA` (`Makefile:191`) but
+>    nothing in that Makefile ever consumes `ROCM_EXTRA_CFLAGS` — `ROCM_CFLAGS`
+>    (`:58`) does not reference it and the compile rules (`:340–346`) use only
+>    `$(ROCM_CFLAGS)`. And a build that *did* define the macro would not compile
+>    at all: that tree guards the kernel's definition (`ds4_rocm_q8.cuh:672`)
+>    but not its launch site (`ds4_rocm_matmul.cuh:398`), which issue 04
+>    confirmed with `hipcc -fsyntax-only -DDS4_ROCM_NO_WMMA` →
+>    *"use of undeclared identifier 'matmul_q8_0_f32_batch_wmma_4w_kernel'"*.
+>    So the "baseline" column below is a second WMMA run, not a baseline. The
+>    +22.8% and the "+0.5% to +1.0% at all sixteen frontiers" are both
+>    same-binary run-to-run variation, not kernel effects.
+> 2. **The effect size was wrong in both directions.** Re-measured on this
+>    tree's 4× R9700 against a reference build that really does compile the
+>    kernel out, the warm-prefill win is **+20.5%** (+21.7% at 4096 to +19.4%
+>    at 32768, with a mild KV-cache-pressure taper) — it does not drop to ~1%.
+>    Separately, the first prefill in any process pays a fixed **+5.4 s**
+>    cold-start cost, identical in both builds, which is what makes a 2048-frontier
+>    row look slow and produced this table's rising 101 → 166 → 181 baseline curve.
+>
+> The interpretation below — "the win is only active on the first 2048-token
+> chunk", "both builds converge to the same memory-bandwidth ceiling" — is
+> therefore withdrawn. The `n_tok >= 256` gate does hold; the claim that the
+> win fades above it does not.
+
+**Result (WITHDRAWN — see above): WMMA v2 win is real but narrow-context-only. The kernel's n_tok≥256 guard
 means the speedup is only active on the first 2048-token prefill chunk; all subsequent
 chunks at higher ctx frontiers run at the same per-chunk throughput as baseline.**
 

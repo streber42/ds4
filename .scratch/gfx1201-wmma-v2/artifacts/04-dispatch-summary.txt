@@ -1,0 +1,14 @@
+Issue 04 dispatch trace: does the kernel under test fire through ds4-bench?
+rocprofv3 --kernel-trace, `short` shape (ctx 2048->4096, --passes 2), 4 GPUs.
+Issue 03 proved 246-vs-0 through ./ds4; this is the same check through ds4-bench,
+because a null A/B is exactly how issue 02 went wrong.
+
+[wmma] all kernels=16154  matmul_q8_0_f32_batch_wmma_4w_kernel=976  device time=16.24s
+         LDS_Block_Size=10240 (= the rocwmma body's 4096+2048+4096 tiles)
+         Grid_Size_Y=32 (= ceil(2048/64) token tiles)
+         top 3: f32_to_f16_kernel=1554, __amd_rocclr_copyBuffer=1230, rope_tail_kernel=981
+[nowmma] all kernels=16154  matmul_q8_0_f32_batch_wmma_4w_kernel=0  device time=0.00s
+         top 3: f32_to_f16_kernel=1554, __amd_rocclr_copyBuffer=1230, void matmul_q8_0_f32_batch_sharedx_warp_rows_w32_toktile_kernel<32u, 16u>=1148
+
+The reference build reaches zero dispatches and falls through to the
+sharedx/warp-row tier, so the measured delta is this kernel and nothing else.
