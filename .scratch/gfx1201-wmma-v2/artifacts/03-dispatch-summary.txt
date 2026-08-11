@@ -1,0 +1,14 @@
+== wmma-gen: rocprofv3 --kernel-trace, 2633-token prefill + 30 greedy tokens, 4-GPU pipeline, production mode
+   total kernel dispatches (all kernels): 49515
+   matmul_q8_0_f32_batch_wmma_4w_kernel dispatches: 246
+   device time: 5211.0 ms total, 21.18 ms mean
+   per-agent: {'Agent 1': 136, 'Agent 2': 51, 'Agent 3': 51, 'Agent 4': 8}
+   grid (X/128 blocks x Y blocks): {(16, 42): 43, (32, 42): 86, (64, 42): 75, (512, 42): 42}
+   LDS bytes: [10240]  VGPR: [104]
+   run-window coverage: 7.8% .. 26.6% (prefill only)
+
+== nowmma-gen: rocprofv3 --kernel-trace, 2633-token prefill + 30 greedy tokens, 4-GPU pipeline, production mode
+   total kernel dispatches (all kernels): 49515
+   matmul_q8_0_f32_batch_wmma_4w_kernel dispatches: 0
+   -> kernel is compiled out (DS4_ROCM_NO_WMMA); nothing dispatched
+

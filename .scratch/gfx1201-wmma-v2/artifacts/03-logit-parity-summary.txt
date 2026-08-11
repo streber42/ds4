@@ -1,0 +1,23 @@
+Issue 03 — next-token logit parity, production mode (NOT score_official)
+========================================================================
+Model  : /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
+Host   : 4x AMD Radeon AI Pro R9700 (gfx1201), 4-GPU pipeline (--gpu-devices 0,1,2,3)
+Env    : AMD_SERIALIZE_KERNEL=3     Prompt: 03-parity-prompt.txt, 2633 prompt tokens
+Builds : WMMA    = make ROCM_ARCH=gfx1201 rocm         (md5 a60d5bcc5b5b7f01ee2ecec05d0b63d7)
+         NO_WMMA = make ROCM_ARCH=gfx1201 rocm-no-wmma (md5 dc43c9ac8933ca19765e71623ba38dca)
+
+Determinism pre-check (same WMMA build, two runs, 129,280-entry logit vector):
+  argmax        2581 'We' both runs
+  top-5         [2581, 671, 10318, 85667, 110137] both runs, same order
+  mean_abs_err  0.000000     max_abs_err 0.000000   -> bit-identical
+
+WMMA vs NO_WMMA (run1 vs run1):
+  argmax        2581 'We' (WMMA logit 32.304977) == 2581 'We' (NO_WMMA logit 31.885427)   MATCH
+  top-5         [2581, 671, 10318, 85667, 110137] both, same order                        MATCH
+  mean_abs_err  0.403549
+  max_abs_err   3.898771  (at token id 43014)
+
+Reproduce:
+  .scratch/gfx1201-wmma-v2/artifacts/03-parity-run.sh <binary> <tag> logits
+  python3 .scratch/gfx1201-wmma-v2/artifacts/03-compare-logits.py <a.json> <b.json>
+(The two 1.6 MB full-vocab dumps were not committed; the script regenerates them.)

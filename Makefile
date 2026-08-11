@@ -40,14 +40,18 @@ CPU_CORE_OBJS = ds4_cpu.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
 ROCM_ARCH ?= gfx1151,gfx1201
-ROCM_CFLAGS ?= -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH)
+# ROCM_EXTRA_CFLAGS is the escape hatch for diagnostic -D switches (see the
+# rocm-no-wmma target below); it must land on every hipcc invocation, both the
+# per-object rules and the link line.
+ROCM_EXTRA_CFLAGS ?=
+ROCM_CFLAGS ?= -O3 -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH) $(ROCM_EXTRA_CFLAGS)
 ROCM_LDLIBS ?= -lm -pthread -L/opt/rocm/lib -lhipblas -lhipblaslt
 DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
 DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch test-opencode-eval dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-quality
+.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch test-opencode-eval dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-no-wmma rocm-quality
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -107,6 +111,7 @@ help:
 	@echo "  make cuda CUDA_ARCH=sm_N Build CUDA with an explicit nvcc -arch value"
 	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151 only"
 	@echo "  make rocm                Build ROCm for gfx1151 + gfx1201 (multi-arch)"
+	@echo "  make rocm-no-wmma        Same, with the batched WMMA prefill matmul compiled out (correctness reference)"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
 	@echo "  make test                Build and run tests"
 	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
@@ -141,6 +146,14 @@ rocm:
 		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD" \
 		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
 		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
+
+# Correctness reference build: same arches as `rocm`, but with the batched
+# WMMA prefill matmul (matmul_q8_0_f32_batch_wmma_4w_kernel) compiled out, so
+# its matrix-core output can be A/B'd against a non-matrix-core path. This is a
+# diagnostic switch for validating the one release path, not a shipped variant
+# -- `rocm` remains the only build anyone deploys.
+rocm-no-wmma:
+	$(MAKE) rocm ROCM_EXTRA_CFLAGS="$(ROCM_EXTRA_CFLAGS) -DDS4_ROCM_NO_WMMA"
 
 # Quality fixture scorer built against the ROCm backend, so the multi-case
 # fixture can be run on the pipeline / tensor-parallel build rather than only

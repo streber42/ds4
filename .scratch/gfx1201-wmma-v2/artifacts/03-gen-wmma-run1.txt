@@ -1,0 +1,4 @@
+# tag=wmma-run1 binary=/tmp/ds4.wmma md5=a60d5bcc5b5b7f01ee2ecec05d0b63d7
+# head=9e3ead1 date=2026-08-11T11:15:03-07:00
+# AMD_SERIALIZE_KERNEL=3 /tmp/ds4.wmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 -n 30 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/03-parity-prompt.txt --dump-logits .scratch/gfx1201-wmma-v2/artifacts/03-logits-wmma-run1.json 
+ds4: GPU config: 4 devices [0,1,2,3] requested, budgets 30,30,30,30 GB; auto=true

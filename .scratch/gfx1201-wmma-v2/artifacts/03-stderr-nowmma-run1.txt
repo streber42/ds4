@@ -1,0 +1,32 @@
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: per_tier_overhead = 3.99 GiB (cuda_tensor_parallel=0)
+ds4: GPU0 original vram_bytes = 29.79 GiB
+ds4: GPU0 post-overhead vram_bytes = 25.80 GiB
+ds4: GPU1 original vram_bytes = 29.79 GiB
+ds4: GPU1 post-overhead vram_bytes = 25.80 GiB
+ds4: GPU2 original vram_bytes = 29.79 GiB
+ds4: GPU2 post-overhead vram_bytes = 25.80 GiB
+ds4: GPU3 original vram_bytes = 29.79 GiB
+ds4: GPU3 post-overhead vram_bytes = 25.80 GiB
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-12 + embedding  (25.0 / 25.8 GB)
+  GPU1: layers 13-25  (24.1 / 25.8 GB)
+  GPU2: layers 26-38  (24.1 / 25.8 GB)
+  GPU3: layers 39-42 + output head  (7.9 / 25.8 GB)
+ds4: per-tier graph scratch reserved: 3.99 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: CUDA tier 0 (device 0) selective weights: 24.93 GiB in 393 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.95 GiB in 400 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.98 GiB in 406 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 7.90 GiB in 129 ranges
+ds4: memory: KV 0.39 GiB (raw 0.34 + compressed 0.05) + buffers 0.03 GiB = 0.42 GiB context
+ds4: memory detail: ctx=4096 prefill_cap=4096 raw_kv_rows=4096 compressed_kv_rows=1026 backend=rocm
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=16.00 MiB cached=0.19 GiB free=0.37 GiB reserve=1.59 GiB total=31.86 GiB)

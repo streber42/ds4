@@ -1,0 +1,43 @@
+W20260811 11:23:49.500212 132859097792064 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.001352 sec
+W20260811 11:23:49.500288 132859097792064 simple_timer.cpp:55] [rocprofv3] 'env AMD_SERIALIZE_KERNEL=3 /tmp/ds4.no_wmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/03-parity-prompt.txt -n 30' ::     0.000000 sec
+W20260811 11:23:49.553887 129119072883072 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.001186 sec
+W20260811 11:23:49.567906 129119072883072 simple_timer.cpp:55] [rocprofv3] '/tmp/ds4.no_wmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/03-parity-prompt.txt -n 30' ::     0.000000 sec
+W20260811 11:23:49.623145 129119072883072 tool.cpp:2422] HSA version 8.20.3 initialized (instance=0)
+ds4: Linux rocm backend set oom_score_adj=1000
+ds4: per_tier_overhead = 3.99 GiB (cuda_tensor_parallel=0)
+ds4: GPU0 original vram_bytes = 29.79 GiB
+ds4: GPU0 post-overhead vram_bytes = 25.80 GiB
+ds4: GPU1 original vram_bytes = 29.79 GiB
+ds4: GPU1 post-overhead vram_bytes = 25.80 GiB
+ds4: GPU2 original vram_bytes = 29.79 GiB
+ds4: GPU2 post-overhead vram_bytes = 25.80 GiB
+ds4: GPU3 original vram_bytes = 29.79 GiB
+ds4: GPU3 post-overhead vram_bytes = 25.80 GiB
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=0 (tier 0)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=1 (tier 1)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=2 (tier 2)
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 dev=3 (tier 3)
+ds4: ROCm peer access tier 0<->1: direct
+ds4: ROCm peer access tier 0<->2: direct
+ds4: ROCm peer access tier 0<->3: direct
+ds4: ROCm backend initialized on AMD Radeon AI Pro R9700 (sm_120)
+multi-GPU layout:
+  GPU0: layers 0-12 + embedding  (25.0 / 25.8 GB)
+  GPU1: layers 13-25  (24.1 / 25.8 GB)
+  GPU2: layers 26-38  (24.1 / 25.8 GB)
+  GPU3: layers 39-42 + output head  (7.9 / 25.8 GB)
+ds4: per-tier graph scratch reserved: 3.99 GiB (pre-subtracted from each GPU budget)
+ds4: peer access matrix (validated): 0->1 DIRECT 0->2 DIRECT 0->3 DIRECT 1->0 DIRECT 1->2 DIRECT 1->3 DIRECT 2->0 DIRECT 2->1 DIRECT 2->3 DIRECT 3->0 DIRECT 3->1 DIRECT 3->2 DIRECT
+ds4: CUDA tier 0 (device 0) selective weights: 24.93 GiB in 393 ranges
+ds4: CUDA tier 1 (device 1) selective weights: 23.95 GiB in 400 ranges
+ds4: CUDA tier 2 (device 2) selective weights: 23.98 GiB in 406 ranges
+ds4: CUDA tier 3 (device 3) selective weights: 7.90 GiB in 129 ranges
+ds4: memory: KV 0.39 GiB (raw 0.34 + compressed 0.05) + buffers 0.03 GiB = 0.42 GiB context
+ds4: memory detail: ctx=4096 prefill_cap=4096 raw_kv_rows=4096 compressed_kv_rows=1026 backend=rocm
+ds4: ROCm q8 fp16 cache budget exhausted; using q8 kernels (request=16.00 MiB cached=0.19 GiB free=0.37 GiB reserve=1.59 GiB total=31.86 GiB)
+ds4: prefill: 105.45 t/s, generation: 0.36 t/s
+W20260811 11:25:49.088677 129119072883072 simple_timer.cpp:55] [rocprofv3] '/tmp/ds4.no_wmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/03-parity-prompt.txt -n 30' ::   119.520772 sec
+E20260811 11:25:49.152424 129119072883072 output_stream.cpp:111] Opened result file: .scratch/gfx1201-wmma-v2/artifacts/03-trace-nowmma-gen/trace_kernel_trace.csv
+E20260811 11:25:49.327982 129119072883072 output_stream.cpp:111] Opened result file: .scratch/gfx1201-wmma-v2/artifacts/03-trace-nowmma-gen/trace_agent_info.csv
+W20260811 11:25:49.329591 129119072883072 simple_timer.cpp:55] [rocprofv3] output generation ::     0.185520 sec
+W20260811 11:25:49.334032 129119072883072 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.190061 sec

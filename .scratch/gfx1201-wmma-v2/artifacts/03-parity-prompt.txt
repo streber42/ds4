@@ -1,0 +1,164 @@
+Read the following engineering report carefully and then answer the question at the end.
+
+# ROCm/gfx1201 Tensor Parallelism — Proof of Concept
+
+Tag: `tp-parked-v1` (final state, 2026-08-04). The earlier tag `tp-poc-v1` (commit
+`59ba21f`) captures the mid-project state described from
+[the historical snapshot](#historical-snapshot-2026-07-26-tag-tp-poc-v1) down.
+
+Status: **parked.** Correct, validated, off by default, ~10× slower than pipeline. See
+[`docs/adr/0001-dense-tp4-parked-sequential-default.md`](../../docs/adr/0001-dense-tp4-parked-sequential-default.md)
+for the decision record.
+
+This is the shareable output of the PRD at [`PRD.md`](PRD.md): implementing the 31 stubbed
+ROCm tensor-parallel GPU entry points so DeepSeek-V4-Flash can run tensor-parallel across 4x
+AMD R9700 (gfx1201) instead of pipeline layer-split only.
+
+## Final state — 2026-08-04, tag `tp-parked-v1`
+
+The project ran to issue #66 plus a wrap-up (67 issues, all closed; #67/#68 filed as
+parked re-entry points). Outcome against the PRD's three success criteria:
+
+1. **Correct — met.** Native 4-rank TP (not the two-pairs Option A described in the
+   historical snapshot below; #25–#31 widened the design). Full 100-case
+   `score_official` fixture at HEAD `eaa8475`, under `AMD_SERIALIZE_KERNEL=3`:
+
+   | config | avg_nll | first_match | api_top1_rate | api_pair_rate |
+   |---|---|---|---|---|
+   | 4-GPU pipeline (PP=4) | 0.374151 | 64/100 | 0.8598 | 0.9888 |
+   | **4-GPU dense TP=4** | **0.369852** | **65/100** | **0.8615** | **0.9889** |
+
+   Both pass every PRD bar; 100/100 cases complete, zero arena failures, zero NaNs.
+
+2. **Faster — missed by ~10×.** TP=4 decode: **~2.87 t/s** (live 20-token runs,
+   serialized) vs the PP=4 baseline of **~22–28 t/s**. Root cause: dense TP=4 performs
+   **86 hidden-state all-reduces per token**; at batch=1 each is a synchronous PCIe
+   round-trip, so the sync bill alone exceeds the ~35 ms/token budget that 28 t/s
+   implies. The persistent-thread engine built to hide this latency (#50/#60) has a
+   cross-layer peer-partial buffer race (#66) and is **disabled by default**
+   (`DS4_TP4_THREADED_LAYERS` unset ⇒ legacy sequential path); even racing it measured
+   only 2.01 t/s.
+
+3. **Utilized — moot.** ~46–48% average GPU busy under the (racy) threaded engine vs
+   ~30% pipeline, but utilization at one-tenth the throughput is not a win.
+
+**What the work delivered anyway:** the shared-MoE unselected-expert fix (`0725d69`)
+corrected pipeline-path math (unselected expert slots no longer silently ran Expert 0);
+the slab/arena work (#59/#64/#65) eliminated ~1019 per-token PCIe host-register
+fallbacks; and the cross-device (`ds4_rocm_xdev`) and sharding-policy (`ds4_tp_shard.h`)
+modules are validated building blocks for any future sharding.
+
+**Re-entry points if resumed:** issue
+[#68](issues/68-explore-expert-parallel-decode.md) — expert-parallel decode (hipfire
+reports 25.6 t/s on identical hardware with EP sharding, which avoids the per-token
+hidden-state collectives) — then [#67](issues/67-fix-threaded-engine-peer-partial-race.md)
+— the threaded-engine race fix. In that order; see the ADR for why.
+
+The reproduction commands in the historical snapshot below still work at
+`tp-parked-v1`; the quality fixture still requires `AMD_SERIALIZE_KERNEL=3` for
+trustworthy output (the gfx1201 HWS dispatch-ordering issue is a hardware-scheduler
+behavior, confirmed unchanged under ROCm 7.14).
+
+---
+
+## Historical snapshot — 2026-07-26, tag `tp-poc-v1`
+
+Everything below describes the project mid-flight (issues #00–#18 era: two-rank design
+run as two pipelined TP pairs, throughput unmeasured post-fix). It is kept for the
+record; where it conflicts with the final state above, the final state is authoritative.
+
+## What works
+
+- All GPU compute entry points required for two-rank tensor parallelism are ported and
+  reachable (see [What was ported](#what-was-ported)).
+- Four-GPU topology (Option A: two TP pairs pipelined across 4 GPUs, see
+  [`issues/11-four-gpu-topology.md`](issues/11-four-gpu-topology.md)) loads the full 81 GiB
+  production quant and produces correct output — under `AMD_SERIALIZE_KERNEL=3`.
+- Graceful refusal and pipeline fallback for unsupported configurations
+  ([`issues/09-refusal-and-fallback.md`](issues/09-refusal-and-fallback.md)).
+- Container packaging works end-to-end for both TP and pipeline profiles
+  ([`issues/12-package-container.md`](issues/12-package-container.md)).
+
+## What does not work
+
+- **Default (unserialized) TP and pipeline dispatch produce incoherent output.** This is the
+  fast path — the one this whole PRD exists to make usable — and it is currently broken. See
+  [Known limitations](#known-limitations).
+- Post-dispatch-race-fix throughput has not been re-measured
+  ([`issues/19-re-measure-throughput-post-fix.md`](issues/19-re-measure-throughput-post-fix.md)
+  is still open); the numbers below are the last confirmed pre-fix baselines.
+- MoE hot-path optimization (#20) and kernel-launch-overhead reduction (#22) are blocked on
+  #19 and have not started.
+
+## Correctness evidence
+
+Authoritative signal: the official 100-case quality fixture (`score_official`,
+`gguf-tools/quality-testing/data/flash`), scored as `avg_nll` (lower is better) against the
+same-hardware ROCm pipeline reference. Full detail in
+[`experiment-log.md`](experiment-log.md).
+
+| config | avg_nll | first_match | avg_lcp | notes |
+|---|---|---|---|---|
+| 4-GPU pipeline, `AMD_SERIALIZE_KERNEL=3` | 0.373815 | 64/100 | 5.810 | reference baseline |
+| **4-GPU TP, `AMD_SERIALIZE_KERNEL=3`** | **0.369930** | **68/100** | **6.700** | **TP 1.04% better than pipeline — numerically sound** |
+| 4-GPU pipeline, default (unserialized), 2026-07-25 | 1.355060 | 1/100 | 0.010 | dispatch race — 3.6x worse |
+| 4-GPU TP, default (unserialized), 2026-07-25 | 3.076559 | 0/100 | 0.000 | dispatch race — 8.3x worse |
+| 4-GPU pipeline, default, post `xdev` fix, 2026-07-26 | 1.295131 | 0/100 | — | ~4% better, still broken |
+| 4-GPU TP, default, post `xdev` fix, 2026-07-26 | 3.086362 | 0/100 | — | unchanged — fix did not close the gap |
+
+**Reading this table:** under `AMD_SERIALIZE_KERNEL=3` (which forces every kernel launch to
+fully drain before the next starts), tensor-parallel output is quality-equivalent to — very
+slightly better than — the existing pipeline reference on the same hardware and quantization.
+This is the proof that the ported TP kernel math is correct: the per-case score spread is
+symmetric (largest TP win `case_052` -4.90 nll, largest TP loss `case_091` +3.30 nll), the
+signature of floating-point reassociation across a different sharding, not of a sharded-math
+bug. Without serialization, both multi-GPU paths are corrupted by a still-unresolved dispatch
+race (see below); a first attempted fix ([#18](issues/18-fix-cross-device-dispatch-race.md))
+closed one confirmed instance of the bug pattern but did not close the quality gap.
+
+Raw per-case TSVs and logs: [`quality-out/`](quality-out/).
+
+Plain-chat spot check (same conclusion, qualitative): under serialization,
+`"Explain C pointers in one sentence."` at `temp 0` produces fluent, reference-matching output
+in 4-GPU TP mode. Without serialization, both TP and pipeline mode produce sustained
+mixed-script, non-linguistic noise. See [`issues/11-four-gpu-topology.md`](issues/11-four-gpu-topology.md)
+and [`issues/12-package-container.md`](issues/12-package-container.md) for the full repro history.
+
+## Performance numbers
+
+Two independent measurements exist and have not been reconciled — recorded honestly rather
+than picking one:
+
+**`ds4-bench` sweep** (`--ctx-start 2048 --gen-tokens 256`, pre-fix, 2026-07-25, from
+[`issues/19-re-measure-throughput-post-fix.md`](issues/19-re-measure-throughput-post-fix.md)):
+
+| config | tok/s |
+|---|---|
+| Pipeline, default | 21.99 |
+| Pipeline, `AMD_SERIALIZE_KERNEL=3` | 13.57 |
+| TP, default | 12.17 |
+| TP, `AMD_SERIALIZE_KERNEL=3` | 6.77 |
+
+**Live server chat completion** (Option A, two TP pairs pipelined, 4-GPU, real 81 GiB model,
+from [`experiment-log.md`](experiment-log.md) 2026-07-25 container run):
+
+| config | decode tok/s | prefill tok/s |
+|---|---|---|
+| Pipeline (4-way layer split) | 28.0–28.5 | — |
+| TP (2 pairs pipelined) | 5.0–5.5 | 0.93 |
+
+The bench-tool number (~12 t/s default TP) and the live-server number (~5 t/s) were measured
+with different harnesses, likely different prompt/output lengths, and were never reconciled
+against each other — that reconciliation, plus a clean post-#18 baseline, is exactly what
+issue #19 (open) exists to produce. Both agree on the qualitative finding: **TP is currently
+slower than plain pipeline layer-split on this hardware**, the opposite of the PRD's stated
+goal, and PRD success criterion 2 ("faster than pipeline") is not yet met by either
+measurement.
+
+**Why the ~12 t/s (or ~5 t/s) ceiling.** Profiling ([#20](issues/20-moe-hot-path-optimization.md),
+[#22](issues/22-reduce-kernel-launch-overhead.md)) attributes this to two compounding costs
+specific to TP's finer-grained, more cross-device-heavy execution:
+
+- **MoE dominates GPU 
+
+Question: In two sentences, what was the main reason the tensor-parallel path was parked?

@@ -1,0 +1,31 @@
+step  wmma_sel        nowmma_sel      same  wmma_gap  nowmma_gap  top5_set_same
+   0  'We'            'We'            True     1.460       1.087  True
+   1  ' need'         ' need'         True     6.276       6.001  True
+   2  ' to'           ' to'           True    14.271      14.313  False
+   3  ' answer'       ' answer'       True     4.061       4.229  True
+   4  ':'             ':'             True     1.447       1.416  True
+   5  ' "'            ' "'            True     4.470       4.281  True
+   6  'In'            'In'            True     9.407       9.370  True
+   7  ' two'          ' two'          True    16.669      17.206  False
+   8  ' sentences'    ' sentences'    True    15.473      14.813  False
+   9  ','             ','             True    15.131      15.241  True
+  10  ' what'         ' what'         True    14.680      14.431  True
+  11  ' was'          ' was'          True    13.867      14.064  False
+  12  ' the'          ' the'          True    18.162      18.305  False
+  13  ' main'         ' main'         True    14.999      14.828  False
+  14  ' reason'       ' reason'       True    14.926      15.324  False
+  15  ' the'          ' the'          True    16.631      16.136  False
+  16  ' tensor'       ' tensor'       True    14.030      14.460  False
+  17  '-par'          '-par'          True    16.563      17.184  True
+  18  'allel'         'allel'         True    20.285      18.700  False
+  19  ' path'         ' path'         True    15.234      16.435  True
+  20  ' was'          ' was'          True    19.538      19.778  False
+  21  ' parked'       ' parked'       True    17.524      16.806  False
+  22  '?"'            '?"'            True     4.713       4.189  True
+  23  ' The'          ' The'          True     0.801       0.941  True
+  24  ' answer'       ' report'       False    0.388       0.478  True
+  25  ' should'       ' says'         False    4.796       1.405  False
+  26  ' be'           ' status'       False    4.656       0.678  False
+  27  ' based'        ':'             False    2.874       3.321  False
+  28  ' on'           ' parked'       False    8.249       1.684  False
+  29  ' the'          '.'             False   14.921       1.318  False

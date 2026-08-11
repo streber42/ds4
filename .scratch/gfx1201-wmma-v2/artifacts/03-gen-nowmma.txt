@@ -1,0 +1,4 @@
+# tag=nowmma mode=logprobs binary=/tmp/ds4.no_wmma md5=dc43c9ac8933ca19765e71623ba38dca
+# head=9e3ead1 date=2026-08-11T11:34:01-07:00
+# env AMD_SERIALIZE_KERNEL=3 /tmp/ds4.no_wmma -m /var/cache/llama/ds4-gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf --rocm --gpu-devices 0,1,2,3 --ctx 4096 --temp 0 --prompt-file .scratch/gfx1201-wmma-v2/artifacts/03-parity-prompt.txt -n 30 --logprobs-top-k 5 --dump-logprobs .scratch/gfx1201-wmma-v2/artifacts/03-logprobs-nowmma.json
+ds4: GPU config: 4 devices [0,1,2,3] requested, budgets 30,30,30,30 GB; auto=true
