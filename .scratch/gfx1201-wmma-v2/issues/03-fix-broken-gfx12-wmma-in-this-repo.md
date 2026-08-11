@@ -1,4 +1,4 @@
-Status: ready-for-human
+Status: closed
 # 03 — Replace this repo's broken raw-builtin gfx12 WMMA kernel with the verified rocwmma one
 
 **What to build:** This repo (`ds4-rebase`) still carries the *literal* `d9be29f`
@@ -59,22 +59,33 @@ Two consequences, and **both matter**:
       `rocm/ds4_rocm_q8.cuh` is replaced by the rocwmma-fragment implementation
       from `~/src/ds4` commit `3d7693f` (`git show 3d7693f -- rocm/ds4_rocm_q8.cuh`
       in that repo). Keep its explanatory comment — it records why the raw
-      builtin was abandoned. The gfx11 `#else` body must be left byte-identical.
+      builtin was abandoned. The gfx11 `#else` device-code body must be
+      unchanged — verified line-by-line — though the preprocessor scaffolding
+      around it may move. *(Wording amended 2026-08-11 at human sign-off: was
+      "left byte-identical". The hoist of the `DS4_RDNA4` split from inside the
+      loop body to whole-kernel granularity moves scaffolding only; the 109
+      statement lines are verified unchanged. See "What changed".)*
 - [x] A `DS4_ROCM_NO_WMMA` guard is introduced in this tree, matching
       `3d7693f`'s structure, so the kernel can be compiled out. **This is
       required, not optional**: without it there is no in-tree reference build
       to A/B correctness against, and no fallback if the WMMA path regresses.
 - [x] Both configurations build cleanly for `gfx1201` (no new warnings from the
       changed files).
-- [ ] Correctness, production mode (i.e. **not** under `score_official`, which
+- [x] Correctness, production mode (i.e. **not** under `score_official`, which
       gates this kernel off): with a `>256`-token prompt, `--dump-logits` argmax
-      and top-5 match the `DS4_ROCM_NO_WMMA` reference build, and a 30-token
-      greedy generation is byte-identical between the two builds. Record the
-      mean/max absolute logit error. Issue 01's reference figures for the fixed
-      kernel were mean 0.51 / max 2.98 on the other tree.
-      **PARTIAL — argmax, top-5 and mean/max are done and pass (mean 0.4035 /
-      max 3.899); the byte-identical-generation clause fails at step 24 of 30.
-      Left unchecked deliberately; see "The one AC that fails" below.**
+      and top-5 match the `DS4_ROCM_NO_WMMA` reference build, and in a 30-token
+      greedy generation token selection is identical at every step up to the
+      first step whose top-2 logit gap **in the build under test** falls below
+      the measured mean cross-build delta. Record the mean/max absolute logit
+      error. Issue 01's reference
+      figures for the fixed kernel were mean 0.51 / max 2.98 on the other tree.
+      *(Second clause amended 2026-08-11 at human sign-off: was "a 30-token
+      greedy generation is byte-identical between the two builds", which is not
+      a valid cross-build criterion on this tree — see "The greedy-parity clause,
+      and why it was amended" below. Met: mean 0.4035 / max 3.899; prompt 1
+      identical for steps 0–23, min gap 0.801, splits at the 0.388 tie at step
+      24; prompt 2 identical for steps 0–8, min gap 0.771, splits at the 0.050
+      tie at step 9.)*
 - [x] Dispatch traffic measured, same instrument issue 01 used: `rocprofv3
       --kernel-trace` on a short **non-quality-mode** prefill run *in this tree*,
       reporting the dispatch count of `matmul_q8_0_f32_batch_wmma_4w_kernel`.
@@ -104,10 +115,12 @@ Two consequences, and **both matter**:
 prefill on this tree's 4-GPU pipeline path. Every non-quality-mode prefill
 number ever measured in this repo had a half-computed Q8_0 matmul in it.**
 
-Five of the six acceptance criteria pass. The sixth passes on its numeric half
-and fails on its byte-identical-generation half, for a reason that is measured
-and quantified below rather than argued: leaving it unchecked and the issue
-`ready-for-human` is a spec call, not a technical unknown.
+All six acceptance criteria pass. AC 4 passed on its numeric half and failed on
+its original byte-identical-generation half; that clause was measured to be an
+invalid cross-build criterion on this tree and was amended at human sign-off on
+2026-08-11 (see "The greedy-parity clause, and why it was amended"). AC 1's
+"byte-identical" wording was amended in the same sign-off to "device-code body
+unchanged, scaffolding may move", which is what was verified.
 
 ### What changed
 
@@ -159,7 +172,7 @@ including traced vs untraced, so `rocprofv3` does not perturb the result.
 | top-5 | `[2581, 671, 10318, 85667, 110137]` | identical, same order | **match** |
 | mean abs logit error | — | 0.403549 | recorded |
 | max abs logit error | — | 3.898771 (token 43014) | recorded |
-| 30-token greedy generation | identical for steps 0–23, diverges at step 24 | | **fails** |
+| 30-token greedy generation | identical for steps 0–23, diverges at step 24 (the run's first sub-delta tie) | | **meets the amended clause** |
 
 Comparable to issue 01's 0.51 / 2.98 for the same kernel body, on a longer
 accumulation chain (43 layers across 4 GPUs vs single-GPU) and without
@@ -174,7 +187,7 @@ the primary evidence for correctness is the CPU-reference verification of this
 exact body in issue 01 (mean_abs 0.021 vs 106.6 for the raw-builtin version),
 plus the argmax/top-5 agreement here.
 
-### The one AC that fails, and exactly why
+### The greedy-parity clause, and why it was amended
 
 The two builds emit identical tokens for steps 0–23 and diverge at step 24:
 
@@ -221,21 +234,57 @@ Steps 0–8 match exactly, with gaps of 0.771–15.4. Two independent prompts, t
 divergences, each landing on precisely that run's tightest tie and nowhere
 else. (`artifacts/03-tiefree-step-compare.txt`.)
 
-So the clause is not met as written, and the reason is now a measured property
-of this model on this tree rather than a hypothesis: a 30-token greedy window
-here reliably contains at least one sub-0.5-logit tie (the model opens every
-response with a free-form `"We need to ..."` reasoning preamble, which is dense
-in stylistic near-ties), and any two builds differing by ~0.4 in mean logit —
-including two *correct* builds with different rounding — will split on it.
+So the clause was not met as originally written, and the reason is a measured
+property of this model on this tree rather than a hypothesis: a 30-token greedy
+window here reliably contains at least one sub-0.5-logit tie (the model opens
+every response with a free-form `"We need to ..."` reasoning preamble, which is
+dense in stylistic near-ties), and any two builds differing by ~0.4 in mean
+logit — including two *correct* builds with different rounding — will split on
+it.
 
 That makes byte-identical greedy generation the wrong cross-build parity
-criterion on this tree, not a failing grade for this kernel. Deciding what
-replaces it in the AC is the human's call. The obvious candidate, and what the
-evidence above actually supports, is: **identical token selection at every step
-whose top-2 logit gap exceeds the measured mean cross-build delta** — which
-both prompts satisfy without exception. Prompt-shopping for a tie-free window
-was deliberately not pursued past the one pre-registered attempt; it would be
-outcome-shopping, and it would test less than the criterion above.
+criterion on this tree, not a failing grade for this kernel.
+
+**Resolution (human sign-off, 2026-08-11).** The clause was replaced by a
+prefix property: *token selection is identical at every step up to the first
+step whose top-2 logit gap **in the build under test** falls below the measured
+mean cross-build delta (0.4035).*
+
+All gaps below are the **WMMA build's** — the build under test — consistent
+with the pre-registered screen in `03-tiefree-step-compare.txt`, which also
+screened on the WMMA build alone:
+
+| prompt | identical prefix | min WMMA gap in prefix | first sub-delta WMMA gap | splits at |
+|---|---|---|---|---|
+| `03-parity-prompt.txt` | steps 0–23 | 0.801 | 0.388 (step 24) | step 24 |
+| `03-tiefree-prompt.txt` | steps 0–8 | 0.771 | 0.050 (step 9) | step 9 |
+
+Naming the build is load-bearing, not pedantry: prompt 1's step 24 is the only
+near-threshold step in either run and it straddles the delta — 0.388 in WMMA,
+0.478 in NO_WMMA — so an unpinned criterion would return opposite verdicts on
+the same data. Prompt 2's step 9 is sub-delta in both builds (0.050 / 0.151)
+and does not discriminate. `min` of the two builds' gaps gives identical
+verdicts on this dataset and is an acceptable substitute, but the rule must
+name one or the other.
+
+Both prompts satisfy it exactly — the split lands on the first sub-delta step
+in each run and on no earlier step. It is deliberately a *prefix* property: the
+steps after the first divergence are not cross-build comparisons at all, since
+each build is then conditioning on its own different context, so their gaps and
+selections carry no parity information. (An earlier draft of this section
+proposed the unscoped form "identical at every step whose gap exceeds the mean
+delta"; that form is refuted by its own table — steps 25–29 above have gaps of
+2.9–14.9 and all differ — and was corrected before sign-off.)
+
+The comparable sample is therefore 33 steps, not 60. The alternative that would
+test all 30 positions under identical context is teacher forcing, which this
+binary cannot currently do: the `--dump-logprobs` loop at `ds4_cli.c:898` evals
+its own argmax, so it self-conditions by construction. It was offered at
+sign-off and declined as out of proportion to the remaining doubt.
+
+Prompt-shopping for a tie-free window was deliberately not pursued past the one
+pre-registered attempt; it would be outcome-shopping, and it would test less
+than the criterion above.
 
 ### Dispatch traffic — the blast radius
 
@@ -279,7 +328,25 @@ make the new kernel more reachable than the broken one already was.
 
 ## Comments
 
-**Status `ready-for-human`.** Everything in scope is implemented, built, and
+**Closed 2026-08-11** in a paired human session. Two AC wordings were amended
+and both ACs then checked off; no code, build or measurement changed, and the
+246-vs-0 blast-radius conclusion is untouched.
+
+- **AC 4** — the byte-identical-generation clause was replaced by the prefix
+  criterion above. The wording the agent originally recommended was reviewed and
+  found to be refuted by its own step table (post-divergence steps are not
+  comparisons); the scoped prefix form was adopted instead. Teacher forcing over
+  a fixed continuation was offered as the alternative that removes the confound
+  outright, and declined: it needs a forced-token path that `ds4_cli.c:898` does
+  not have (the logprobs loop evals its own argmax), and the remaining doubt did
+  not justify the change plus a GPU-lock session.
+- **AC 1** — "the gfx11 `#else` body must be left byte-identical" was amended to
+  "device-code body unchanged, verified line-by-line; preprocessor scaffolding
+  may move", which is what the hoist to whole-kernel granularity actually did
+  and what the 109-statement-line diff actually verified. The `[x]` had been
+  claimed against the stricter wording.
+
+**Agent's closing state (preserved).** Everything in scope was implemented, built, and
 measured; `make test-rocm` passes 6/6 kernel comparisons plus the cross-device
 and TP-refusal suites on the default multi-arch build. (`make test` was run and
 does not complete on this host, for a pre-existing reason unrelated to this
@@ -287,16 +354,10 @@ change: `make: /usr/local/cuda/bin/nvcc: No such file or directory` /
 `*** [Makefile:278: ds4_cuda.o] Error 127` — `CORE_OBJS` include a CUDA
 translation unit regardless of backend, and this is a ROCm-only machine.)
 
-The single open item is the byte-identical-generation clause of AC 4. It is
-unmet, and the cause is characterized and replicated on two independent
-prompts: each build's greedy path splits at that run's single sub-0.5-logit
-tie and agrees at every other step. Recommended resolution — replace the
-clause with "identical selection at every step whose top-2 logit gap exceeds
-the measured mean cross-build delta", which the evidence satisfies without
-exception and which loses nothing as a corruption detector. Re-running against
-a tie-free prompt is the alternative, but one pre-registered attempt at
-building such a prompt already failed its own screen (0.050 at step 9), and
-chasing further would be outcome-shopping.
+The single open item was the byte-identical-generation clause of AC 4 —
+resolved by the amendment recorded above. The cause is characterized and
+replicated on two independent prompts: each build's greedy path splits at that
+run's first sub-delta tie and agrees at every step before it.
 
 **Finding about the other tree, not acted on.** `~/src/ds4`'s `Makefile:191`
 passes `ROCM_EXTRA_CFLAGS=-DDS4_ROCM_NO_WMMA` to its `rdna4` target, but nothing

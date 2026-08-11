@@ -242,3 +242,6 @@
 "[tool] Bash {\"command\":\"cd /home/murphy/.claude/projects/-home-murphy-src-ds4-rebase/memory && cat >> MEMORY.md <<'EOF'\\n- [Greedy generation isn't a parity criterion](greedy-generation-not-a-parity-criterion.md)…"
 "[tool_result] - [#66 closed: TP=4 threaded-engine race](tp4-threaded-engine-race-66.md) — 2026-08-03 commit aadec9c: the #50 persistent-thread engine has a cross-layer peer-partial buffer race; default restored to legacy sequential path via DS4_TP4_THREADED_LAYERS=0; real fix still needed before re-enabling\n- [Gr…"
 "[tool] Bash {\"command\":\"git add .scratch/gfx1201-wmma-v2/ && git commit -q -F - <<'EOF'\\ndocs(gfx1201-wmma-v2): 03 — replicate the greedy-divergence explanation on a second prompt\\n\\nThe step-24 divergence in the…"
+"[tool_result] 0ae0b5d docs(gfx1201-wmma-v2): 03 — replicate the greedy-divergence explanation on a second prompt\n42f39c1 feat(gfx1201-wmma-v2): 03 — Replace this repo's broken raw-builtin gfx12 WMMA kernel with the verified rocwmma one"
+"[PROMISE] READY-FOR-HUMAN"
+"[done] success: Work is committed and the GPU lock released.\n\n## What I did\n\nReplaced this tree's broken raw-builtin gfx12 WMMA kernel with the verified rocwmma body from `~/src/ds4` `3d7693f`, added the missing `DS4_ROCM_NO_WMMA` escape hatch, and measured the bug's blast radius.\n\n**Code** (`42f39c1`): `matmul_q8_… (cost $13.5954015)"
